@@ -335,7 +335,7 @@ static size_t merge_dup_regions(PlantsdsDupRegion *regions, size_t n,
         strcmp(regions[i].chrom, regions[out].chrom) == 0 &&
         (regions[i].window_idx <=
              regions[out].window_idx + adjacency_threshold ||
-          regions[i].start <= regions[out].end)) {
+         regions[i].start <= regions[out].end)) {
       if (regions[i].end > regions[out].end)
         regions[out].end = regions[i].end;
       if (regions[i].window_idx > regions[out].window_idx)
@@ -469,61 +469,77 @@ static void stream_pangenome_worker(void *data, long i, int tid) {
   gzclose(fp);
 }
 
-static void extract_flankings(char **files, int num_files, const Plantsds *r,
-                              uint64_t scale, PlantsdsDupRegion *regions,
-                              size_t n_regions, size_t flank_size) {
-  for (int f = 0; f < num_files; f++) {
-    char bname[256];
-    get_basename(files[f], bname, sizeof(bname));
+typedef struct {
+  char **files;
+  const Plantsds *r;
+  uint64_t scale;
+  PlantsdsDupRegion *regions;
+  size_t n_regions;
+  size_t flank_size;
+} FlankingWorkerData;
 
-    gzFile fp = gzopen(files[f], "r");
-    if (!fp)
-      continue;
-    kseq_t *ks = kseq_init(fp);
-    if (!ks) {
-      gzclose(fp);
-      continue;
-    }
+static void extract_flankings_worker(void *data, long f, int tid) {
+  (void)tid;
+  FlankingWorkerData *w = (FlankingWorkerData *)data;
 
-    while (kseq_read(ks) >= 0) {
-      char chr_name[512];
-      snprintf(chr_name, sizeof(chr_name), "%s-%s", bname, ks->name.s);
+  char bname[256];
+  get_basename(w->files[f], bname, sizeof(bname));
 
-      for (size_t i = 0; i < n_regions; i++) {
-        if (strcmp(regions[i].chrom, chr_name) == 0) {
-          size_t start = regions[i].start;
-          size_t end = regions[i].end;
-          size_t left_start = start > flank_size ? start - flank_size : 0;
-          size_t right_end =
-              end + flank_size > ks->seq.l ? ks->seq.l : end + flank_size;
+  gzFile fp = gzopen(w->files[f], "r");
+  if (!fp)
+    return;
+  kseq_t *ks = kseq_init(fp);
+  if (!ks) {
+    gzclose(fp);
+    return;
+  }
 
-          size_t left_len = start - left_start;
-          size_t right_len = right_end - end;
+  while (kseq_read(ks) >= 0) {
+    char chr_name[512];
+    snprintf(chr_name, sizeof(chr_name), "%s-%s", bname, ks->name.s);
 
-          /* Free previous flanking sketch if being overwritten */
-          free(regions[i].flank_sketch.hashes);
-          regions[i].flank_sketch.hashes = NULL;
-          regions[i].flank_sketch.sketch_size = 0;
+    for (size_t i = 0; i < w->n_regions; i++) {
+      if (strcmp(w->regions[i].chrom, chr_name) == 0) {
+        size_t start = w->regions[i].start;
+        size_t end = w->regions[i].end;
+        size_t left_start = start > w->flank_size ? start - w->flank_size : 0;
+        size_t right_end =
+            end + w->flank_size > ks->seq.l ? ks->seq.l : end + w->flank_size;
 
-          uint8_t *flank_seq = malloc(left_len + right_len);
-          if (left_len > 0)
-            memcpy(flank_seq, ks->seq.s + left_start, left_len);
-          if (right_len > 0)
-            memcpy(flank_seq + left_len, ks->seq.s + end, right_len);
+        size_t left_len = start - left_start;
+        size_t right_len = right_end - end;
 
-          HashPool pool;
-          init_hash_pool(&pool, UINT64_MAX / scale);
-          extract_hash(r, &pool, flank_seq, left_len + right_len);
-          finalize_hash_pool(&pool, &regions[i].flank_sketch.hashes,
-                             &regions[i].flank_sketch.sketch_size);
+        /* Free previous flanking sketch if being overwritten */
+        free(w->regions[i].flank_sketch.hashes);
+        w->regions[i].flank_sketch.hashes = NULL;
+        w->regions[i].flank_sketch.sketch_size = 0;
 
-          free(flank_seq);
-        }
+        uint8_t *flank_seq = malloc(left_len + right_len);
+        if (left_len > 0)
+          memcpy(flank_seq, ks->seq.s + left_start, left_len);
+        if (right_len > 0)
+          memcpy(flank_seq + left_len, ks->seq.s + end, right_len);
+
+        HashPool pool;
+        init_hash_pool(&pool, UINT64_MAX / w->scale);
+        extract_hash(w->r, &pool, flank_seq, left_len + right_len);
+        finalize_hash_pool(&pool, &w->regions[i].flank_sketch.hashes,
+                           &w->regions[i].flank_sketch.sketch_size);
+
+        free(flank_seq);
       }
     }
-    kseq_destroy(ks);
-    gzclose(fp);
   }
+  kseq_destroy(ks);
+  gzclose(fp);
+}
+
+static void extract_flankings(char **files, int num_files, const Plantsds *r,
+                              uint64_t scale, PlantsdsDupRegion *regions,
+                              size_t n_regions, size_t flank_size,
+                              int n_threads) {
+  FlankingWorkerData w = {files, r, scale, regions, n_regions, flank_size};
+  kt_for(n_threads, extract_flankings_worker, &w, num_files);
 }
 
 typedef struct {
@@ -655,87 +671,140 @@ static inline uint64_t encode_pair(uint32_t a, uint32_t b) {
 /* khash set for uint64_t keys (candidate pair deduplication) */
 KHASH_SET_INIT_INT64(pair_set)
 
-/* Phase 1: Discover candidate pairs via partitioned inverted index. */
-static size_t discover_candidates(const uint64_t *all_hashes,
-                                  WindowCoord *coords, size_t n_windows,
-                                  size_t window_size, uint64_t **out_pairs) {
-  khash_t(pair_set) *seen = kh_init(pair_set);
+typedef struct {
+  const uint64_t *all_hashes;
+  WindowCoord *coords;
+  size_t n_windows;
+  size_t window_size;
+  uint64_t **t_pairs;
+  size_t *t_n_pairs;
+  size_t *t_cap_pairs;
+} DiscoverWorkerData;
 
-  /* Result array of encoded candidate pairs */
-  uint64_t *pairs = NULL;
-  size_t n_pairs = 0, cap_pairs = 0;
+static void discover_worker(void *data, long p, int tid) {
+  DiscoverWorkerData *w_data = (DiscoverWorkerData *)data;
 
   /* Partition boundaries: divide [0, UINT64_MAX] into NUM_PARTITIONS */
   uint64_t part_size = UINT64_MAX / NUM_PARTITIONS;
+  uint64_t lo = part_size * (uint64_t)p;
+  uint64_t hi = (p == NUM_PARTITIONS - 1) ? UINT64_MAX
+                                          : part_size * (uint64_t)(p + 1) - 1;
 
-  for (int p = 0; p < NUM_PARTITIONS; p++) {
-    uint64_t lo = part_size * (uint64_t)p;
-    uint64_t hi = (p == NUM_PARTITIONS - 1) ? UINT64_MAX
-                                            : part_size * (uint64_t)(p + 1) - 1;
+  /* Collect (hash, window_id) entries falling in [lo, hi] */
+  HashWindowEntry *entries = NULL;
+  size_t n_entries = 0, cap_entries = 0;
 
-    /* Collect (hash, window_id) entries falling in [lo, hi] */
-    HashWindowEntry *entries = NULL;
-    size_t n_entries = 0, cap_entries = 0;
+  for (size_t w = 0; w < w_data->n_windows; w++) {
+    const uint64_t *h = w_data->all_hashes + w_data->coords[w].sketch_offset;
+    size_t sz = w_data->coords[w].sketch_size;
 
-    for (size_t w = 0; w < n_windows; w++) {
-      const uint64_t *h = all_hashes + coords[w].sketch_offset;
-      size_t sz = coords[w].sketch_size;
+    size_t start = lower_bound_u64(h, sz, lo);
+    size_t end = lower_bound_u64(h, sz, hi + 1 > hi ? hi + 1 : UINT64_MAX);
+    if (hi == UINT64_MAX)
+      end = sz;
 
-      size_t start = lower_bound_u64(h, sz, lo);
-      size_t end = lower_bound_u64(h, sz, hi + 1 > hi ? hi + 1 : UINT64_MAX);
-      if (hi == UINT64_MAX)
-        end = sz;
-
-      for (size_t k = start; k < end; k++) {
-        DA_PUSH(entries, n_entries, cap_entries,
-                ((HashWindowEntry){h[k], (uint32_t)w}));
-      }
+    for (size_t k = start; k < end; k++) {
+      DA_PUSH(entries, n_entries, cap_entries,
+              ((HashWindowEntry){h[k], (uint32_t)w}));
     }
+  }
 
-    if (n_entries == 0) {
-      free(entries);
-      continue;
-    }
+  if (n_entries == 0) {
+    free(entries);
+    return;
+  }
 
-    /* Sort by hash value within this partition */
-    qsort(entries, n_entries, sizeof(HashWindowEntry), compare_hash_entry);
+  /* Sort by hash value within this partition */
+  qsort(entries, n_entries, sizeof(HashWindowEntry), compare_hash_entry);
 
-    /* Scan runs of identical hashes to find candidate pairs */
-    size_t i = 0;
-    while (i < n_entries) {
-      size_t j = i + 1;
-      while (j < n_entries && entries[j].hash == entries[i].hash)
-        j++;
-      size_t run_len = j - i;
+  khash_t(pair_set) *seen = kh_init(pair_set);
 
-      if (run_len >= 2 && run_len <= MAX_RUN_LEN) {
-        for (size_t a = i; a < j; a++) {
-          for (size_t b = a + 1; b < j; b++) {
-            uint32_t wa = entries[a].window_id;
-            uint32_t wb = entries[b].window_id;
-            /* Skip overlapping windows on same chromosome */
-            if (coords[wa].seq_id == coords[wb].seq_id &&
-                ABS_DIFF(coords[wa].start, coords[wb].start) < window_size)
-              continue;
+  /* Scan runs of identical hashes to find candidate pairs */
+  size_t i = 0;
+  while (i < n_entries) {
+    size_t j = i + 1;
+    while (j < n_entries && entries[j].hash == entries[i].hash)
+      j++;
+    size_t run_len = j - i;
 
-            /* Deduplicate candidate pair across partitions */
-            uint64_t pk = encode_pair(wa, wb);
-            int ret;
-            kh_put(pair_set, seen, pk, &ret);
-            if (ret) { /* new pair, not seen before */
-              DA_PUSH(pairs, n_pairs, cap_pairs, pk);
-            }
+    if (run_len >= 2 && run_len <= MAX_RUN_LEN) {
+      for (size_t a = i; a < j; a++) {
+        for (size_t b = a + 1; b < j; b++) {
+          uint32_t wa = entries[a].window_id;
+          uint32_t wb = entries[b].window_id;
+          /* Skip overlapping windows on same chromosome */
+          if (w_data->coords[wa].seq_id == w_data->coords[wb].seq_id &&
+              ABS_DIFF(w_data->coords[wa].start, w_data->coords[wb].start) <
+                  w_data->window_size)
+            continue;
+
+          /* Deduplicate candidate pair within this thread to save memory */
+          uint64_t pk = encode_pair(wa, wb);
+          int ret;
+          kh_put(pair_set, seen, pk, &ret);
+          if (ret) { /* new pair, not seen before */
+            DA_PUSH(w_data->t_pairs[tid], w_data->t_n_pairs[tid],
+                    w_data->t_cap_pairs[tid], pk);
           }
         }
       }
-      i = j;
     }
-    free(entries);
+    i = j;
+  }
+  free(entries);
+  kh_destroy(pair_set, seen);
+}
+
+/* Phase 1: Discover candidate pairs via partitioned inverted index. */
+static size_t discover_candidates(const uint64_t *all_hashes,
+                                  WindowCoord *coords, size_t n_windows,
+                                  size_t window_size, uint64_t **out_pairs,
+                                  int n_threads) {
+  DiscoverWorkerData w;
+  w.all_hashes = all_hashes;
+  w.coords = coords;
+  w.n_windows = n_windows;
+  w.window_size = window_size;
+  w.t_pairs = calloc(n_threads, sizeof(uint64_t *));
+  w.t_n_pairs = calloc(n_threads, sizeof(size_t));
+  w.t_cap_pairs = calloc(n_threads, sizeof(size_t));
+
+  kt_for(n_threads, discover_worker, &w, NUM_PARTITIONS);
+
+  size_t total_pairs = 0;
+  for (int t = 0; t < n_threads; t++) {
+    total_pairs += w.t_n_pairs[t];
   }
 
-  kh_destroy(pair_set, seen);
+  uint64_t *pairs = total_pairs ? malloc(total_pairs * sizeof(uint64_t)) : NULL;
+  size_t offset = 0;
+  for (int t = 0; t < n_threads; t++) {
+    if (w.t_n_pairs[t] > 0) {
+      memcpy(pairs + offset, w.t_pairs[t], w.t_n_pairs[t] * sizeof(uint64_t));
+      offset += w.t_n_pairs[t];
+      free(w.t_pairs[t]);
+    }
+  }
+  free(w.t_pairs);
+  free(w.t_n_pairs);
+  free(w.t_cap_pairs);
+
+  if (total_pairs > 0) {
+    qsort(pairs, total_pairs, sizeof(uint64_t), compare_uint64);
+    size_t u = 0;
+    for (size_t i = 0; i < total_pairs; i++) {
+      if (u == 0 || pairs[i] != pairs[u - 1]) {
+        pairs[u++] = pairs[i];
+      }
+    }
+    total_pairs = u;
+    uint64_t *np = realloc(pairs, total_pairs * sizeof(uint64_t));
+    if (np)
+      pairs = np;
+  }
+
   *out_pairs = pairs;
-  return n_pairs;
+  return total_pairs;
 }
 
 /* Phase 2 worker: compute distance for a single candidate pair */
@@ -954,13 +1023,13 @@ static void build_duplicate_regions(UnionFind *uf, size_t num_sketches,
 
     DA_PUSH(dup_regions, n_dup_regions, cap_dup_regions,
             ((PlantsdsDupRegion){.chrom = strdup(chrom_name),
-                                .start = coords[i].start,
-                                .end = coords[i].end,
-                                .cluster_id = strdup(label),
-                                .copy_count = comp_size[fam],
-                                .subcluster_id = 0,
-                                .flank_sketch = {0},
-                                .window_idx = coords[i].window_idx}));
+                                 .start = coords[i].start,
+                                 .end = coords[i].end,
+                                 .cluster_id = strdup(label),
+                                 .copy_count = comp_size[fam],
+                                 .subcluster_id = 0,
+                                 .flank_sketch = {0},
+                                 .window_idx = coords[i].window_idx}));
   }
   free(final_is_sd);
   free(comp_size);
@@ -975,8 +1044,8 @@ static void build_duplicate_regions(UnionFind *uf, size_t num_sketches,
   *out_n_regions = n_dup_regions;
 }
 
-static void write_dup_bed(const char *out_prefix, PlantsdsDupRegion *dup_regions,
-                          size_t n_merged) {
+static void write_dup_bed(const char *out_prefix,
+                          PlantsdsDupRegion *dup_regions, size_t n_merged) {
   char path_buf[PATH_MAX];
   snprintf(path_buf, sizeof(path_buf), "%s.dup.bed", out_prefix);
   FILE *out_bed = fopen(path_buf, "w");
@@ -1023,7 +1092,7 @@ int run_pangenome(int num_files, char **files, size_t flank_size,
   fprintf(stderr, "[plantsds] Discovering candidate pairs ...\n");
   uint64_t *cand_pairs = NULL;
   size_t n_cands = discover_candidates(all_hashes, coords, num_sketches,
-                                       window_size, &cand_pairs);
+                                       window_size, &cand_pairs, n_threads);
   fprintf(stderr,
           "[plantsds] Found %zu candidate pairs, computing distances...\n",
           n_cands);
@@ -1042,7 +1111,7 @@ int run_pangenome(int num_files, char **files, size_t flank_size,
   fprintf(stderr,
           "[INFO] Extracting flanking sequences for sub-clustering...\n");
   extract_flankings(files, num_files, r, scale, dup_regions, n_merged,
-                    flank_size == 0 ? window_size / 5 : flank_size);
+                    flank_size == 0 ? window_size / 5 : flank_size, n_threads);
 
   fprintf(stderr, "[INFO] Sub-clustering based on flanking similarities...\n");
   perform_subclustering(dup_regions, n_merged, subcluster_dist, n_threads,
