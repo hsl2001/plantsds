@@ -41,7 +41,7 @@ typedef struct {
 
 typedef struct {
   uint32_t *parent;
-  uint32_t *rank;
+  uint8_t *rank; /* rank ≤ log2(n) ≤ 31, uint8_t suffices */
   size_t n;
 } UnionFind;
 

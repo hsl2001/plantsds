@@ -240,7 +240,7 @@ PlantsdsDistResult calculate_plantsds_dist(const PlantsdsSketch *ref,
 void init_unionfind(UnionFind *uf, size_t n) {
   uf->n = n;
   uf->parent = (uint32_t *)malloc(n * sizeof(uint32_t));
-  uf->rank = (uint32_t *)calloc(n, sizeof(uint32_t));
+  uf->rank = (uint8_t *)calloc(n, sizeof(uint8_t));
   for (size_t i = 0; i < n; i++)
     uf->parent[i] = (uint32_t)i;
 }
@@ -412,6 +412,11 @@ static void stream_pangenome_worker(void *data, long i, int tid) {
     w->seq_lens[w->num_seqs].genome = strdup(w->bname);
     w->seq_lens[w->num_seqs].seq = strdup(ks->name.s);
     w->num_seqs++;
+
+    /* Pre-allocate estimated windows to reduce realloc overhead */
+    size_t est_windows =
+        len >= w->window_size ? (len - w->window_size) / w->step_size + 1 : 0;
+    DA_RESERVE(w->coords, w->cap_sketches, w->num_sketches + est_windows);
 
     uint32_t current_window_idx = 0;
     for (size_t idx = 0; idx + w->window_size <= len;
@@ -668,21 +673,40 @@ static inline uint64_t encode_pair(uint32_t a, uint32_t b) {
   return a < b ? ((uint64_t)a << 32) | b : ((uint64_t)b << 32) | a;
 }
 
-/* khash set for uint64_t keys (candidate pair deduplication) */
-KHASH_SET_INIT_INT64(pair_set)
+/* Bloom filter for approximate pair deduplication (replaces khash pair_set) */
+#define BLOOM_SIZE_BITS (1 << 22) /* 4M bits = 512KB per thread */
+#define BLOOM_SIZE_BYTES (BLOOM_SIZE_BITS / 8)
+#define BLOOM_MASK (BLOOM_SIZE_BITS - 1)
+
+static inline int bloom_test_and_set(uint8_t *bloom, uint64_t key) {
+  uint32_t h1 = (uint32_t)(key)&BLOOM_MASK;
+  uint32_t h2 = (uint32_t)(key >> 22) & BLOOM_MASK;
+  int was_set =
+      ((bloom[h1 >> 3] >> (h1 & 7)) & 1) & ((bloom[h2 >> 3] >> (h2 & 7)) & 1);
+  bloom[h1 >> 3] |= (uint8_t)(1 << (h1 & 7));
+  bloom[h2 >> 3] |= (uint8_t)(1 << (h2 & 7));
+  return was_set;
+}
 
 typedef struct {
   const uint64_t *all_hashes;
   WindowCoord *coords;
   size_t n_windows;
   size_t window_size;
-  uint64_t **t_pairs;
-  size_t *t_n_pairs;
-  size_t *t_cap_pairs;
-} DiscoverWorkerData;
+  double max_dist;
+  uint32_t kmer_size;
+  PlantsdsDupEdge **t_edges;
+  size_t *t_n_edges;
+  size_t *t_cap_edges;
+  uint8_t **t_bloom;
+} DiscoverComputeData;
 
-static void discover_worker(void *data, long p, int tid) {
-  DiscoverWorkerData *w_data = (DiscoverWorkerData *)data;
+/* Fused Phase 1+2 worker: discover candidates and compute distances in one
+ * pass. Replaces discover_worker + compute_candidate_dist. Uses Bloom filter
+ * instead of khash for approximate deduplication. Pre-counts partition entries
+ * to allocate exact memory. */
+static void discover_compute_worker(void *data, long p, int tid) {
+  DiscoverComputeData *w_data = (DiscoverComputeData *)data;
 
   /* Partition boundaries: divide [0, UINT64_MAX] into NUM_PARTITIONS */
   uint64_t part_size = UINT64_MAX / NUM_PARTITIONS;
@@ -690,36 +714,41 @@ static void discover_worker(void *data, long p, int tid) {
   uint64_t hi = (p == NUM_PARTITIONS - 1) ? UINT64_MAX
                                           : part_size * (uint64_t)(p + 1) - 1;
 
-  /* Collect (hash, window_id) entries falling in [lo, hi] */
-  HashWindowEntry *entries = NULL;
-  size_t n_entries = 0, cap_entries = 0;
+  /* Pre-count entries for exact allocation (avoids realloc overhead) */
+  size_t total_in_partition = 0;
+  for (size_t w = 0; w < w_data->n_windows; w++) {
+    const uint64_t *h = w_data->all_hashes + w_data->coords[w].sketch_offset;
+    size_t sz = w_data->coords[w].sketch_size;
+    size_t s = lower_bound_u64(h, sz, lo);
+    size_t e = (hi == UINT64_MAX) ? sz : lower_bound_u64(h, sz, hi + 1);
+    total_in_partition += e - s;
+  }
+
+  if (total_in_partition == 0)
+    return;
+
+  /* Allocate exact size for entries */
+  HashWindowEntry *entries =
+      malloc(total_in_partition * sizeof(HashWindowEntry));
+  size_t n_entries = 0;
 
   for (size_t w = 0; w < w_data->n_windows; w++) {
     const uint64_t *h = w_data->all_hashes + w_data->coords[w].sketch_offset;
     size_t sz = w_data->coords[w].sketch_size;
+    size_t s = lower_bound_u64(h, sz, lo);
+    size_t e = (hi == UINT64_MAX) ? sz : lower_bound_u64(h, sz, hi + 1);
 
-    size_t start = lower_bound_u64(h, sz, lo);
-    size_t end = lower_bound_u64(h, sz, hi + 1 > hi ? hi + 1 : UINT64_MAX);
-    if (hi == UINT64_MAX)
-      end = sz;
-
-    for (size_t k = start; k < end; k++) {
-      DA_PUSH(entries, n_entries, cap_entries,
-              ((HashWindowEntry){h[k], (uint32_t)w}));
-    }
-  }
-
-  if (n_entries == 0) {
-    free(entries);
-    return;
+    for (size_t k = s; k < e; k++)
+      entries[n_entries++] = (HashWindowEntry){h[k], (uint32_t)w};
   }
 
   /* Sort by hash value within this partition */
   qsort(entries, n_entries, sizeof(HashWindowEntry), compare_hash_entry);
 
-  khash_t(pair_set) *seen = kh_init(pair_set);
+  /* Reset bloom filter for this partition */
+  memset(w_data->t_bloom[tid], 0, BLOOM_SIZE_BYTES);
 
-  /* Scan runs of identical hashes to find candidate pairs */
+  /* Scan runs of identical hashes -> compute distances immediately */
   size_t i = 0;
   while (i < n_entries) {
     size_t j = i + 1;
@@ -738,13 +767,19 @@ static void discover_worker(void *data, long p, int tid) {
                   w_data->window_size)
             continue;
 
-          /* Deduplicate candidate pair within this thread to save memory */
+          /* Bloom-filter approximate dedup (cheap, replaces khash) */
           uint64_t pk = encode_pair(wa, wb);
-          int ret;
-          kh_put(pair_set, seen, pk, &ret);
-          if (ret) { /* new pair, not seen before */
-            DA_PUSH(w_data->t_pairs[tid], w_data->t_n_pairs[tid],
-                    w_data->t_cap_pairs[tid], pk);
+          if (bloom_test_and_set(w_data->t_bloom[tid], pk))
+            continue;
+
+          /* Compute distance immediately (fused Phase 2) */
+          PlantsdsDistResult d =
+              calculate_window_dist(w_data->all_hashes, &w_data->coords[wa],
+                                    &w_data->coords[wb], w_data->kmer_size);
+          if (d.distance < w_data->max_dist) {
+            DA_PUSH(w_data->t_edges[tid], w_data->t_n_edges[tid],
+                    w_data->t_cap_edges[tid],
+                    ((PlantsdsDupEdge){wa, wb, d.distance}));
           }
         }
       }
@@ -752,114 +787,48 @@ static void discover_worker(void *data, long p, int tid) {
     i = j;
   }
   free(entries);
-  kh_destroy(pair_set, seen);
 }
 
-/* Phase 1: Discover candidate pairs via partitioned inverted index. */
-static size_t discover_candidates(const uint64_t *all_hashes,
-                                  WindowCoord *coords, size_t n_windows,
-                                  size_t window_size, uint64_t **out_pairs,
-                                  int n_threads) {
-  DiscoverWorkerData w;
+/* Fused discovery + distance computation + UF union.
+ * Eliminates the intermediate cand_pairs array entirely. */
+static void discover_and_compute(const uint64_t *all_hashes,
+                                 WindowCoord *coords, size_t n_windows,
+                                 size_t window_size, double max_dist,
+                                 int n_threads, uint32_t kmer_size,
+                                 UnionFind *uf) {
+  DiscoverComputeData w;
   w.all_hashes = all_hashes;
   w.coords = coords;
   w.n_windows = n_windows;
   w.window_size = window_size;
-  w.t_pairs = calloc(n_threads, sizeof(uint64_t *));
-  w.t_n_pairs = calloc(n_threads, sizeof(size_t));
-  w.t_cap_pairs = calloc(n_threads, sizeof(size_t));
-
-  kt_for(n_threads, discover_worker, &w, NUM_PARTITIONS);
-
-  size_t total_pairs = 0;
-  for (int t = 0; t < n_threads; t++) {
-    total_pairs += w.t_n_pairs[t];
-  }
-
-  uint64_t *pairs = total_pairs ? malloc(total_pairs * sizeof(uint64_t)) : NULL;
-  size_t offset = 0;
-  for (int t = 0; t < n_threads; t++) {
-    if (w.t_n_pairs[t] > 0) {
-      memcpy(pairs + offset, w.t_pairs[t], w.t_n_pairs[t] * sizeof(uint64_t));
-      offset += w.t_n_pairs[t];
-      free(w.t_pairs[t]);
-    }
-  }
-  free(w.t_pairs);
-  free(w.t_n_pairs);
-  free(w.t_cap_pairs);
-
-  if (total_pairs > 0) {
-    qsort(pairs, total_pairs, sizeof(uint64_t), compare_uint64);
-    size_t u = 0;
-    for (size_t i = 0; i < total_pairs; i++) {
-      if (u == 0 || pairs[i] != pairs[u - 1]) {
-        pairs[u++] = pairs[i];
-      }
-    }
-    total_pairs = u;
-    uint64_t *np = realloc(pairs, total_pairs * sizeof(uint64_t));
-    if (np)
-      pairs = np;
-  }
-
-  *out_pairs = pairs;
-  return total_pairs;
-}
-
-/* Phase 2 worker: compute distance for a single candidate pair */
-typedef struct {
-  const uint64_t *all_hashes;
-  WindowCoord *coords;
-  uint64_t *pairs;
-  double max_dist;
-  uint32_t kmer_size;
-  PlantsdsDupEdge **t_edges;
-  size_t *t_n_edges;
-  size_t *t_cap_edges;
-} DistCandidateData;
-
-static void compute_candidate_dist(void *data, long i, int tid) {
-  DistCandidateData *w = (DistCandidateData *)data;
-  uint32_t a = (uint32_t)(w->pairs[i] >> 32);
-  uint32_t b = (uint32_t)(w->pairs[i] & 0xFFFFFFFF);
-
-  PlantsdsDistResult d = calculate_window_dist(w->all_hashes, &w->coords[a],
-                                               &w->coords[b], w->kmer_size);
-  if (d.distance < w->max_dist) {
-    DA_PUSH(w->t_edges[tid], w->t_n_edges[tid], w->t_cap_edges[tid],
-            ((PlantsdsDupEdge){a, b, d.distance}));
-  }
-}
-
-/* Phase 2: Compute distances for candidate pairs, union into UF */
-static void compute_candidates_to_uf(const uint64_t *all_hashes,
-                                     WindowCoord *coords, uint64_t *pairs,
-                                     size_t n_pairs, double max_dist,
-                                     int n_threads, uint32_t kmer_size,
-                                     UnionFind *uf) {
-  DistCandidateData w;
-  w.all_hashes = all_hashes;
-  w.coords = coords;
-  w.pairs = pairs;
   w.max_dist = max_dist;
   w.kmer_size = kmer_size;
   w.t_edges = calloc(n_threads, sizeof(PlantsdsDupEdge *));
   w.t_n_edges = calloc(n_threads, sizeof(size_t));
   w.t_cap_edges = calloc(n_threads, sizeof(size_t));
+  w.t_bloom = malloc(n_threads * sizeof(uint8_t *));
+  for (int t = 0; t < n_threads; t++)
+    w.t_bloom[t] = calloc(BLOOM_SIZE_BYTES, 1);
 
-  kt_for(n_threads, compute_candidate_dist, &w, (long)n_pairs);
+  kt_for(n_threads, discover_compute_worker, &w, NUM_PARTITIONS);
 
+  /* Union all discovered edges into UF */
+  size_t total_edges = 0;
   for (int t = 0; t < n_threads; t++) {
     for (size_t k = 0; k < w.t_n_edges[t]; k++) {
       union_unionfind(uf, w.t_edges[t][k].win_a, w.t_edges[t][k].win_b);
     }
-    if (w.t_edges[t])
-      free(w.t_edges[t]);
+    total_edges += w.t_n_edges[t];
+    free(w.t_edges[t]);
+    free(w.t_bloom[t]);
   }
   free(w.t_edges);
   free(w.t_n_edges);
   free(w.t_cap_edges);
+  free(w.t_bloom);
+
+  fprintf(stderr, "[plantsds] Total edges after distance filter: %zu\n",
+          total_edges);
 }
 
 static StreamWorkerData *extract_all_windows(char **files, int num_files,
@@ -957,52 +926,74 @@ static void merge_global_data(StreamWorkerData *workers, int num_files,
   *out_num_seqs = total_seqs;
 }
 
+KHASH_MAP_INIT_STR(genome_map, uint32_t)
+
 static void build_duplicate_regions(UnionFind *uf, size_t num_sketches,
                                     int num_files, char **files,
                                     GenomeSeqLen *seq_lens, WindowCoord *coords,
                                     int min_copy, int max_copy,
                                     PlantsdsDupRegion **out_regions,
                                     size_t *out_n_regions) {
-  uint32_t *genome_id = calloc(num_sketches, sizeof(uint32_t));
-  for (size_t i = 0; i < num_sketches; i++) {
-    for (int f = 0; f < num_files; f++) {
-      char bname[256];
-      get_basename(files[f], bname, sizeof(bname));
-      if (strcmp(seq_lens[coords[i].seq_id].genome, bname) == 0) {
-        genome_id[i] = f;
-        break;
-      }
-    }
+  /* O(1) genome -> file_id lookup via hash map (replaces O(N*F) loop) */
+  khash_t(genome_map) *gmap = kh_init(genome_map);
+  for (int f = 0; f < num_files; f++) {
+    char bname[256];
+    get_basename(files[f], bname, sizeof(bname));
+    int ret;
+    khiter_t k = kh_put(genome_map, gmap, strdup(bname), &ret);
+    kh_val(gmap, k) = f;
   }
 
-  uint32_t *max_intra_copy = calloc(num_sketches, sizeof(uint32_t));
-  uint32_t *counts = calloc((size_t)num_sketches * num_files, sizeof(uint32_t));
+  uint32_t *genome_id = calloc(num_sketches, sizeof(uint32_t));
+  for (size_t i = 0; i < num_sketches; i++) {
+    khiter_t k = kh_get(genome_map, gmap, seq_lens[coords[i].seq_id].genome);
+    genome_id[i] = (k != kh_end(gmap)) ? kh_val(gmap, k) : 0;
+  }
+  for (khiter_t k = kh_begin(gmap); k != kh_end(gmap); k++) {
+    if (kh_exist(gmap, k))
+      free((char *)kh_key(gmap, k));
+  }
+  kh_destroy(genome_map, gmap);
+
+  /* Compact family IDs: num_sketches -> n_families (typically 100x smaller) */
+  uint32_t *fam_id = calloc(num_sketches, sizeof(uint32_t));
+  uint32_t n_families = 0;
   for (size_t i = 0; i < num_sketches; i++) {
     uint32_t fam = find_unionfind(uf, (uint32_t)i);
+    if (fam_id[fam] == 0)
+      fam_id[fam] = ++n_families;
+  }
+
+  uint32_t *max_intra_copy = calloc(n_families + 1, sizeof(uint32_t));
+  uint32_t *counts =
+      calloc((size_t)(n_families + 1) * num_files, sizeof(uint32_t));
+  for (size_t i = 0; i < num_sketches; i++) {
+    uint32_t fam = find_unionfind(uf, (uint32_t)i);
+    uint32_t fid = fam_id[fam];
     uint32_t g_id = genome_id[i];
-    counts[(size_t)fam * num_files + g_id]++;
-    if (counts[(size_t)fam * num_files + g_id] > max_intra_copy[fam]) {
-      max_intra_copy[fam] = counts[(size_t)fam * num_files + g_id];
-    }
+    counts[(size_t)fid * num_files + g_id]++;
+    if (counts[(size_t)fid * num_files + g_id] > max_intra_copy[fid])
+      max_intra_copy[fid] = counts[(size_t)fid * num_files + g_id];
   }
   free(counts);
   free(genome_id);
 
-  uint8_t *final_is_sd = calloc(num_sketches, sizeof(uint8_t));
-  char **hub_label = calloc(num_sketches, sizeof(char *));
+  uint8_t *final_is_sd = calloc(n_families + 1, sizeof(uint8_t));
+  char **hub_label = calloc(n_families + 1, sizeof(char *));
   uint32_t next_cluster_id = 1;
-  uint32_t *comp_size = calloc(num_sketches, sizeof(uint32_t));
+  uint32_t *comp_size = calloc(n_families + 1, sizeof(uint32_t));
 
   for (size_t i = 0; i < num_sketches; i++) {
     uint32_t fam = find_unionfind(uf, (uint32_t)i);
-    comp_size[fam]++;
-    if (max_intra_copy[fam] >= (uint32_t)min_copy &&
-        (max_copy <= 0 || max_intra_copy[fam] <= (uint32_t)max_copy)) {
-      final_is_sd[fam] = 1;
-      if (!hub_label[fam]) {
+    uint32_t fid = fam_id[fam];
+    comp_size[fid]++;
+    if (max_intra_copy[fid] >= (uint32_t)min_copy &&
+        (max_copy <= 0 || max_intra_copy[fid] <= (uint32_t)max_copy)) {
+      final_is_sd[fid] = 1;
+      if (!hub_label[fid]) {
         char buf[64];
         snprintf(buf, sizeof(buf), "%u", next_cluster_id++);
-        hub_label[fam] = strdup(buf);
+        hub_label[fid] = strdup(buf);
       }
     }
   }
@@ -1012,10 +1003,11 @@ static void build_duplicate_regions(UnionFind *uf, size_t num_sketches,
   PlantsdsDupRegion *dup_regions = NULL;
   for (size_t i = 0; i < num_sketches; i++) {
     uint32_t fam = find_unionfind(uf, (uint32_t)i);
-    if (!final_is_sd[fam])
+    uint32_t fid = fam_id[fam];
+    if (!final_is_sd[fid])
       continue;
 
-    const char *label = hub_label[fam] ? hub_label[fam] : "unknown";
+    const char *label = hub_label[fid] ? hub_label[fid] : "unknown";
 
     char chrom_name[512];
     snprintf(chrom_name, sizeof(chrom_name), "%s-%s",
@@ -1026,15 +1018,16 @@ static void build_duplicate_regions(UnionFind *uf, size_t num_sketches,
                                  .start = coords[i].start,
                                  .end = coords[i].end,
                                  .cluster_id = strdup(label),
-                                 .copy_count = comp_size[fam],
+                                 .copy_count = comp_size[fid],
                                  .subcluster_id = 0,
                                  .flank_sketch = {0},
                                  .window_idx = coords[i].window_idx}));
   }
   free(final_is_sd);
   free(comp_size);
+  free(fam_id);
 
-  for (size_t i = 0; i < num_sketches; i++) {
+  for (uint32_t i = 0; i <= n_families; i++) {
     if (hub_label[i])
       free(hub_label[i]);
   }
@@ -1089,16 +1082,10 @@ int run_pangenome(int num_files, char **files, size_t flank_size,
   UnionFind uf;
   init_unionfind(&uf, num_sketches);
 
-  fprintf(stderr, "[plantsds] Discovering candidate pairs ...\n");
-  uint64_t *cand_pairs = NULL;
-  size_t n_cands = discover_candidates(all_hashes, coords, num_sketches,
-                                       window_size, &cand_pairs, n_threads);
   fprintf(stderr,
-          "[plantsds] Found %zu candidate pairs, computing distances...\n",
-          n_cands);
-  compute_candidates_to_uf(all_hashes, coords, cand_pairs, n_cands, max_dist,
-                           n_threads, r->hash_window, &uf);
-  free(cand_pairs);
+          "[plantsds] Discovering candidates and computing distances...\n");
+  discover_and_compute(all_hashes, coords, num_sketches, window_size, max_dist,
+                       n_threads, r->hash_window, &uf);
 
   PlantsdsDupRegion *dup_regions = NULL;
   size_t n_dup_regions = 0;
