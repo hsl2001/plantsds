@@ -2,7 +2,7 @@
 # ==============================================================================
 # Segmental Duplication (SD) Pipeline Script using PlantSDS
 # Pipelines for:
-#   1) t2t-chm12 (Human T2T CHM13 v2.0)
+#   1) t2t-chm13 (Human T2T CHM13 v2.0)
 #   2) t2t-nip   (Rice T2T Nipponbare AGIS1.0)
 #   3) col-cen   (Arabidopsis thaliana Col-CEN v1.2 T2T)
 # ==============================================================================
@@ -27,11 +27,11 @@ declare -A URLS_SECONDARY
 declare -A FILE_NAMES
 declare -A DESCRIPTIONS
 
-# t2t-chm12 (Human T2T CHM13 v2.0 - RefSeq)
-URLS_PRIMARY["t2t-chm12"]="https://ftp.ncbi.nlm.nih.gov/genomes/all/GCF/009/914/755/GCF_009914755.1_T2T-CHM13v2.0/GCF_009914755.1_T2T-CHM13v2.0_genomic.fna.gz"
-URLS_SECONDARY["t2t-chm12"]="https://ftp.ncbi.nlm.nih.gov/genomes/all/GCA/009/914/755/GCA_009914755.4_T2T-CHM13v2.0/GCA_009914755.4_T2T-CHM13v2.0_genomic.fna.gz"
-FILE_NAMES["t2t-chm12"]="t2t_chm13v2.0.fna.gz"
-DESCRIPTIONS["t2t-chm12"]="Human T2T (CHM13 v2.0 / RefSeq GCF_009914755.1)"
+# t2t-chm13 (Human T2T CHM13 v2.0 - RefSeq)
+URLS_PRIMARY["t2t-chm13"]="https://ftp.ncbi.nlm.nih.gov/genomes/all/GCF/009/914/755/GCF_009914755.1_T2T-CHM13v2.0/GCF_009914755.1_T2T-CHM13v2.0_genomic.fna.gz"
+URLS_SECONDARY["t2t-chm13"]="https://ftp.ncbi.nlm.nih.gov/genomes/all/GCA/009/914/755/GCA_009914755.4_T2T-CHM13v2.0/GCA_009914755.4_T2T-CHM13v2.0_genomic.fna.gz"
+FILE_NAMES["t2t-chm13"]="t2t_chm13v2.0.fna.gz"
+DESCRIPTIONS["t2t-chm13"]="Human T2T (CHM13 v2.0 / RefSeq GCF_009914755.1)"
 
 # t2t-nip (Rice T2T Nipponbare AGIS1.0 - RefSeq)
 URLS_PRIMARY["t2t-nip"]="https://ftp.ncbi.nlm.nih.gov/genomes/all/GCF/034/140/825/GCF_034140825.1_ASM3414082v1/GCF_034140825.1_ASM3414082v1_genomic.fna.gz"
@@ -52,7 +52,7 @@ Usage: $0 [OPTIONS]
 Run Segmental Duplication (SD) detection pipeline using PlantSDS for target genomes.
 
 Options:
-  -s, --target TARGET    Genome target to process: t2t-chm12, t2t-nip, col-cen, or all [default: all]
+  -s, --target TARGET    Genome target to process: t2t-chm13, t2t-nip, col-cen, or all [default: all]
   -t, --threads NUM      Number of CPU threads to use [default: $THREADS]
   -d, --data-dir DIR     Directory to store downloaded genome fasta files [default: $DATA_DIR]
   -r, --results-dir DIR  Directory to store pipeline output results [default: $RESULTS_DIR]
@@ -62,10 +62,10 @@ Options:
   -h, --help             Display this help message and exit
 
 Available targets:
-  t2t-chm12   ${DESCRIPTIONS["t2t-chm12"]}
+  t2t-chm13   ${DESCRIPTIONS["t2t-chm13"]}
   t2t-nip     ${DESCRIPTIONS["t2t-nip"]}
   col-cen     ${DESCRIPTIONS["col-cen"]}
-  all         Run all 3 targets sequentially (t2t-chm12, t2t-nip, col-cen)
+  all         Run all 3 targets sequentially (t2t-chm13, t2t-nip, col-cen)
 EOF
     exit 0
 }
@@ -112,8 +112,8 @@ while [[ $# -gt 0 ]]; do
 done
 
 # Validate target
-if [[ "$TARGET" != "all" && "$TARGET" != "t2t-chm12" && "$TARGET" != "t2t-nip" && "$TARGET" != "col-cen" ]]; then
-    echo "[ERROR] Invalid target '$TARGET'. Choose from: t2t-chm12, t2t-nip, col-cen, all"
+if [[ "$TARGET" != "all" && "$TARGET" != "t2t-chm13" && "$TARGET" != "t2t-nip" && "$TARGET" != "col-cen" ]]; then
+    echo "[ERROR] Invalid target '$TARGET'. Choose from: t2t-chm13, t2t-nip, col-cen, all"
     exit 1
 fi
 
@@ -201,7 +201,7 @@ get_fasta_path() {
 
 # Determine target list
 if [[ "$TARGET" == "all" ]]; then
-    TARGET_LIST=("t2t-chm12" "t2t-nip" "col-cen")
+    TARGET_LIST=("t2t-chm13" "t2t-nip" "col-cen")
 else
     TARGET_LIST=("$TARGET")
 fi
