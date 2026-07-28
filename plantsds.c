@@ -46,11 +46,6 @@ int main(int argc, char **argv) {
     }
   }
 
-  return run_dup(argc, argv);
-}
-
-int run_dup(int argc, char **argv) {
-
   // ==============================================================
   // CLI defaults
   // ==============================================================
@@ -126,49 +121,16 @@ int run_dup(int argc, char **argv) {
   Plantsds r;
   init_plantsds(&r, def_kmer_size);
   r.hash_seed = def_hash_seed;
-  return run_pangenome(num_files, files, flank_size, &r, def_scale, window_size,
-                       step_size, min_bases, max_dist, min_copy, max_copy,
-                       out_prefix, n_threads, adjacency_threshold,
-                       subcluster_dist);
-}
 
-void print_usage(void) {
-  printf("PlantSDS: Plant Segmental Duplication Scanner\n\n"
-         "Usage: plantsds [options] fasta1 [fasta2 ...]\n\n"
-         "Options:\n"
-         "  -k: kmer size (default: 15, max: 42)\n"
-         "  -s: scale factor (default: 10)\n"
-         "  -w: window size in bp (default: 1000)\n"
-         "  -t: step size in bp (default: window/2)\n"
-         "  -b: minimum valid bases per window (default: 1000)\n"
-         "  -d: maximum distance to consider as copy (default: 0.01)\n"
-         "  -D: sub-cluster distance threshold (default: 0.1)\n"
-         "  -m: minimum copy count (default: 2)\n"
-         "  -M: maximum copy count to filter ubiquitous repeats (default: 30)\n"
-         "  -o: output file prefix (default: plantsds)\n"
-         "  -p: number of threads (default: 8)\n"
-         "  -h, --help: show this help message\n"
-         "\n");
-}
-
-// ==============================================================
-// 2. PIPELINE ORCHESTRATION
-// ==============================================================
-
-int run_pangenome(int num_files, char **files, size_t flank_size,
-                  const Plantsds *r, uint64_t scale, size_t window_size,
-                  size_t step_size, size_t min_bases, double max_dist,
-                  int min_copy, int max_copy, const char *out_prefix,
-                  int n_threads, uint32_t adjacency_threshold,
-                  double subcluster_dist) {
   uint64_t *all_hashes = NULL;
   WindowCoord *coords = NULL;
   size_t num_sketches = 0;
   GenomeSeqLen *seq_lens = NULL;
   size_t num_seqs = 0;
 
-  StreamWorkerData *workers = extract_all_windows(
-      files, num_files, r, scale, window_size, step_size, min_bases, n_threads);
+  StreamWorkerData *workers =
+      extract_all_windows(files, num_files, &r, def_scale, window_size,
+                          step_size, min_bases, n_threads);
   merge_global_data(workers, num_files, out_prefix, &all_hashes, &coords,
                     &num_sketches, &seq_lens, &num_seqs);
   free(workers);
@@ -179,7 +141,7 @@ int run_pangenome(int num_files, char **files, size_t flank_size,
   fprintf(stderr,
           "[plantsds] Discovering candidates and computing distances...\n");
   discover_and_compute(all_hashes, coords, num_sketches, window_size, max_dist,
-                       n_threads, r->hash_window, &uf);
+                       n_threads, r.hash_window, &uf);
 
   PlantsdsDupRegion *dup_regions = NULL;
   size_t n_dup_regions = 0;
@@ -191,12 +153,12 @@ int run_pangenome(int num_files, char **files, size_t flank_size,
 
   fprintf(stderr,
           "[INFO] Extracting flanking sequences for sub-clustering...\n");
-  extract_flankings(files, num_files, r, scale, dup_regions, n_merged,
+  extract_flankings(files, num_files, &r, def_scale, dup_regions, n_merged,
                     flank_size == 0 ? window_size / 5 : flank_size, n_threads);
 
   fprintf(stderr, "[INFO] Sub-clustering based on flanking similarities...\n");
   perform_subclustering(dup_regions, n_merged, subcluster_dist, n_threads,
-                        r->hash_window);
+                        r.hash_window);
 
   write_dup_bed(out_prefix, dup_regions, n_merged);
 
@@ -215,6 +177,25 @@ int run_pangenome(int num_files, char **files, size_t flank_size,
   }
   free(seq_lens);
   return 0;
+}
+
+void print_usage(void) {
+  printf("PlantSDS: Plant Segmental Duplication Scanner\n\n"
+         "Usage: plantsds [options] fasta1 [fasta2 ...]\n\n"
+         "Options:\n"
+         "  -k: kmer size (default: 15, max: 42)\n"
+         "  -s: scale factor (default: 10)\n"
+         "  -w: window size in bp (default: 1000)\n"
+         "  -t: step size in bp (default: window/2)\n"
+         "  -b: minimum valid bases per window (default: 1000)\n"
+         "  -d: maximum distance to consider as copy (default: 0.1)\n"
+         "  -D: sub-cluster distance threshold (default: 0.2)\n"
+         "  -m: minimum copy count (default: 2)\n"
+         "  -M: maximum copy count to filter ubiquitous repeats (default: 30)\n"
+         "  -o: output file prefix (default: plantsds)\n"
+         "  -p: number of threads (default: 8)\n"
+         "  -h, --help: show this help message\n"
+         "\n");
 }
 
 // ==============================================================
@@ -439,10 +420,6 @@ void discover_and_compute(const uint64_t *all_hashes, WindowCoord *coords,
           total_edges);
 }
 
-/* Fused Phase 1+2 worker: discover candidates and compute distances in one
- * pass. Replaces discover_worker + compute_candidate_dist. Uses Bloom filter
- * instead of khash for approximate deduplication. Pre-counts partition entries
- * to allocate exact memory. */
 void discover_compute_worker(void *data, long p, int tid) {
   DiscoverComputeData *w_data = (DiscoverComputeData *)data;
 

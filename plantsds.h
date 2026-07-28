@@ -192,16 +192,7 @@ extern const int8_t BASE_LOOKUP[256];
 void kt_for(int n_threads, void (*func)(void *, long, int), void *data, long n);
 
 // 1. ENTRY POINT & CLI
-int run_dup(int argc, char **argv);
 void print_usage(void);
-
-// 2. PIPELINE ORCHESTRATION
-int run_pangenome(int num_files, char **files, size_t flank_size,
-                  const Plantsds *r, uint64_t scale, size_t window_size,
-                  size_t step_size, size_t min_bases, double max_dist,
-                  int min_copy, int max_copy, const char *out_prefix,
-                  int n_threads, uint32_t adjacency_threshold,
-                  double subcluster_dist);
 
 // 3. WINDOW EXTRACTION
 StreamWorkerData *extract_all_windows(char **files, int num_files,
