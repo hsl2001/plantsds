@@ -60,7 +60,7 @@ extern "C" {
 // ==============================================================
 typedef struct {
   uint32_t hash_window;
-  __uint128_t remover_mask;
+  uint64_t remover_mask;
   uint32_t kmer_bits;
   uint32_t rc_shift;
   uint64_t hash_seed;
@@ -251,9 +251,7 @@ void free_unionfind(UnionFind *uf);
 
 // 7. UTILITIES
 void get_basename(const char *filename, char *basename, size_t size);
-uint64_t mix_hash(__uint128_t hash_value, uint64_t seed);
-uint64_t reverse_bits64(uint64_t n);
-__uint128_t reverse_bits128(__uint128_t n);
+uint64_t mix_hash(uint64_t hash_value, uint64_t seed);
 size_t lower_bound_u64(const uint64_t *arr, size_t n, uint64_t target);
 uint64_t encode_pair(uint32_t a, uint32_t b);
 int bloom_test_and_set(uint8_t *bloom, uint64_t key);

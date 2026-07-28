@@ -11,15 +11,15 @@
 KSEQ_INIT(gzFile, gzread)
 KHASH_MAP_INIT_STR(genome_map, uint32_t)
 
-/* PlantSDS encoding: A = 001, C = 110, G = 011, T = 100 */
+/* PlantSDS encoding: A = 00, C = 01, G = 10, T = 11 */
 const int8_t BASE_LOOKUP[256] = {
     -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
     -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
     -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
-    -1, -1, -1, -1, -1, -1, -1, -1, 1,  -1, 6,  -1, -1, -1, 3,  -1, -1, -1, -1,
-    -1, -1, -1, -1, -1, -1, -1, -1, 4,  -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
-    -1, -1, 1,  -1, 6,  -1, -1, -1, 3,  -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
-    -1, -1, 4,  -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+    -1, -1, -1, -1, -1, -1, -1, -1, 0,  -1, 1,  -1, -1, -1, 2,  -1, -1, -1, -1,
+    -1, -1, -1, -1, -1, -1, -1, -1, 3,  -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+    -1, -1, 0,  -1, 1,  -1, -1, -1, 2,  -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+    -1, -1, 3,  -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
     -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
     -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
     -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
@@ -183,7 +183,7 @@ void print_usage(void) {
   printf("PlantSDS: Plant Segmental Duplication Scanner\n\n"
          "Usage: plantsds [options] fasta1 [fasta2 ...]\n\n"
          "Options:\n"
-         "  -k: kmer size (default: 15, max: 42)\n"
+         "  -k: kmer size (default: 15, max: 32)\n"
          "  -s: scale factor (default: 10)\n"
          "  -w: window size in bp (default: 1000)\n"
          "  -t: step size in bp (default: window/2)\n"
@@ -812,51 +812,50 @@ void write_dup_bed(const char *out_prefix, PlantsdsDupRegion *dup_regions,
 // ==============================================================
 
 void init_plantsds(Plantsds *r, size_t hash_window) {
-  size_t k = hash_window < 42 ? hash_window : 42; /* 3*42=126 bits ≤ 128 */
-  uint32_t kmer_bits = 3 * (uint32_t)k;
+  size_t k = hash_window < 32 ? hash_window : 32; /* 2*32=64 bits */
+  uint32_t kmer_bits = 2 * (uint32_t)k;
 
-  __uint128_t remover_mask =
-      (kmer_bits > 3) ? (((__uint128_t)1 << (kmer_bits - 3)) - 1) : 0;
+  uint64_t remover_mask =
+      (kmer_bits > 2) ? (((uint64_t)1 << (kmer_bits - 2)) - 1) : 0;
   /* remover mask to forget previous base */
 
   r->hash_window = k;
   r->remover_mask = remover_mask;
   r->kmer_bits = kmer_bits;
   r->rc_shift =
-      (kmer_bits > 0) ? (128 - kmer_bits) : 128; /* reverse_complement shift */
+      (kmer_bits > 0) ? (kmer_bits - 2) : 0; /* reverse_complement shift */
 }
 
 /* Extract plantsds hash and insert in HashPool */
 __attribute__((hot)) void extract_hash(const Plantsds *r, HashPool *pool,
                                        const uint8_t *seq, size_t len) {
   size_t K = r->hash_window;
-  __uint128_t fwd = 0;
   size_t valid = 0;
+  uint64_t fwd = 0;
+  uint64_t rev = 0;
+  uint64_t mask = r->remover_mask;
+  uint32_t rc_shift = r->rc_shift;
 
   for (size_t idx = 0; idx < len; idx++) {
-    /* Convert to numerical values */
     int8_t lv = BASE_LOOKUP[seq[idx]];
     if (lv < 0) {
       fwd = 0;
+      rev = 0;
       valid = 0;
       continue;
     }
 
-    /* Concat for fwd hash */
-    fwd = ((fwd & r->remover_mask) << 3) | (uint8_t)lv;
+    fwd = ((fwd & mask) << 2) | (uint8_t)lv;
+    rev = (rev >> 2) | ((uint64_t)(lv ^ 3) << rc_shift);
+
     if (valid < K)
       valid++;
     if (valid < K)
       continue;
 
-    /* Reverse bits for reverse complement */
-    __uint128_t rev = reverse_bits128(fwd) >> r->rc_shift;
-    /* Min operation to canonicalize */
-    __uint128_t canon = fwd < rev ? fwd : rev;
-    /* Mix hash to avoid collision */
+    uint64_t canon = fwd < rev ? fwd : rev;
     uint64_t h = mix_hash(canon, r->hash_seed);
 
-    /* FracMinHash */
     if (h < pool->hash_threshold)
       insert_hash_pool(pool, h);
   }
@@ -972,30 +971,10 @@ void get_basename(const char *filename, char *basename, size_t size) {
     *dot = '\0';
 }
 
-uint64_t mix_hash(__uint128_t hash_value, uint64_t seed) {
-  __uint128_t p = (hash_value ^ MIX_CONST1) * ((__uint128_t)seed ^ MIX_CONST2);
+uint64_t mix_hash(uint64_t hash_value, uint64_t seed) {
+  __uint128_t p =
+      ((__uint128_t)hash_value ^ MIX_CONST1) * ((__uint128_t)seed ^ MIX_CONST2);
   return (uint64_t)(p ^ (p >> 64));
-}
-
-uint64_t reverse_bits64(uint64_t n) {
-#if defined(__aarch64__)
-  /* reverse bits (rbits) asm command for ARM chips */
-  uint64_t r;
-  __asm__("rbit %0, %1" : "=r"(r) : "r"(n));
-  return r;
-#else
-  /* manually reverse bits for x86_64 chips */
-  uint64_t r = __builtin_bswap64(n);
-  r = ((r & 0x5555555555555555ULL) << 1) | ((r & 0xAAAAAAAAAAAAAAAAULL) >> 1);
-  r = ((r & 0x3333333333333333ULL) << 2) | ((r & 0xCCCCCCCCCCCCCCCCULL) >> 2);
-  r = ((r & 0x0F0F0F0F0F0F0F0FULL) << 4) | ((r & 0xF0F0F0F0F0F0F0F0ULL) >> 4);
-  return r;
-#endif
-}
-
-__uint128_t reverse_bits128(__uint128_t n) {
-  return ((__uint128_t)reverse_bits64((uint64_t)n) << 64) |
-         reverse_bits64((uint64_t)(n >> 64));
 }
 
 /* Binary search: first index where arr[i] >= target */
