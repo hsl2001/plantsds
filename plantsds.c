@@ -7,48 +7,12 @@
 #include "klib/kseq.h"
 #include "plantsds.h"
 
-void kt_for(int n_threads, void (*func)(void *, long, int), void *data, long n);
-
-#define MIX_CONST1 0xff51afd7ed558ccdULL
-#define MIX_CONST2 0xc4ceb9fe1a85ec53ULL
-
-/* Generic dynamic-array capacity reserve */
-#define DA_RESERVE(arr, cap, req_cap)                                          \
-  do {                                                                         \
-    if ((req_cap) > (cap)) {                                                   \
-      (cap) = (cap) ? (cap) : 16;                                              \
-      while ((cap) < (req_cap))                                                \
-        (cap) *= 2;                                                            \
-      (arr) = realloc((arr), (cap) * sizeof(*(arr)));                          \
-    }                                                                          \
-  } while (0)
-
-/* Generic dynamic-array push: grows `arr` by doubling `cap` as needed. */
-#define DA_PUSH(arr, n, cap, val)                                              \
-  do {                                                                         \
-    DA_RESERVE(arr, cap, (n) + 1);                                             \
-    (arr)[(n)++] = (val);                                                      \
-  } while (0)
-
-#define CMP(a, b) (((a) > (b)) - ((a) < (b)))
-#define SWAP(type, a, b)                                                       \
-  do {                                                                         \
-    type _t = (a);                                                             \
-    (a) = (b);                                                                 \
-    (b) = _t;                                                                  \
-  } while (0)
-
-#define ABS_DIFF(a, b) ((a) > (b) ? (a) - (b) : (b) - (a))
-
 /* Reader initiation */
 KSEQ_INIT(gzFile, gzread)
-
-// ==============================================================
-// UTILITIES
-// ==============================================================
+KHASH_MAP_INIT_STR(genome_map, uint32_t)
 
 /* PlantSDS encoding: A = 001, C = 110, G = 011, T = 100 */
-static const int8_t BASE_LOOKUP[256] = {
+const int8_t BASE_LOOKUP[256] = {
     -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
     -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
     -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
@@ -64,217 +28,111 @@ static const int8_t BASE_LOOKUP[256] = {
     -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
     -1, -1, -1, -1, -1, -1, -1, -1, -1};
 
-static uint64_t mix_hash(__uint128_t hash_value, uint64_t seed) {
-  __uint128_t p = (hash_value ^ MIX_CONST1) * ((__uint128_t)seed ^ MIX_CONST2);
-  return (uint64_t)(p ^ (p >> 64));
-}
-
-static uint64_t reverse_bits64(uint64_t n) {
-#if defined(__aarch64__)
-  /* reverse bits (rbits) asm command for ARM chips */
-  uint64_t r;
-  __asm__("rbit %0, %1" : "=r"(r) : "r"(n));
-  return r;
-#else
-  /* manually reverse bits for x86_64 chips */
-  uint64_t r = __builtin_bswap64(n);
-  r = ((r & 0x5555555555555555ULL) << 1) | ((r & 0xAAAAAAAAAAAAAAAAULL) >> 1);
-  r = ((r & 0x3333333333333333ULL) << 2) | ((r & 0xCCCCCCCCCCCCCCCCULL) >> 2);
-  r = ((r & 0x0F0F0F0F0F0F0F0FULL) << 4) | ((r & 0xF0F0F0F0F0F0F0F0ULL) >> 4);
-  return r;
-#endif
-}
-
-static __uint128_t reverse_bits128(__uint128_t n) {
-  return ((__uint128_t)reverse_bits64((uint64_t)n) << 64) |
-         reverse_bits64((uint64_t)(n >> 64));
-}
-
 // ==============================================================
-// INIT
+// 1. ENTRY POINT & CLI
 // ==============================================================
 
-void init_plantsds(Plantsds *r, size_t hash_window) {
-  size_t k = hash_window < 42 ? hash_window : 42; /* 3*42=126 bits ≤ 128 */
-  uint32_t kmer_bits = 3 * (uint32_t)k;
+int main(int argc, char **argv) {
 
-  __uint128_t remover_mask =
-      (kmer_bits > 3) ? (((__uint128_t)1 << (kmer_bits - 3)) - 1) : 0;
-  /* remover mask to forget previous base */
-
-  r->hash_window = k;
-  r->remover_mask = remover_mask;
-  r->kmer_bits = kmer_bits;
-  r->rc_shift =
-      (kmer_bits > 0) ? (128 - kmer_bits) : 128; /* reverse_complement shift */
-}
-
-// ==============================================================
-// HASH POOL
-// ==============================================================
-
-typedef struct {
-  size_t size;
-  size_t cap;
-  uint64_t hash_threshold; /* FracMinHash threshold */
-  uint64_t *hashes;
-} HashPool;
-
-/* Wrapper for macro to use in `qsort`*/
-static int compare_uint64(const void *a, const void *b) {
-  return CMP(*(const uint64_t *)a, *(const uint64_t *)b);
-}
-
-static void init_hash_pool(HashPool *pool, uint64_t threshold) {
-  *pool = (HashPool){.hash_threshold = threshold};
-}
-
-static void insert_hash_pool(HashPool *pool, uint64_t h) {
-  if (h >= pool->hash_threshold)
-    return;
-  DA_PUSH(pool->hashes, pool->size, pool->cap, h);
-}
-
-static void finalize_hash_pool(HashPool *pool, uint64_t **out_hashes,
-                               size_t *out_size) {
-  size_t n = pool->size;
-  if (n) {
-    qsort(pool->hashes, n, sizeof(uint64_t), compare_uint64);
-    /* Deduplicate in-place */
-    size_t u = 0;
-    for (size_t i = 0; i < n; i++) {
-      if (u == 0 || pool->hashes[i] != pool->hashes[u - 1])
-        pool->hashes[u++] = pool->hashes[i];
-    }
-    n = u;
-    uint64_t *nh = realloc(pool->hashes, n * sizeof(uint64_t));
-    if (nh)
-      pool->hashes = nh;
+  if (argc < 2) {
+    print_usage();
+    return 1;
   }
-  *out_size = n;
-  *out_hashes = n ? pool->hashes : NULL;
-  pool->hashes = NULL;
-  pool->size = pool->cap = 0;
-}
 
-// ==============================================================
-// SKETCH EXTRACTION
-// ==============================================================
-
-/* Extract plantsds hash and insert in HashPool */
-__attribute__((hot)) static void extract_hash(const Plantsds *r, HashPool *pool,
-                                              const uint8_t *seq, size_t len) {
-  size_t K = r->hash_window;
-  __uint128_t fwd = 0;
-  size_t valid = 0;
-
-  for (size_t idx = 0; idx < len; idx++) {
-    /* Convert to numerical values */
-    int8_t lv = BASE_LOOKUP[seq[idx]];
-    if (lv < 0) {
-      fwd = 0;
-      valid = 0;
-      continue;
-    }
-
-    /* Concat for fwd hash */
-    fwd = ((fwd & r->remover_mask) << 3) | (uint8_t)lv;
-    if (valid < K)
-      valid++;
-    if (valid < K)
-      continue;
-
-    /* Reverse bits for reverse complement */
-    __uint128_t rev = reverse_bits128(fwd) >> r->rc_shift;
-    /* Min operation to canonicalize */
-    __uint128_t canon = fwd < rev ? fwd : rev;
-    /* Mix hash to avoid collision */
-    uint64_t h = mix_hash(canon, r->hash_seed);
-
-    /* FracMinHash */
-    if (h < pool->hash_threshold)
-      insert_hash_pool(pool, h);
-  }
-}
-
-// ==============================================================
-// DISTANCE CALCULATION
-// ==============================================================
-
-/* Calculate distance between two sketch sets */
-PlantsdsDistResult calculate_plantsds_dist(const PlantsdsSketch *ref,
-                                           const PlantsdsSketch *query,
-                                           uint32_t kmer_size) {
-  PlantsdsDistResult res = {0.0, 1.0, 0};
-
-  size_t shared = 0, i = 0, j = 0;
-
-  /* Set operations with two pointer algorithm; ref and query are sorted. */
-  while (i < ref->sketch_size && j < query->sketch_size) {
-    if (ref->hashes[i] == query->hashes[j]) {
-      shared++;
-      i++;
-      j++;
-    } else if (ref->hashes[i] < query->hashes[j]) {
-      i++;
-    } else {
-      j++;
+  for (int i = 1; i < argc; i++) {
+    if (strcmp(argv[i], "--help") == 0) {
+      print_usage();
+      return 0;
     }
   }
 
-  /* Calculate distance with containment method */
-  res.shared_hashes = shared;
-  if (ref->sketch_size > 0 && query->sketch_size > 0) {
-    res.containment =
-        0.5 * shared * (1.0 / ref->sketch_size + 1.0 / query->sketch_size);
-    res.distance = 1.0 - pow(res.containment, 1.0 / (double)kmer_size);
+  return run_dup(argc, argv);
+}
+
+int run_dup(int argc, char **argv) {
+
+  // ==============================================================
+  // CLI defaults
+  // ==============================================================
+
+  uint32_t def_kmer_size = 15;
+  uint64_t def_scale = 10;
+  uint64_t def_hash_seed = 42;
+  size_t window_size = 1000;
+  size_t step_size = 0; /* 0 = auto (window/2) */
+  size_t min_bases = 1000;
+  double max_dist = 0.1;
+  int min_copy = 2;
+  int max_copy = 30;
+  const char *out_prefix = "plantsds";
+  size_t flank_size = 0; /* 0 = auto (window/5) */
+  int n_threads = 8;
+  uint32_t adjacency_threshold = 2;
+  double subcluster_dist = 0.2; /* -1.0: auto */
+
+  ketopt_t opt = KETOPT_INIT;
+  int c;
+  while ((c = ketopt(&opt, argc, argv, 1, "k:s:e:w:t:b:d:m:M:o:p:f:a:D:h",
+                     0)) >= 0) {
+    if (c == 'h') {
+      print_usage();
+      return 0;
+    } else if (c == 'k')
+      def_kmer_size = (uint32_t)atoi(opt.arg);
+    else if (c == 's')
+      def_scale = (uint64_t)strtoull(opt.arg, NULL, 10);
+    else if (c == 'e')
+      def_hash_seed = strtoull(opt.arg, NULL, 0);
+    else if (c == 'w')
+      window_size = (size_t)strtoull(opt.arg, NULL, 10);
+    else if (c == 't')
+      step_size = (size_t)strtoull(opt.arg, NULL, 10);
+    else if (c == 'b')
+      min_bases = (size_t)strtoull(opt.arg, NULL, 10);
+    else if (c == 'd')
+      max_dist = atof(opt.arg);
+    else if (c == 'm')
+      min_copy = atoi(opt.arg);
+    else if (c == 'M')
+      max_copy = atoi(opt.arg);
+    else if (c == 'o')
+      out_prefix = opt.arg;
+    else if (c == 'p')
+      n_threads = atoi(opt.arg) < 1 ? 1 : atoi(opt.arg);
+    else if (c == 'f')
+      flank_size = (size_t)strtoull(opt.arg, NULL, 10);
+    else if (c == 'a')
+      adjacency_threshold = (uint32_t)atoi(opt.arg);
+    else if (c == 'D')
+      subcluster_dist = atof(opt.arg);
+    else
+      return 1;
   }
-  return res;
-}
 
-// ==============================================================
-// UNION-FIND
-// Union-find algorithm to determine two nodes are in same set or not
-// ==============================================================
+  if (subcluster_dist < 0.0)
+    subcluster_dist = max_dist;
 
-void init_unionfind(UnionFind *uf, size_t n) {
-  uf->n = n;
-  uf->parent = (uint32_t *)malloc(n * sizeof(uint32_t));
-  uf->rank = (uint8_t *)calloc(n, sizeof(uint8_t));
-  for (size_t i = 0; i < n; i++)
-    uf->parent[i] = (uint32_t)i;
-}
+  if (step_size == 0)
+    step_size = window_size / 2;
 
-uint32_t find_unionfind(UnionFind *uf, uint32_t x) {
-  while (uf->parent[x] != x) {
-    uf->parent[x] = uf->parent[uf->parent[x]]; /* path splitting */
-    x = uf->parent[x];
+  if (opt.ind == argc) {
+    fprintf(stderr, "[ERROR] Input FASTA files are required.\n");
+    return 1;
   }
-  return x;
+
+  int num_files = argc - opt.ind;
+  char **files = &argv[opt.ind];
+
+  Plantsds r;
+  init_plantsds(&r, def_kmer_size);
+  r.hash_seed = def_hash_seed;
+  return run_pangenome(num_files, files, flank_size, &r, def_scale, window_size,
+                       step_size, min_bases, max_dist, min_copy, max_copy,
+                       out_prefix, n_threads, adjacency_threshold,
+                       subcluster_dist);
 }
 
-void union_unionfind(UnionFind *uf, uint32_t a, uint32_t b) {
-  a = find_unionfind(uf, a);
-  b = find_unionfind(uf, b);
-  if (a == b)
-    return;
-  if (uf->rank[a] < uf->rank[b])
-    SWAP(uint32_t, a, b);
-  uf->parent[b] = a;
-  if (uf->rank[a] == uf->rank[b])
-    uf->rank[a]++;
-}
-
-void free_unionfind(UnionFind *uf) {
-  free(uf->parent);
-  free(uf->rank);
-}
-
-// ==============================================================
-// PARAMETERS
-// ==============================================================
-
-static void print_usage(void) {
+void print_usage(void) {
   printf("PlantSDS: Plant Segmental Duplication Scanner\n\n"
          "Usage: plantsds [options] fasta1 [fasta2 ...]\n\n"
          "Options:\n"
@@ -294,105 +152,95 @@ static void print_usage(void) {
 }
 
 // ==============================================================
-// WINDOW STREAMING
+// 2. PIPELINE ORCHESTRATION
 // ==============================================================
 
-typedef struct {
-  uint32_t seq_id;
-  size_t start;
-  size_t end;
-  size_t sketch_offset; /* byte offset in SketchStore */
-  uint32_t sketch_size; /* number of hashes */
-  uint32_t window_idx;
-} WindowCoord;
+int run_pangenome(int num_files, char **files, size_t flank_size,
+                  const Plantsds *r, uint64_t scale, size_t window_size,
+                  size_t step_size, size_t min_bases, double max_dist,
+                  int min_copy, int max_copy, const char *out_prefix,
+                  int n_threads, uint32_t adjacency_threshold,
+                  double subcluster_dist) {
+  uint64_t *all_hashes = NULL;
+  WindowCoord *coords = NULL;
+  size_t num_sketches = 0;
+  GenomeSeqLen *seq_lens = NULL;
+  size_t num_seqs = 0;
 
-// ==============================================================
-// DUP: SEGMENT MERGE
-// ==============================================================
+  StreamWorkerData *workers = extract_all_windows(
+      files, num_files, r, scale, window_size, step_size, min_bases, n_threads);
+  merge_global_data(workers, num_files, out_prefix, &all_hashes, &coords,
+                    &num_sketches, &seq_lens, &num_seqs);
+  free(workers);
 
-static int compare_dup_region(const void *a, const void *b) {
-  const PlantsdsDupRegion *ra = (const PlantsdsDupRegion *)a,
-                          *rb = (const PlantsdsDupRegion *)b;
-  int c1 = strcmp(ra->cluster_id, rb->cluster_id);
-  if (c1)
-    return c1;
-  int c2 = strcmp(ra->chrom, rb->chrom);
-  return c2 ? c2 : CMP(ra->start, rb->start);
-}
+  UnionFind uf;
+  init_unionfind(&uf, num_sketches);
 
-/* Merge adjacent/overlapping regions in the same SD family.
- * Returns the new count of merged regions. */
-static size_t merge_dup_regions(PlantsdsDupRegion *regions, size_t n,
-                                uint32_t adjacency_threshold) {
-  if (n <= 1)
-    return n;
+  fprintf(stderr,
+          "[plantsds] Discovering candidates and computing distances...\n");
+  discover_and_compute(all_hashes, coords, num_sketches, window_size, max_dist,
+                       n_threads, r->hash_window, &uf);
 
-  qsort(regions, n, sizeof(PlantsdsDupRegion), compare_dup_region);
+  PlantsdsDupRegion *dup_regions = NULL;
+  size_t n_dup_regions = 0;
+  build_duplicate_regions(&uf, num_sketches, num_files, files, seq_lens, coords,
+                          min_copy, max_copy, &dup_regions, &n_dup_regions);
 
-  size_t out = 0;
-  for (size_t i = 1; i < n; i++) {
-    if (strcmp(regions[i].cluster_id, regions[out].cluster_id) == 0 &&
-        strcmp(regions[i].chrom, regions[out].chrom) == 0 &&
-        (regions[i].window_idx <=
-             regions[out].window_idx + adjacency_threshold ||
-         regions[i].start <= regions[out].end)) {
-      if (regions[i].end > regions[out].end)
-        regions[out].end = regions[i].end;
-      if (regions[i].window_idx > regions[out].window_idx)
-        regions[out].window_idx = regions[i].window_idx;
-      free(regions[i].cluster_id);
-      free(regions[i].chrom);
-    } else {
-      out++;
-      if (out != i)
-        regions[out] = regions[i];
-    }
+  size_t n_merged =
+      merge_dup_regions(dup_regions, n_dup_regions, adjacency_threshold);
+
+  fprintf(stderr,
+          "[INFO] Extracting flanking sequences for sub-clustering...\n");
+  extract_flankings(files, num_files, r, scale, dup_regions, n_merged,
+                    flank_size == 0 ? window_size / 5 : flank_size, n_threads);
+
+  fprintf(stderr, "[INFO] Sub-clustering based on flanking similarities...\n");
+  perform_subclustering(dup_regions, n_merged, subcluster_dist, n_threads,
+                        r->hash_window);
+
+  write_dup_bed(out_prefix, dup_regions, n_merged);
+
+  for (size_t i = 0; i < n_merged; i++) {
+    free(dup_regions[i].chrom);
+    free(dup_regions[i].cluster_id);
+    free(dup_regions[i].flank_sketch.hashes);
   }
-  return out + 1;
+  free(dup_regions);
+  free_unionfind(&uf);
+  free(all_hashes);
+  free(coords);
+  for (size_t i = 0; i < num_seqs; i++) {
+    free(seq_lens[i].genome);
+    free(seq_lens[i].seq);
+  }
+  free(seq_lens);
+  return 0;
 }
 
 // ==============================================================
-// CMD: DUP
+// 3. WINDOW EXTRACTION
 // ==============================================================
 
-static void get_basename(const char *filename, char *basename, size_t size) {
-  const char *slash = strrchr(filename, '/');
-  const char *base = slash ? slash + 1 : filename;
-  strncpy(basename, base, size - 1);
-  basename[size - 1] = '\0';
-  char *dot = strchr(basename, '.');
-  if (dot)
-    *dot = '\0';
+StreamWorkerData *extract_all_windows(char **files, int num_files,
+                                      const Plantsds *r, uint64_t scale,
+                                      size_t window_size, size_t step_size,
+                                      size_t min_bases, int n_threads) {
+  fprintf(stderr, "[plantsds] Extracting windows across pangenome...\n");
+  StreamWorkerData *workers = calloc(num_files, sizeof(StreamWorkerData));
+  for (int i = 0; i < num_files; i++) {
+    workers[i].filename = files[i];
+    get_basename(files[i], workers[i].bname, sizeof(workers[i].bname));
+    workers[i].r = r;
+    workers[i].scale = scale;
+    workers[i].window_size = window_size;
+    workers[i].step_size = step_size;
+    workers[i].min_bases = min_bases;
+  }
+  kt_for(n_threads, stream_pangenome_worker, workers, num_files);
+  return workers;
 }
 
-typedef struct {
-  char *genome;
-  char *seq;
-} GenomeSeqLen;
-
-typedef struct {
-  const char *filename;
-  char bname[256];
-  const Plantsds *r;
-  uint64_t scale;
-  size_t window_size;
-  size_t step_size;
-  size_t min_bases;
-
-  uint64_t *all_hashes;
-  size_t num_all_hashes;
-  size_t cap_all_hashes;
-
-  WindowCoord *coords;
-  size_t num_sketches;
-  size_t cap_sketches;
-
-  GenomeSeqLen *seq_lens;
-  size_t num_seqs;
-  size_t cap_seqs;
-} StreamWorkerData;
-
-static void stream_pangenome_worker(void *data, long i, int tid) {
+void stream_pangenome_worker(void *data, long i, int tid) {
   (void)tid;
   StreamWorkerData *w = &((StreamWorkerData *)data)[i];
 
@@ -474,238 +322,128 @@ static void stream_pangenome_worker(void *data, long i, int tid) {
   gzclose(fp);
 }
 
-typedef struct {
-  char **files;
-  const Plantsds *r;
-  uint64_t scale;
-  PlantsdsDupRegion *regions;
-  size_t n_regions;
-  size_t flank_size;
-} FlankingWorkerData;
-
-static void extract_flankings_worker(void *data, long f, int tid) {
-  (void)tid;
-  FlankingWorkerData *w = (FlankingWorkerData *)data;
-
-  char bname[256];
-  get_basename(w->files[f], bname, sizeof(bname));
-
-  gzFile fp = gzopen(w->files[f], "r");
-  if (!fp)
-    return;
-  kseq_t *ks = kseq_init(fp);
-  if (!ks) {
-    gzclose(fp);
-    return;
+void merge_global_data(StreamWorkerData *workers, int num_files,
+                       const char *out_prefix, uint64_t **out_all_hashes,
+                       WindowCoord **out_coords, size_t *out_num_sketches,
+                       GenomeSeqLen **out_seq_lens, size_t *out_num_seqs) {
+  size_t total_hashes = 0, total_sketches = 0, total_seqs = 0;
+  for (int i = 0; i < num_files; i++) {
+    total_hashes += workers[i].num_all_hashes;
+    total_sketches += workers[i].num_sketches;
+    total_seqs += workers[i].num_seqs;
   }
 
-  while (kseq_read(ks) >= 0) {
-    char chr_name[512];
-    snprintf(chr_name, sizeof(chr_name), "%s-%s", bname, ks->name.s);
+  uint64_t *all_hashes =
+      total_hashes ? malloc(total_hashes * sizeof(uint64_t)) : NULL;
+  WindowCoord *coords =
+      total_sketches ? malloc(total_sketches * sizeof(WindowCoord)) : NULL;
+  GenomeSeqLen *seq_lens =
+      total_seqs ? malloc(total_seqs * sizeof(GenomeSeqLen)) : NULL;
 
-    for (size_t i = 0; i < w->n_regions; i++) {
-      if (strcmp(w->regions[i].chrom, chr_name) == 0) {
-        size_t start = w->regions[i].start;
-        size_t end = w->regions[i].end;
-        size_t left_start = start > w->flank_size ? start - w->flank_size : 0;
-        size_t right_end =
-            end + w->flank_size > ks->seq.l ? ks->seq.l : end + w->flank_size;
+  size_t g_hash_offset = 0;
+  size_t g_sketch_offset = 0;
+  size_t g_seq_offset = 0;
 
-        size_t left_len = start - left_start;
-        size_t right_len = right_end - end;
+  char path_buf[PATH_MAX];
+  snprintf(path_buf, sizeof(path_buf), "%s.window.bed", out_prefix);
+  FILE *bed_fp = fopen(path_buf, "w");
 
-        /* Free previous flanking sketch if being overwritten */
-        free(w->regions[i].flank_sketch.hashes);
-        w->regions[i].flank_sketch.hashes = NULL;
-        w->regions[i].flank_sketch.sketch_size = 0;
+  for (int i = 0; i < num_files; i++) {
+    StreamWorkerData *w = &workers[i];
 
-        uint8_t *flank_seq = malloc(left_len + right_len);
-        if (left_len > 0)
-          memcpy(flank_seq, ks->seq.s + left_start, left_len);
-        if (right_len > 0)
-          memcpy(flank_seq + left_len, ks->seq.s + end, right_len);
+    if (w->num_all_hashes > 0) {
+      memcpy(all_hashes + g_hash_offset, w->all_hashes,
+             w->num_all_hashes * sizeof(uint64_t));
+    }
 
-        HashPool pool;
-        init_hash_pool(&pool, UINT64_MAX / w->scale);
-        extract_hash(w->r, &pool, flank_seq, left_len + right_len);
-        finalize_hash_pool(&pool, &w->regions[i].flank_sketch.hashes,
-                           &w->regions[i].flank_sketch.sketch_size);
+    if (w->num_seqs > 0) {
+      memcpy(seq_lens + g_seq_offset, w->seq_lens,
+             w->num_seqs * sizeof(GenomeSeqLen));
+    }
 
-        free(flank_seq);
+    for (size_t j = 0; j < w->num_sketches; j++) {
+      WindowCoord c = w->coords[j];
+      c.sketch_offset += g_hash_offset;
+      c.seq_id += g_seq_offset;
+      coords[g_sketch_offset + j] = c;
+
+      if (bed_fp) {
+        char chr_name[512];
+        snprintf(chr_name, sizeof(chr_name), "%s-%s", seq_lens[c.seq_id].genome,
+                 seq_lens[c.seq_id].seq);
+        fprintf(bed_fp, "%s\t%zu\t%zu\t%s_%zu_%zu\n", chr_name, c.start, c.end,
+                chr_name, c.start, c.end);
       }
     }
+
+    g_hash_offset += w->num_all_hashes;
+    g_sketch_offset += w->num_sketches;
+    g_seq_offset += w->num_seqs;
+
+    free(w->all_hashes);
+    free(w->coords);
+    free(w->seq_lens);
   }
-  kseq_destroy(ks);
-  gzclose(fp);
+
+  if (bed_fp)
+    fclose(bed_fp);
+
+  *out_all_hashes = all_hashes;
+  *out_coords = coords;
+  *out_num_sketches = total_sketches;
+  *out_seq_lens = seq_lens;
+  *out_num_seqs = total_seqs;
 }
 
-static void extract_flankings(char **files, int num_files, const Plantsds *r,
-                              uint64_t scale, PlantsdsDupRegion *regions,
-                              size_t n_regions, size_t flank_size,
-                              int n_threads) {
-  FlankingWorkerData w = {files, r, scale, regions, n_regions, flank_size};
-  kt_for(n_threads, extract_flankings_worker, &w, num_files);
-}
+// ==============================================================
+// 4. DISCOVERY & DISTANCE CALCULATION
+// ==============================================================
 
-typedef struct {
-  uint32_t i, j;
-} SubclusterPair;
-
-typedef struct {
-  PlantsdsDupRegion *regions;
-  double max_dist;
-  size_t n_merged;
-  SubclusterPair **t_pairs;
-  size_t *t_n_pairs;
-  size_t *t_cap_pairs;
-  uint32_t kmer_size;
-} SubclusterData;
-
-static void process_subcluster(void *data, long i, int tid) {
-  SubclusterData *w = (SubclusterData *)data;
-  if (w->regions[i].flank_sketch.sketch_size == 0)
-    return;
-  for (size_t j = i + 1; j < w->n_merged; j++) {
-    if (strcmp(w->regions[i].cluster_id, w->regions[j].cluster_id) != 0)
-      continue; // must be same cluster
-    if (w->regions[j].flank_sketch.sketch_size == 0)
-      continue;
-
-    PlantsdsDistResult d = calculate_plantsds_dist(
-        &w->regions[i].flank_sketch, &w->regions[j].flank_sketch, w->kmer_size);
-    if (d.distance < w->max_dist) {
-      DA_PUSH(w->t_pairs[tid], w->t_n_pairs[tid], w->t_cap_pairs[tid],
-              ((SubclusterPair){(uint32_t)i, (uint32_t)j}));
-    }
-  }
-}
-
-static void perform_subclustering(PlantsdsDupRegion *regions, size_t n_merged,
-                                  double max_dist, int n_threads,
-                                  uint32_t kmer_size) {
-  UnionFind sub_uf;
-  init_unionfind(&sub_uf, n_merged);
-
-  SubclusterData w;
-  w.regions = regions;
+/* Fused discovery + distance computation + UF union.
+ * Eliminates the intermediate cand_pairs array entirely. */
+void discover_and_compute(const uint64_t *all_hashes, WindowCoord *coords,
+                          size_t n_windows, size_t window_size, double max_dist,
+                          int n_threads, uint32_t kmer_size, UnionFind *uf) {
+  DiscoverComputeData w;
+  w.all_hashes = all_hashes;
+  w.coords = coords;
+  w.n_windows = n_windows;
+  w.window_size = window_size;
   w.max_dist = max_dist;
-  w.n_merged = n_merged;
   w.kmer_size = kmer_size;
-  w.t_pairs = calloc(n_threads, sizeof(SubclusterPair *));
-  w.t_n_pairs = calloc(n_threads, sizeof(size_t));
-  w.t_cap_pairs = calloc(n_threads, sizeof(size_t));
+  w.t_edges = calloc(n_threads, sizeof(PlantsdsDupEdge *));
+  w.t_n_edges = calloc(n_threads, sizeof(size_t));
+  w.t_cap_edges = calloc(n_threads, sizeof(size_t));
+  w.t_bloom = malloc(n_threads * sizeof(uint8_t *));
+  for (int t = 0; t < n_threads; t++)
+    w.t_bloom[t] = calloc(BLOOM_SIZE_BYTES, 1);
 
-  kt_for(n_threads, process_subcluster, &w, n_merged);
+  kt_for(n_threads, discover_compute_worker, &w, NUM_PARTITIONS);
 
+  /* Union all discovered edges into UF */
+  size_t total_edges = 0;
   for (int t = 0; t < n_threads; t++) {
-    for (size_t k = 0; k < w.t_n_pairs[t]; k++) {
-      union_unionfind(&sub_uf, w.t_pairs[t][k].i, w.t_pairs[t][k].j);
+    for (size_t k = 0; k < w.t_n_edges[t]; k++) {
+      union_unionfind(uf, w.t_edges[t][k].win_a, w.t_edges[t][k].win_b);
     }
-    if (w.t_pairs[t])
-      free(w.t_pairs[t]);
+    total_edges += w.t_n_edges[t];
+    free(w.t_edges[t]);
+    free(w.t_bloom[t]);
   }
-  free(w.t_pairs);
-  free(w.t_n_pairs);
-  free(w.t_cap_pairs);
+  free(w.t_edges);
+  free(w.t_n_edges);
+  free(w.t_cap_edges);
+  free(w.t_bloom);
 
-  // Map union-find parents to sub_cluster_id
-  uint32_t *mapping = calloc(n_merged, sizeof(uint32_t));
-  uint32_t current_id = 1;
-
-  for (size_t i = 0; i < n_merged; i++) {
-    uint32_t p = find_unionfind(&sub_uf, i);
-    if (mapping[p] == 0) {
-      mapping[p] = current_id++;
-    }
-    regions[i].subcluster_id = mapping[p];
-  }
-  free(mapping);
-  free_unionfind(&sub_uf);
+  fprintf(stderr, "[plantsds] Total edges after distance filter: %zu\n",
+          total_edges);
 }
-
-// ==============================================================
-// PARTITIONED INVERTED INDEX
-// ==============================================================
-
-#define NUM_PARTITIONS 256
-#define MAX_RUN_LEN 100 /* skip ubiquitous hashes */
-
-/* Inverted hash index entry: maps a hash value to its source window */
-typedef struct {
-  uint64_t hash;
-  uint32_t window_id;
-} HashWindowEntry;
-
-static int compare_hash_entry(const void *a, const void *b) {
-  const HashWindowEntry *ea = (const HashWindowEntry *)a,
-                        *eb = (const HashWindowEntry *)b;
-  return ea->hash != eb->hash ? CMP(ea->hash, eb->hash)
-                              : CMP(ea->window_id, eb->window_id);
-}
-
-/* Helper: compute distance between two windows using in-memory hashes */
-static PlantsdsDistResult calculate_window_dist(const uint64_t *all_hashes,
-                                                const WindowCoord *wa,
-                                                const WindowCoord *wb,
-                                                uint32_t kmer_size) {
-  PlantsdsSketch sa = {.sketch_size = wa->sketch_size,
-                       .hashes = (uint64_t *)(all_hashes + wa->sketch_offset)};
-  PlantsdsSketch sb = {.sketch_size = wb->sketch_size,
-                       .hashes = (uint64_t *)(all_hashes + wb->sketch_offset)};
-  return calculate_plantsds_dist(&sa, &sb, kmer_size);
-}
-
-/* Binary search: first index where arr[i] >= target */
-static size_t lower_bound_u64(const uint64_t *arr, size_t n, uint64_t target) {
-  size_t lo = 0, hi = n;
-  while (lo < hi) {
-    size_t mid = lo + (hi - lo) / 2;
-    if (arr[mid] < target)
-      lo = mid + 1;
-    else
-      hi = mid;
-  }
-  return lo;
-}
-
-/* Candidate pair stored as single uint64: (min << 32) | max */
-static inline uint64_t encode_pair(uint32_t a, uint32_t b) {
-  return a < b ? ((uint64_t)a << 32) | b : ((uint64_t)b << 32) | a;
-}
-
-/* Bloom filter for approximate pair deduplication (replaces khash pair_set) */
-#define BLOOM_SIZE_BITS (1 << 22) /* 4M bits = 512KB per thread */
-#define BLOOM_SIZE_BYTES (BLOOM_SIZE_BITS / 8)
-#define BLOOM_MASK (BLOOM_SIZE_BITS - 1)
-
-static inline int bloom_test_and_set(uint8_t *bloom, uint64_t key) {
-  uint32_t h1 = (uint32_t)(key)&BLOOM_MASK;
-  uint32_t h2 = (uint32_t)(key >> 22) & BLOOM_MASK;
-  int was_set =
-      ((bloom[h1 >> 3] >> (h1 & 7)) & 1) & ((bloom[h2 >> 3] >> (h2 & 7)) & 1);
-  bloom[h1 >> 3] |= (uint8_t)(1 << (h1 & 7));
-  bloom[h2 >> 3] |= (uint8_t)(1 << (h2 & 7));
-  return was_set;
-}
-
-typedef struct {
-  const uint64_t *all_hashes;
-  WindowCoord *coords;
-  size_t n_windows;
-  size_t window_size;
-  double max_dist;
-  uint32_t kmer_size;
-  PlantsdsDupEdge **t_edges;
-  size_t *t_n_edges;
-  size_t *t_cap_edges;
-  uint8_t **t_bloom;
-} DiscoverComputeData;
 
 /* Fused Phase 1+2 worker: discover candidates and compute distances in one
  * pass. Replaces discover_worker + compute_candidate_dist. Uses Bloom filter
  * instead of khash for approximate deduplication. Pre-counts partition entries
  * to allocate exact memory. */
-static void discover_compute_worker(void *data, long p, int tid) {
+void discover_compute_worker(void *data, long p, int tid) {
   DiscoverComputeData *w_data = (DiscoverComputeData *)data;
 
   /* Partition boundaries: divide [0, UINT64_MAX] into NUM_PARTITIONS */
@@ -789,151 +527,27 @@ static void discover_compute_worker(void *data, long p, int tid) {
   free(entries);
 }
 
-/* Fused discovery + distance computation + UF union.
- * Eliminates the intermediate cand_pairs array entirely. */
-static void discover_and_compute(const uint64_t *all_hashes,
-                                 WindowCoord *coords, size_t n_windows,
-                                 size_t window_size, double max_dist,
-                                 int n_threads, uint32_t kmer_size,
-                                 UnionFind *uf) {
-  DiscoverComputeData w;
-  w.all_hashes = all_hashes;
-  w.coords = coords;
-  w.n_windows = n_windows;
-  w.window_size = window_size;
-  w.max_dist = max_dist;
-  w.kmer_size = kmer_size;
-  w.t_edges = calloc(n_threads, sizeof(PlantsdsDupEdge *));
-  w.t_n_edges = calloc(n_threads, sizeof(size_t));
-  w.t_cap_edges = calloc(n_threads, sizeof(size_t));
-  w.t_bloom = malloc(n_threads * sizeof(uint8_t *));
-  for (int t = 0; t < n_threads; t++)
-    w.t_bloom[t] = calloc(BLOOM_SIZE_BYTES, 1);
-
-  kt_for(n_threads, discover_compute_worker, &w, NUM_PARTITIONS);
-
-  /* Union all discovered edges into UF */
-  size_t total_edges = 0;
-  for (int t = 0; t < n_threads; t++) {
-    for (size_t k = 0; k < w.t_n_edges[t]; k++) {
-      union_unionfind(uf, w.t_edges[t][k].win_a, w.t_edges[t][k].win_b);
-    }
-    total_edges += w.t_n_edges[t];
-    free(w.t_edges[t]);
-    free(w.t_bloom[t]);
-  }
-  free(w.t_edges);
-  free(w.t_n_edges);
-  free(w.t_cap_edges);
-  free(w.t_bloom);
-
-  fprintf(stderr, "[plantsds] Total edges after distance filter: %zu\n",
-          total_edges);
+/* Helper: compute distance between two windows using in-memory hashes */
+PlantsdsDistResult calculate_window_dist(const uint64_t *all_hashes,
+                                         const WindowCoord *wa,
+                                         const WindowCoord *wb,
+                                         uint32_t kmer_size) {
+  PlantsdsSketch sa = {.sketch_size = wa->sketch_size,
+                       .hashes = (uint64_t *)(all_hashes + wa->sketch_offset)};
+  PlantsdsSketch sb = {.sketch_size = wb->sketch_size,
+                       .hashes = (uint64_t *)(all_hashes + wb->sketch_offset)};
+  return calculate_plantsds_dist(&sa, &sb, kmer_size);
 }
 
-static StreamWorkerData *extract_all_windows(char **files, int num_files,
-                                             const Plantsds *r, uint64_t scale,
-                                             size_t window_size,
-                                             size_t step_size, size_t min_bases,
-                                             int n_threads) {
-  fprintf(stderr, "[plantsds] Extracting windows across pangenome...\n");
-  StreamWorkerData *workers = calloc(num_files, sizeof(StreamWorkerData));
-  for (int i = 0; i < num_files; i++) {
-    workers[i].filename = files[i];
-    get_basename(files[i], workers[i].bname, sizeof(workers[i].bname));
-    workers[i].r = r;
-    workers[i].scale = scale;
-    workers[i].window_size = window_size;
-    workers[i].step_size = step_size;
-    workers[i].min_bases = min_bases;
-  }
-  kt_for(n_threads, stream_pangenome_worker, workers, num_files);
-  return workers;
-}
+// ==============================================================
+// 5. REGION CLUSTERING & OUTPUT
+// ==============================================================
 
-static void merge_global_data(StreamWorkerData *workers, int num_files,
-                              const char *out_prefix, uint64_t **out_all_hashes,
-                              WindowCoord **out_coords,
-                              size_t *out_num_sketches,
-                              GenomeSeqLen **out_seq_lens,
-                              size_t *out_num_seqs) {
-  size_t total_hashes = 0, total_sketches = 0, total_seqs = 0;
-  for (int i = 0; i < num_files; i++) {
-    total_hashes += workers[i].num_all_hashes;
-    total_sketches += workers[i].num_sketches;
-    total_seqs += workers[i].num_seqs;
-  }
-
-  uint64_t *all_hashes =
-      total_hashes ? malloc(total_hashes * sizeof(uint64_t)) : NULL;
-  WindowCoord *coords =
-      total_sketches ? malloc(total_sketches * sizeof(WindowCoord)) : NULL;
-  GenomeSeqLen *seq_lens =
-      total_seqs ? malloc(total_seqs * sizeof(GenomeSeqLen)) : NULL;
-
-  size_t g_hash_offset = 0;
-  size_t g_sketch_offset = 0;
-  size_t g_seq_offset = 0;
-
-  char path_buf[PATH_MAX];
-  snprintf(path_buf, sizeof(path_buf), "%s.window.bed", out_prefix);
-  FILE *bed_fp = fopen(path_buf, "w");
-
-  for (int i = 0; i < num_files; i++) {
-    StreamWorkerData *w = &workers[i];
-
-    if (w->num_all_hashes > 0) {
-      memcpy(all_hashes + g_hash_offset, w->all_hashes,
-             w->num_all_hashes * sizeof(uint64_t));
-    }
-
-    if (w->num_seqs > 0) {
-      memcpy(seq_lens + g_seq_offset, w->seq_lens,
-             w->num_seqs * sizeof(GenomeSeqLen));
-    }
-
-    for (size_t j = 0; j < w->num_sketches; j++) {
-      WindowCoord c = w->coords[j];
-      c.sketch_offset += g_hash_offset;
-      c.seq_id += g_seq_offset;
-      coords[g_sketch_offset + j] = c;
-
-      if (bed_fp) {
-        char chr_name[512];
-        snprintf(chr_name, sizeof(chr_name), "%s-%s", seq_lens[c.seq_id].genome,
-                 seq_lens[c.seq_id].seq);
-        fprintf(bed_fp, "%s\t%zu\t%zu\t%s_%zu_%zu\n", chr_name, c.start, c.end,
-                chr_name, c.start, c.end);
-      }
-    }
-
-    g_hash_offset += w->num_all_hashes;
-    g_sketch_offset += w->num_sketches;
-    g_seq_offset += w->num_seqs;
-
-    free(w->all_hashes);
-    free(w->coords);
-    free(w->seq_lens);
-  }
-
-  if (bed_fp)
-    fclose(bed_fp);
-
-  *out_all_hashes = all_hashes;
-  *out_coords = coords;
-  *out_num_sketches = total_sketches;
-  *out_seq_lens = seq_lens;
-  *out_num_seqs = total_seqs;
-}
-
-KHASH_MAP_INIT_STR(genome_map, uint32_t)
-
-static void build_duplicate_regions(UnionFind *uf, size_t num_sketches,
-                                    int num_files, char **files,
-                                    GenomeSeqLen *seq_lens, WindowCoord *coords,
-                                    int min_copy, int max_copy,
-                                    PlantsdsDupRegion **out_regions,
-                                    size_t *out_n_regions) {
+void build_duplicate_regions(UnionFind *uf, size_t num_sketches, int num_files,
+                             char **files, GenomeSeqLen *seq_lens,
+                             WindowCoord *coords, int min_copy, int max_copy,
+                             PlantsdsDupRegion **out_regions,
+                             size_t *out_n_regions) {
   /* O(1) genome -> file_id lookup via hash map (replaces O(N*F) loop) */
   khash_t(genome_map) *gmap = kh_init(genome_map);
   for (int f = 0; f < num_files; f++) {
@@ -1037,8 +651,163 @@ static void build_duplicate_regions(UnionFind *uf, size_t num_sketches,
   *out_n_regions = n_dup_regions;
 }
 
-static void write_dup_bed(const char *out_prefix,
-                          PlantsdsDupRegion *dup_regions, size_t n_merged) {
+/* Merge adjacent/overlapping regions in the same SD family.
+ * Returns the new count of merged regions. */
+size_t merge_dup_regions(PlantsdsDupRegion *regions, size_t n,
+                         uint32_t adjacency_threshold) {
+  if (n <= 1)
+    return n;
+
+  qsort(regions, n, sizeof(PlantsdsDupRegion), compare_dup_region);
+
+  size_t out = 0;
+  for (size_t i = 1; i < n; i++) {
+    if (strcmp(regions[i].cluster_id, regions[out].cluster_id) == 0 &&
+        strcmp(regions[i].chrom, regions[out].chrom) == 0 &&
+        (regions[i].window_idx <=
+             regions[out].window_idx + adjacency_threshold ||
+         regions[i].start <= regions[out].end)) {
+      if (regions[i].end > regions[out].end)
+        regions[out].end = regions[i].end;
+      if (regions[i].window_idx > regions[out].window_idx)
+        regions[out].window_idx = regions[i].window_idx;
+      free(regions[i].cluster_id);
+      free(regions[i].chrom);
+    } else {
+      out++;
+      if (out != i)
+        regions[out] = regions[i];
+    }
+  }
+  return out + 1;
+}
+
+void extract_flankings(char **files, int num_files, const Plantsds *r,
+                       uint64_t scale, PlantsdsDupRegion *regions,
+                       size_t n_regions, size_t flank_size, int n_threads) {
+  FlankingWorkerData w = {files, r, scale, regions, n_regions, flank_size};
+  kt_for(n_threads, extract_flankings_worker, &w, num_files);
+}
+
+void extract_flankings_worker(void *data, long f, int tid) {
+  (void)tid;
+  FlankingWorkerData *w = (FlankingWorkerData *)data;
+
+  char bname[256];
+  get_basename(w->files[f], bname, sizeof(bname));
+
+  gzFile fp = gzopen(w->files[f], "r");
+  if (!fp)
+    return;
+  kseq_t *ks = kseq_init(fp);
+  if (!ks) {
+    gzclose(fp);
+    return;
+  }
+
+  while (kseq_read(ks) >= 0) {
+    char chr_name[512];
+    snprintf(chr_name, sizeof(chr_name), "%s-%s", bname, ks->name.s);
+
+    for (size_t i = 0; i < w->n_regions; i++) {
+      if (strcmp(w->regions[i].chrom, chr_name) == 0) {
+        size_t start = w->regions[i].start;
+        size_t end = w->regions[i].end;
+        size_t left_start = start > w->flank_size ? start - w->flank_size : 0;
+        size_t right_end =
+            end + w->flank_size > ks->seq.l ? ks->seq.l : end + w->flank_size;
+
+        size_t left_len = start - left_start;
+        size_t right_len = right_end - end;
+
+        /* Free previous flanking sketch if being overwritten */
+        free(w->regions[i].flank_sketch.hashes);
+        w->regions[i].flank_sketch.hashes = NULL;
+        w->regions[i].flank_sketch.sketch_size = 0;
+
+        uint8_t *flank_seq = malloc(left_len + right_len);
+        if (left_len > 0)
+          memcpy(flank_seq, ks->seq.s + left_start, left_len);
+        if (right_len > 0)
+          memcpy(flank_seq + left_len, ks->seq.s + end, right_len);
+
+        HashPool pool;
+        init_hash_pool(&pool, UINT64_MAX / w->scale);
+        extract_hash(w->r, &pool, flank_seq, left_len + right_len);
+        finalize_hash_pool(&pool, &w->regions[i].flank_sketch.hashes,
+                           &w->regions[i].flank_sketch.sketch_size);
+
+        free(flank_seq);
+      }
+    }
+  }
+  kseq_destroy(ks);
+  gzclose(fp);
+}
+
+void perform_subclustering(PlantsdsDupRegion *regions, size_t n_merged,
+                           double max_dist, int n_threads, uint32_t kmer_size) {
+  UnionFind sub_uf;
+  init_unionfind(&sub_uf, n_merged);
+
+  SubclusterData w;
+  w.regions = regions;
+  w.max_dist = max_dist;
+  w.n_merged = n_merged;
+  w.kmer_size = kmer_size;
+  w.t_pairs = calloc(n_threads, sizeof(SubclusterPair *));
+  w.t_n_pairs = calloc(n_threads, sizeof(size_t));
+  w.t_cap_pairs = calloc(n_threads, sizeof(size_t));
+
+  kt_for(n_threads, process_subcluster, &w, n_merged);
+
+  for (int t = 0; t < n_threads; t++) {
+    for (size_t k = 0; k < w.t_n_pairs[t]; k++) {
+      union_unionfind(&sub_uf, w.t_pairs[t][k].i, w.t_pairs[t][k].j);
+    }
+    if (w.t_pairs[t])
+      free(w.t_pairs[t]);
+  }
+  free(w.t_pairs);
+  free(w.t_n_pairs);
+  free(w.t_cap_pairs);
+
+  // Map union-find parents to sub_cluster_id
+  uint32_t *mapping = calloc(n_merged, sizeof(uint32_t));
+  uint32_t current_id = 1;
+
+  for (size_t i = 0; i < n_merged; i++) {
+    uint32_t p = find_unionfind(&sub_uf, i);
+    if (mapping[p] == 0) {
+      mapping[p] = current_id++;
+    }
+    regions[i].subcluster_id = mapping[p];
+  }
+  free(mapping);
+  free_unionfind(&sub_uf);
+}
+
+void process_subcluster(void *data, long i, int tid) {
+  SubclusterData *w = (SubclusterData *)data;
+  if (w->regions[i].flank_sketch.sketch_size == 0)
+    return;
+  for (size_t j = i + 1; j < w->n_merged; j++) {
+    if (strcmp(w->regions[i].cluster_id, w->regions[j].cluster_id) != 0)
+      continue; // must be same cluster
+    if (w->regions[j].flank_sketch.sketch_size == 0)
+      continue;
+
+    PlantsdsDistResult d = calculate_plantsds_dist(
+        &w->regions[i].flank_sketch, &w->regions[j].flank_sketch, w->kmer_size);
+    if (d.distance < w->max_dist) {
+      DA_PUSH(w->t_pairs[tid], w->t_n_pairs[tid], w->t_cap_pairs[tid],
+              ((SubclusterPair){(uint32_t)i, (uint32_t)j}));
+    }
+  }
+}
+
+void write_dup_bed(const char *out_prefix, PlantsdsDupRegion *dup_regions,
+                   size_t n_merged) {
   char path_buf[PATH_MAX];
   snprintf(path_buf, sizeof(path_buf), "%s.dup.bed", out_prefix);
   FILE *out_bed = fopen(path_buf, "w");
@@ -1061,168 +830,243 @@ static void write_dup_bed(const char *out_prefix,
   fclose(out_bed);
 }
 
-int run_pangenome(int num_files, char **files, size_t flank_size,
-                  const Plantsds *r, uint64_t scale, size_t window_size,
-                  size_t step_size, size_t min_bases, double max_dist,
-                  int min_copy, int max_copy, const char *out_prefix,
-                  int n_threads, uint32_t adjacency_threshold,
-                  double subcluster_dist) {
-  uint64_t *all_hashes = NULL;
-  WindowCoord *coords = NULL;
-  size_t num_sketches = 0;
-  GenomeSeqLen *seq_lens = NULL;
-  size_t num_seqs = 0;
-
-  StreamWorkerData *workers = extract_all_windows(
-      files, num_files, r, scale, window_size, step_size, min_bases, n_threads);
-  merge_global_data(workers, num_files, out_prefix, &all_hashes, &coords,
-                    &num_sketches, &seq_lens, &num_seqs);
-  free(workers);
-
-  UnionFind uf;
-  init_unionfind(&uf, num_sketches);
-
-  fprintf(stderr,
-          "[plantsds] Discovering candidates and computing distances...\n");
-  discover_and_compute(all_hashes, coords, num_sketches, window_size, max_dist,
-                       n_threads, r->hash_window, &uf);
-
-  PlantsdsDupRegion *dup_regions = NULL;
-  size_t n_dup_regions = 0;
-  build_duplicate_regions(&uf, num_sketches, num_files, files, seq_lens, coords,
-                          min_copy, max_copy, &dup_regions, &n_dup_regions);
-
-  size_t n_merged =
-      merge_dup_regions(dup_regions, n_dup_regions, adjacency_threshold);
-
-  fprintf(stderr,
-          "[INFO] Extracting flanking sequences for sub-clustering...\n");
-  extract_flankings(files, num_files, r, scale, dup_regions, n_merged,
-                    flank_size == 0 ? window_size / 5 : flank_size, n_threads);
-
-  fprintf(stderr, "[INFO] Sub-clustering based on flanking similarities...\n");
-  perform_subclustering(dup_regions, n_merged, subcluster_dist, n_threads,
-                        r->hash_window);
-
-  write_dup_bed(out_prefix, dup_regions, n_merged);
-
-  for (size_t i = 0; i < n_merged; i++) {
-    free(dup_regions[i].chrom);
-    free(dup_regions[i].cluster_id);
-    free(dup_regions[i].flank_sketch.hashes);
-  }
-  free(dup_regions);
-  free_unionfind(&uf);
-  free(all_hashes);
-  free(coords);
-  for (size_t i = 0; i < num_seqs; i++) {
-    free(seq_lens[i].genome);
-    free(seq_lens[i].seq);
-  }
-  free(seq_lens);
-  return 0;
-}
-
-int run_dup(int argc, char **argv) {
-
-  // ==============================================================
-  // CLI defaults
-  // ==============================================================
-
-  uint32_t def_kmer_size = 15;
-  uint64_t def_scale = 10;
-  uint64_t def_hash_seed = 42;
-  size_t window_size = 1000;
-  size_t step_size = 0; /* 0 = auto (window/2) */
-  size_t min_bases = 1000;
-  double max_dist = 0.1;
-  int min_copy = 2;
-  int max_copy = 30;
-  const char *out_prefix = "plantsds";
-  size_t flank_size = 0; /* 0 = auto (window/5) */
-  int n_threads = 8;
-  uint32_t adjacency_threshold = 2;
-  double subcluster_dist = 0.2; /* -1.0: auto */
-
-  ketopt_t opt = KETOPT_INIT;
-  int c;
-  while ((c = ketopt(&opt, argc, argv, 1, "k:s:e:w:t:b:d:m:M:o:p:f:a:D:h",
-                     0)) >= 0) {
-    if (c == 'h') {
-      print_usage();
-      return 0;
-    } else if (c == 'k')
-      def_kmer_size = (uint32_t)atoi(opt.arg);
-    else if (c == 's')
-      def_scale = (uint64_t)strtoull(opt.arg, NULL, 10);
-    else if (c == 'e')
-      def_hash_seed = strtoull(opt.arg, NULL, 0);
-    else if (c == 'w')
-      window_size = (size_t)strtoull(opt.arg, NULL, 10);
-    else if (c == 't')
-      step_size = (size_t)strtoull(opt.arg, NULL, 10);
-    else if (c == 'b')
-      min_bases = (size_t)strtoull(opt.arg, NULL, 10);
-    else if (c == 'd')
-      max_dist = atof(opt.arg);
-    else if (c == 'm')
-      min_copy = atoi(opt.arg);
-    else if (c == 'M')
-      max_copy = atoi(opt.arg);
-    else if (c == 'o')
-      out_prefix = opt.arg;
-    else if (c == 'p')
-      n_threads = atoi(opt.arg) < 1 ? 1 : atoi(opt.arg);
-    else if (c == 'f')
-      flank_size = (size_t)strtoull(opt.arg, NULL, 10);
-    else if (c == 'a')
-      adjacency_threshold = (uint32_t)atoi(opt.arg);
-    else if (c == 'D')
-      subcluster_dist = atof(opt.arg);
-    else
-      return 1;
-  }
-
-  if (subcluster_dist < 0.0)
-    subcluster_dist = max_dist;
-
-  if (step_size == 0)
-    step_size = window_size / 2;
-
-  if (opt.ind == argc) {
-    fprintf(stderr, "[ERROR] Input FASTA files are required.\n");
-    return 1;
-  }
-
-  int num_files = argc - opt.ind;
-  char **files = &argv[opt.ind];
-
-  Plantsds r;
-  init_plantsds(&r, def_kmer_size);
-  r.hash_seed = def_hash_seed;
-  return run_pangenome(num_files, files, flank_size, &r, def_scale, window_size,
-                       step_size, min_bases, max_dist, min_copy, max_copy,
-                       out_prefix, n_threads, adjacency_threshold,
-                       subcluster_dist);
-}
-
 // ==============================================================
-// MAIN
+// 6. CORE ALGORITHMS
 // ==============================================================
 
-int main(int argc, char **argv) {
+void init_plantsds(Plantsds *r, size_t hash_window) {
+  size_t k = hash_window < 42 ? hash_window : 42; /* 3*42=126 bits ≤ 128 */
+  uint32_t kmer_bits = 3 * (uint32_t)k;
 
-  if (argc < 2) {
-    print_usage();
-    return 1;
+  __uint128_t remover_mask =
+      (kmer_bits > 3) ? (((__uint128_t)1 << (kmer_bits - 3)) - 1) : 0;
+  /* remover mask to forget previous base */
+
+  r->hash_window = k;
+  r->remover_mask = remover_mask;
+  r->kmer_bits = kmer_bits;
+  r->rc_shift =
+      (kmer_bits > 0) ? (128 - kmer_bits) : 128; /* reverse_complement shift */
+}
+
+/* Extract plantsds hash and insert in HashPool */
+__attribute__((hot)) void extract_hash(const Plantsds *r, HashPool *pool,
+                                       const uint8_t *seq, size_t len) {
+  size_t K = r->hash_window;
+  __uint128_t fwd = 0;
+  size_t valid = 0;
+
+  for (size_t idx = 0; idx < len; idx++) {
+    /* Convert to numerical values */
+    int8_t lv = BASE_LOOKUP[seq[idx]];
+    if (lv < 0) {
+      fwd = 0;
+      valid = 0;
+      continue;
+    }
+
+    /* Concat for fwd hash */
+    fwd = ((fwd & r->remover_mask) << 3) | (uint8_t)lv;
+    if (valid < K)
+      valid++;
+    if (valid < K)
+      continue;
+
+    /* Reverse bits for reverse complement */
+    __uint128_t rev = reverse_bits128(fwd) >> r->rc_shift;
+    /* Min operation to canonicalize */
+    __uint128_t canon = fwd < rev ? fwd : rev;
+    /* Mix hash to avoid collision */
+    uint64_t h = mix_hash(canon, r->hash_seed);
+
+    /* FracMinHash */
+    if (h < pool->hash_threshold)
+      insert_hash_pool(pool, h);
   }
+}
 
-  for (int i = 1; i < argc; i++) {
-    if (strcmp(argv[i], "--help") == 0) {
-      print_usage();
-      return 0;
+void init_hash_pool(HashPool *pool, uint64_t threshold) {
+  *pool = (HashPool){.hash_threshold = threshold};
+}
+
+void insert_hash_pool(HashPool *pool, uint64_t h) {
+  if (h >= pool->hash_threshold)
+    return;
+  DA_PUSH(pool->hashes, pool->size, pool->cap, h);
+}
+
+void finalize_hash_pool(HashPool *pool, uint64_t **out_hashes,
+                        size_t *out_size) {
+  size_t n = pool->size;
+  if (n) {
+    qsort(pool->hashes, n, sizeof(uint64_t), compare_uint64);
+    /* Deduplicate in-place */
+    size_t u = 0;
+    for (size_t i = 0; i < n; i++) {
+      if (u == 0 || pool->hashes[i] != pool->hashes[u - 1])
+        pool->hashes[u++] = pool->hashes[i];
+    }
+    n = u;
+    uint64_t *nh = realloc(pool->hashes, n * sizeof(uint64_t));
+    if (nh)
+      pool->hashes = nh;
+  }
+  *out_size = n;
+  *out_hashes = n ? pool->hashes : NULL;
+  pool->hashes = NULL;
+  pool->size = pool->cap = 0;
+}
+
+/* Calculate distance between two sketch sets */
+PlantsdsDistResult calculate_plantsds_dist(const PlantsdsSketch *ref,
+                                           const PlantsdsSketch *query,
+                                           uint32_t kmer_size) {
+  PlantsdsDistResult res = {0.0, 1.0, 0};
+
+  size_t shared = 0, i = 0, j = 0;
+
+  /* Set operations with two pointer algorithm; ref and query are sorted. */
+  while (i < ref->sketch_size && j < query->sketch_size) {
+    if (ref->hashes[i] == query->hashes[j]) {
+      shared++;
+      i++;
+      j++;
+    } else if (ref->hashes[i] < query->hashes[j]) {
+      i++;
+    } else {
+      j++;
     }
   }
 
-  return run_dup(argc, argv);
+  /* Calculate distance with containment method */
+  res.shared_hashes = shared;
+  if (ref->sketch_size > 0 && query->sketch_size > 0) {
+    res.containment =
+        0.5 * shared * (1.0 / ref->sketch_size + 1.0 / query->sketch_size);
+    res.distance = 1.0 - pow(res.containment, 1.0 / (double)kmer_size);
+  }
+  return res;
+}
+
+void init_unionfind(UnionFind *uf, size_t n) {
+  uf->n = n;
+  uf->parent = (uint32_t *)malloc(n * sizeof(uint32_t));
+  uf->rank = (uint8_t *)calloc(n, sizeof(uint8_t));
+  for (size_t i = 0; i < n; i++)
+    uf->parent[i] = (uint32_t)i;
+}
+
+uint32_t find_unionfind(UnionFind *uf, uint32_t x) {
+  while (uf->parent[x] != x) {
+    uf->parent[x] = uf->parent[uf->parent[x]]; /* path splitting */
+    x = uf->parent[x];
+  }
+  return x;
+}
+
+void union_unionfind(UnionFind *uf, uint32_t a, uint32_t b) {
+  a = find_unionfind(uf, a);
+  b = find_unionfind(uf, b);
+  if (a == b)
+    return;
+  if (uf->rank[a] < uf->rank[b])
+    SWAP(uint32_t, a, b);
+  uf->parent[b] = a;
+  if (uf->rank[a] == uf->rank[b])
+    uf->rank[a]++;
+}
+
+void free_unionfind(UnionFind *uf) {
+  free(uf->parent);
+  free(uf->rank);
+}
+
+// ==============================================================
+// 7. UTILITIES
+// ==============================================================
+
+void get_basename(const char *filename, char *basename, size_t size) {
+  const char *slash = strrchr(filename, '/');
+  const char *base = slash ? slash + 1 : filename;
+  strncpy(basename, base, size - 1);
+  basename[size - 1] = '\0';
+  char *dot = strchr(basename, '.');
+  if (dot)
+    *dot = '\0';
+}
+
+uint64_t mix_hash(__uint128_t hash_value, uint64_t seed) {
+  __uint128_t p = (hash_value ^ MIX_CONST1) * ((__uint128_t)seed ^ MIX_CONST2);
+  return (uint64_t)(p ^ (p >> 64));
+}
+
+uint64_t reverse_bits64(uint64_t n) {
+#if defined(__aarch64__)
+  /* reverse bits (rbits) asm command for ARM chips */
+  uint64_t r;
+  __asm__("rbit %0, %1" : "=r"(r) : "r"(n));
+  return r;
+#else
+  /* manually reverse bits for x86_64 chips */
+  uint64_t r = __builtin_bswap64(n);
+  r = ((r & 0x5555555555555555ULL) << 1) | ((r & 0xAAAAAAAAAAAAAAAAULL) >> 1);
+  r = ((r & 0x3333333333333333ULL) << 2) | ((r & 0xCCCCCCCCCCCCCCCCULL) >> 2);
+  r = ((r & 0x0F0F0F0F0F0F0F0FULL) << 4) | ((r & 0xF0F0F0F0F0F0F0F0ULL) >> 4);
+  return r;
+#endif
+}
+
+__uint128_t reverse_bits128(__uint128_t n) {
+  return ((__uint128_t)reverse_bits64((uint64_t)n) << 64) |
+         reverse_bits64((uint64_t)(n >> 64));
+}
+
+/* Binary search: first index where arr[i] >= target */
+size_t lower_bound_u64(const uint64_t *arr, size_t n, uint64_t target) {
+  size_t lo = 0, hi = n;
+  while (lo < hi) {
+    size_t mid = lo + (hi - lo) / 2;
+    if (arr[mid] < target)
+      lo = mid + 1;
+    else
+      hi = mid;
+  }
+  return lo;
+}
+
+/* Candidate pair stored as single uint64: (min << 32) | max */
+uint64_t encode_pair(uint32_t a, uint32_t b) {
+  return a < b ? ((uint64_t)a << 32) | b : ((uint64_t)b << 32) | a;
+}
+
+int bloom_test_and_set(uint8_t *bloom, uint64_t key) {
+  uint32_t h1 = (uint32_t)(key)&BLOOM_MASK;
+  uint32_t h2 = (uint32_t)(key >> 22) & BLOOM_MASK;
+  int was_set =
+      ((bloom[h1 >> 3] >> (h1 & 7)) & 1) & ((bloom[h2 >> 3] >> (h2 & 7)) & 1);
+  bloom[h1 >> 3] |= (uint8_t)(1 << (h1 & 7));
+  bloom[h2 >> 3] |= (uint8_t)(1 << (h2 & 7));
+  return was_set;
+}
+
+/* Wrapper for macro to use in `qsort`*/
+int compare_uint64(const void *a, const void *b) {
+  return CMP(*(const uint64_t *)a, *(const uint64_t *)b);
+}
+
+int compare_hash_entry(const void *a, const void *b) {
+  const HashWindowEntry *ea = (const HashWindowEntry *)a,
+                        *eb = (const HashWindowEntry *)b;
+  return ea->hash != eb->hash ? CMP(ea->hash, eb->hash)
+                              : CMP(ea->window_id, eb->window_id);
+}
+
+int compare_dup_region(const void *a, const void *b) {
+  const PlantsdsDupRegion *ra = (const PlantsdsDupRegion *)a,
+                          *rb = (const PlantsdsDupRegion *)b;
+  int c1 = strcmp(ra->cluster_id, rb->cluster_id);
+  if (c1)
+    return c1;
+  int c2 = strcmp(ra->chrom, rb->chrom);
+  return c2 ? c2 : CMP(ra->start, rb->start);
 }
