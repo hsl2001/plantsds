@@ -149,7 +149,6 @@ typedef struct {
   uint64_t scale;
   PlantsdsDupRegion *regions;
   size_t n_regions;
-  size_t flank_size;
 } FlankingWorkerData;
 
 typedef struct {
@@ -225,7 +224,7 @@ size_t merge_dup_regions(PlantsdsDupRegion *regions, size_t n,
                          uint32_t adjacency_threshold);
 void extract_flankings(char **files, int num_files, const Plantsds *r,
                        uint64_t scale, PlantsdsDupRegion *regions,
-                       size_t n_regions, size_t flank_size, int n_threads);
+                       size_t n_regions, int n_threads);
 void extract_flankings_worker(void *data, long f, int tid);
 void perform_subclustering(PlantsdsDupRegion *regions, size_t n_merged,
                            double max_dist, int n_threads, uint32_t kmer_size);

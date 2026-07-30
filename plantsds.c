@@ -60,15 +60,14 @@ int main(int argc, char **argv) {
   int min_copy = 2;
   int max_copy = 30;
   const char *out_prefix = "plantsds";
-  size_t flank_size = 0; /* 0 = auto (window/5) */
   int n_threads = 8;
   uint32_t adjacency_threshold = 2;
   double subcluster_dist = 0.2; /* -1.0: auto */
 
   ketopt_t opt = KETOPT_INIT;
   int c;
-  while ((c = ketopt(&opt, argc, argv, 1, "k:s:e:w:t:b:d:m:M:o:p:f:a:D:h",
-                     0)) >= 0) {
+  while ((c = ketopt(&opt, argc, argv, 1, "k:s:e:w:t:b:d:m:M:o:p:a:D:h", 0)) >=
+         0) {
     if (c == 'h') {
       print_usage();
       return 0;
@@ -94,8 +93,6 @@ int main(int argc, char **argv) {
       out_prefix = opt.arg;
     else if (c == 'p')
       n_threads = atoi(opt.arg) < 1 ? 1 : atoi(opt.arg);
-    else if (c == 'f')
-      flank_size = (size_t)strtoull(opt.arg, NULL, 10);
     else if (c == 'a')
       adjacency_threshold = (uint32_t)atoi(opt.arg);
     else if (c == 'D')
@@ -154,7 +151,7 @@ int main(int argc, char **argv) {
   fprintf(stderr,
           "[INFO] Extracting flanking sequences for sub-clustering...\n");
   extract_flankings(files, num_files, &r, def_scale, dup_regions, n_merged,
-                    flank_size == 0 ? window_size / 5 : flank_size, n_threads);
+                    n_threads);
 
   fprintf(stderr, "[INFO] Sub-clustering based on flanking similarities...\n");
   perform_subclustering(dup_regions, n_merged, subcluster_dist, n_threads,
@@ -661,8 +658,8 @@ size_t merge_dup_regions(PlantsdsDupRegion *regions, size_t n,
 
 void extract_flankings(char **files, int num_files, const Plantsds *r,
                        uint64_t scale, PlantsdsDupRegion *regions,
-                       size_t n_regions, size_t flank_size, int n_threads) {
-  FlankingWorkerData w = {files, r, scale, regions, n_regions, flank_size};
+                       size_t n_regions, int n_threads) {
+  FlankingWorkerData w = {files, r, scale, regions, n_regions};
   kt_for(n_threads, extract_flankings_worker, &w, num_files);
 }
 
@@ -690,9 +687,13 @@ void extract_flankings_worker(void *data, long f, int tid) {
       if (strcmp(w->regions[i].chrom, chr_name) == 0) {
         size_t start = w->regions[i].start;
         size_t end = w->regions[i].end;
-        size_t left_start = start > w->flank_size ? start - w->flank_size : 0;
-        size_t right_end =
-            end + w->flank_size > ks->seq.l ? ks->seq.l : end + w->flank_size;
+        size_t region_size = end > start ? end - start : 0;
+        size_t dynamic_flank_size = (size_t)(region_size * 0.2);
+        size_t left_start =
+            start > dynamic_flank_size ? start - dynamic_flank_size : 0;
+        size_t right_end = end + dynamic_flank_size > ks->seq.l
+                               ? ks->seq.l
+                               : end + dynamic_flank_size;
 
         size_t left_len = start - left_start;
         size_t right_len = right_end - end;
