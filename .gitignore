@@ -2,3 +2,5 @@ plantsds
 results/
 benchmark
 sedef*
+*bed*
+*.fa*

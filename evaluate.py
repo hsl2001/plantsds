@@ -51,45 +51,98 @@ def generate_simulated_genome(genome_length=5000000, num_dups=200, dup_len=3000)
             
     return true_pairs
 
-def is_match(ra_s, ra_e, rb_s, rb_e, ta_s, ta_e, tb_s, tb_e, tol=100):
-    match1 = abs(ra_s - ta_s) <= tol and abs(ra_e - ta_e) <= tol and abs(rb_s - tb_s) <= tol and abs(rb_e - tb_e) <= tol
-    match2 = abs(ra_s - tb_s) <= tol and abs(ra_e - tb_e) <= tol and abs(rb_s - ta_s) <= tol and abs(rb_e - ta_e) <= tol
-    return match1 or match2
+def save_bedpe(pairs, filepath, chrom="sim"):
+    norm_pairs = []
+    for (s1, e1), (s2, e2) in pairs:
+        if s1 > s2 or (s1 == s2 and e1 > e2):
+            norm_pairs.append(((s2, e2), (s1, e1)))
+        else:
+            norm_pairs.append(((s1, e1), (s2, e2)))
+    norm_pairs.sort(key=lambda p: (p[0][0], p[0][1], p[1][0], p[1][1]))
+    with open(filepath, "w") as f:
+        for (s1, e1), (s2, e2) in norm_pairs:
+            f.write(f"{chrom}\t{s1}\t{e1}\t{chrom}\t{s2}\t{e2}\n")
+    return norm_pairs
 
-def merge_predicted_pairs(pairs, dist=100):
-    normalized = []
-    for p in pairs:
-        r1, r2 = p
-        if r1[0] > r2[0]:
-            r1, r2 = r2, r1
-        normalized.append([list(r1), list(r2)])
-        
-    changed = True
-    while changed:
-        changed = False
-        new_pairs = []
-        used = [False] * len(normalized)
-        for i in range(len(normalized)):
-            if used[i]: continue
-            p1 = normalized[i]
-            for j in range(i + 1, len(normalized)):
-                if used[j]: continue
-                p2 = normalized[j]
-                
-                def can_merge(a, b):
-                    return (min(a[1], b[1]) - max(a[0], b[0])) >= -dist
-                
-                if can_merge(p1[0], p2[0]) and can_merge(p1[1], p2[1]):
-                    p1[0][0] = min(p1[0][0], p2[0][0])
-                    p1[0][1] = max(p1[0][1], p2[0][1])
-                    p1[1][0] = min(p1[1][0], p2[1][0])
-                    p1[1][1] = max(p1[1][1], p2[1][1])
-                    used[j] = True
-                    changed = True
-            new_pairs.append(p1)
-        normalized = new_pairs
-    return [((p[0][0], p[0][1]), (p[1][0], p[1][1])) for p in normalized]
+def merge_intervals(intervals):
+    if not intervals:
+        return 0
+    intervals.sort(key=lambda x: x[0])
+    merged = []
+    cur_s, cur_e = intervals[0]
+    for s, e in intervals[1:]:
+        if s <= cur_e:
+            cur_e = max(cur_e, e)
+        else:
+            merged.append((cur_s, cur_e))
+            cur_s, cur_e = s, e
+    merged.append((cur_s, cur_e))
+    return sum(e - s for s, e in merged)
 
+def evaluate_bp(true_pairs, predicted_pairs):
+    norm_true = []
+    for (s1, e1), (s2, e2) in true_pairs:
+        if s1 > s2 or (s1 == s2 and e1 > e2):
+            norm_true.append(((s2, e2), (s1, e1)))
+        else:
+            norm_true.append(((s1, e1), (s2, e2)))
+            
+    norm_pred = []
+    for (x1, y1), (x2, y2) in predicted_pairs:
+        if x1 > x2 or (x1 == x2 and y1 > y2):
+            norm_pred.append(((x2, y2), (x1, y1)))
+        else:
+            norm_pred.append(((x1, y1), (x2, y2)))
+
+    total_true_bp = sum(max(0, e1 - s1) for (s1, e1), (s2, e2) in norm_true)
+    total_pred_bp = sum(max(0, y1 - x1) for (x1, y1), (x2, y2) in norm_pred)
+
+    if total_true_bp == 0:
+        return 0.0, 0.0, 0.0
+
+    # TP for True Pairs (Recall denominator: total_true_bp)
+    tp_true_bp = 0
+    for (s1, e1), (s2, e2) in norm_true:
+        L_t = max(0, e1 - s1)
+        if L_t == 0: continue
+        intervals = []
+        for (x1, y1), (x2, y2) in norm_pred:
+            # Direct orientation
+            ks = max(0, x1 - s1, x2 - s2)
+            ke = min(L_t, y1 - s1, y2 - s2)
+            if ks < ke:
+                intervals.append((ks, ke))
+            # Cross orientation
+            ks2 = max(0, x2 - s1, x1 - s2)
+            ke2 = min(L_t, y2 - s1, y1 - s2)
+            if ks2 < ke2:
+                intervals.append((ks2, ke2))
+        tp_true_bp += merge_intervals(intervals)
+
+    # TP for Predicted Pairs (Precision denominator: total_pred_bp)
+    tp_pred_bp = 0
+    if total_pred_bp > 0:
+        for (x1, y1), (x2, y2) in norm_pred:
+            L_p = max(0, y1 - x1)
+            if L_p == 0: continue
+            intervals = []
+            for (s1, e1), (s2, e2) in norm_true:
+                # Direct orientation
+                ks = max(0, s1 - x1, s2 - x2)
+                ke = min(L_p, e1 - x1, e2 - x2)
+                if ks < ke:
+                    intervals.append((ks, ke))
+                # Cross orientation
+                ks2 = max(0, s2 - x1, s1 - x2)
+                ke2 = min(L_p, e2 - x1, e1 - x2)
+                if ks2 < ke2:
+                    intervals.append((ks2, ke2))
+            tp_pred_bp += merge_intervals(intervals)
+
+    Sn = tp_true_bp / total_true_bp if total_true_bp > 0 else 0.0
+    Pr = tp_pred_bp / total_pred_bp if total_pred_bp > 0 else 0.0
+    f1 = 2 * Sn * Pr / (Sn + Pr) if (Sn + Pr) > 0 else 0.0
+    return Sn, Pr, f1
 
 def evaluate(true_pairs, max_dist, sub_dist, flank_ratio):
     start_time = time.time()
@@ -107,7 +160,6 @@ def evaluate(true_pairs, max_dist, sub_dist, flank_ratio):
                 chrom, start, end, cluster_id, subcluster_id = parts[0], int(parts[1]), int(parts[2]), parts[3], parts[4]
                 if cluster_id not in clusters:
                     clusters[cluster_id] = []
-                # Store (start, end, subcluster_id)
                 clusters[cluster_id].append((start, end, subcluster_id))
                 
     predicted_pairs = []
@@ -117,40 +169,9 @@ def evaluate(true_pairs, max_dist, sub_dist, flank_ratio):
                 ra_s, ra_e, ra_sub = regions[i]
                 rb_s, rb_e, rb_sub = regions[j]
                 predicted_pairs.append(((ra_s, ra_e), (rb_s, rb_e)))
-                
-    predicted_pairs = merge_predicted_pairs(predicted_pairs)
-    
-    T_count = len(true_pairs)
-    P_count = len(predicted_pairs)
-    
-    true_found = 0
-    for t_pair in true_pairs:
-        (ta_s, ta_e), (tb_s, tb_e) = t_pair
-        found = False
-        for p_pair in predicted_pairs:
-            (ra_s, ra_e), (rb_s, rb_e) = p_pair
-            if is_match(ra_s, ra_e, rb_s, rb_e, ta_s, ta_e, tb_s, tb_e, 1000):
-                found = True
-                break
-        if found:
-            true_found += 1
-            
-    pred_correct = 0
-    for p_pair in predicted_pairs:
-        (ra_s, ra_e), (rb_s, rb_e) = p_pair
-        correct = False
-        for t_pair in true_pairs:
-            (ta_s, ta_e), (tb_s, tb_e) = t_pair
-            if is_match(ra_s, ra_e, rb_s, rb_e, ta_s, ta_e, tb_s, tb_e, 1000):
-                correct = True
-                break
-        if correct:
-            pred_correct += 1
-                    
-    Sn = true_found / T_count if T_count > 0 else 0
-    Pr = pred_correct / P_count if P_count > 0 else 0
-    f1 = 2 * Sn * Pr / (Sn + Pr) if (Sn + Pr) > 0 else 0
-    return Sn, Pr, f1, exec_time
+
+    Sn, Pr, f1 = evaluate_bp(true_pairs, predicted_pairs)
+    return Sn, Pr, f1, exec_time, predicted_pairs
 
 def evaluate_bedpe(true_pairs, filepath):
     if not os.path.exists(filepath): return 0, 0, 0
@@ -166,38 +187,8 @@ def evaluate_bedpe(true_pairs, filepath):
                 predicted_pairs.append(((ra_s, ra_e), (rb_s, rb_e)))
             except ValueError: continue
             
-    predicted_pairs = merge_predicted_pairs(predicted_pairs)
-            
-    T_count = len(true_pairs)
-    P_count = len(predicted_pairs)
-    
-    true_found = 0
-    for t_pair in true_pairs:
-        (ta_s, ta_e), (tb_s, tb_e) = t_pair
-        found = False
-        for p_pair in predicted_pairs:
-            (ra_s, ra_e), (rb_s, rb_e) = p_pair
-            if is_match(ra_s, ra_e, rb_s, rb_e, ta_s, ta_e, tb_s, tb_e, 1000):
-                found = True
-                break
-        if found:
-            true_found += 1
-            
-    pred_correct = 0
-    for p_pair in predicted_pairs:
-        (ra_s, ra_e), (rb_s, rb_e) = p_pair
-        correct = False
-        for t_pair in true_pairs:
-            (ta_s, ta_e), (tb_s, tb_e) = t_pair
-            if is_match(ra_s, ra_e, rb_s, rb_e, ta_s, ta_e, tb_s, tb_e, 1000):
-                correct = True
-                break
-        if correct:
-            pred_correct += 1
-            
-    Sn = true_found / T_count if T_count > 0 else 0
-    Pr = pred_correct / P_count if P_count > 0 else 0
-    f1 = 2 * Sn * Pr / (Sn + Pr) if (Sn + Pr) > 0 else 0
+    save_bedpe(predicted_pairs, "sedef_predict.bedpe")
+    Sn, Pr, f1 = evaluate_bp(true_pairs, predicted_pairs)
     return Sn, Pr, f1
 
 
@@ -206,7 +197,10 @@ if __name__ == "__main__":
     true_pairs = generate_simulated_genome()
     print("Genome generated: sim.fa\n")
 
-    d_values = [i / 1000.0 + 0.01 for i in range(251)]
+    save_bedpe(true_pairs, "true.bedpe")
+    print("Saved true.bedpe\n")
+
+    d_values = [i / 1000.0 + 0.01 for i in range(201)]
     D_values = [0.1]
     f_values = [0.1]
     
@@ -214,11 +208,16 @@ if __name__ == "__main__":
     print("-" * 98)
     
     results = []
+    best_f1 = -1.0
+    best_pred_pairs = []
     
     for sd in D_values:
         for md in d_values:
             for f_val in f_values:
-                sn, pr, f1, exec_time = evaluate(true_pairs, md, sd, f_val)
+                sn, pr, f1, exec_time, pred_pairs = evaluate(true_pairs, md, sd, f_val)
+                if f1 > best_f1:
+                    best_f1 = f1
+                    best_pred_pairs = pred_pairs
                 print(f"{sd:12.2f} | {md:12.2f} | {f_val:15.2f} | {sn:12.4f} | {pr:12.4f} | {f1:12.4f} | {exec_time:10.4f}")
                 results.append({
                     'sub_dist': sd,
@@ -231,10 +230,13 @@ if __name__ == "__main__":
                 })
             print("-" * 98)
 
+    save_bedpe(best_pred_pairs, "predict.bedpe")
+    print("Saved predict.bedpe\n")
+
     # Save to CSV
     df = pd.DataFrame(results)
     df.to_csv("evaluation_results.csv", index=False)
-    print("\nSaved evaluation_results.csv")
+    print("Saved evaluation_results.csv")
 
     if not df.empty:
         best_row = df.loc[df['F1-Score'].idxmax()]
@@ -246,7 +248,6 @@ if __name__ == "__main__":
         print(f"Precision      : {best_row['Precision']:.4f}")
         print(f"F1-Score       : {best_row['F1-Score']:.4f}")
         print(f"Time(s)        : {best_row['Time(s)']:.4f}")
-
 
     print("\nRunning SEDEF benchmark...")
     sedef_sn, sedef_pr, sedef_f1 = 0, 0, 0
@@ -262,11 +263,9 @@ if __name__ == "__main__":
     except Exception as e:
         print("SEDEF execution failed:", e)
 
-
     # Plotting Sn-Pr Curve
     plt.figure(figsize=(8, 6))
     
-    # Sort values by max_dist so that the line plot connects the points in order of max_dist
     df_sorted = df.sort_values('max_dist')
     
     sns.lineplot(
@@ -291,7 +290,6 @@ if __name__ == "__main__":
     )
     if sedef_f1 > 0:
         plt.scatter([sedef_sn], [sedef_pr], color='red', marker='*', s=300, label='SEDEF', zorder=5)
-
 
     plt.xlabel('Recall')
     plt.ylabel('Precision')
