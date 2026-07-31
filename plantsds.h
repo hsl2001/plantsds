@@ -17,8 +17,8 @@ extern "C" {
 // ==============================================================
 // CONSTANTS & MACROS
 // ==============================================================
-#define MIX_CONST1 0xff51afd7ed558ccdULL
-#define MIX_CONST2 0xc4ceb9fe1a85ec53ULL
+#define MIX_CONST1 0xa0761d6478bd642fULL
+#define MIX_CONST2 0xe7037ed1a0b428dbULL
 
 /* Generic dynamic-array capacity reserve */
 #define DA_RESERVE(arr, cap, req_cap)                                          \
@@ -149,6 +149,7 @@ typedef struct {
   uint64_t scale;
   PlantsdsDupRegion *regions;
   size_t n_regions;
+  double flank_ratio;
 } FlankingWorkerData;
 
 typedef struct {
@@ -224,7 +225,7 @@ size_t merge_dup_regions(PlantsdsDupRegion *regions, size_t n,
                          uint32_t adjacency_threshold);
 void extract_flankings(char **files, int num_files, const Plantsds *r,
                        uint64_t scale, PlantsdsDupRegion *regions,
-                       size_t n_regions, int n_threads);
+                       size_t n_regions, int n_threads, double flank_ratio);
 void extract_flankings_worker(void *data, long f, int tid);
 void perform_subclustering(PlantsdsDupRegion *regions, size_t n_merged,
                            double max_dist, int n_threads, uint32_t kmer_size);

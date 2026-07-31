@@ -50,24 +50,25 @@ int main(int argc, char **argv) {
   // CLI defaults
   // ==============================================================
 
-  uint32_t def_kmer_size = 15;
+  uint32_t def_kmer_size = 21;
   uint64_t def_scale = 10;
   uint64_t def_hash_seed = 42;
   size_t window_size = 1000;
   size_t step_size = 0; /* 0 = auto (window/2) */
   size_t min_bases = 1000;
-  double max_dist = 0.1;
+  double max_dist = 0.15;
   int min_copy = 2;
   int max_copy = 30;
   const char *out_prefix = "plantsds";
   int n_threads = 8;
   uint32_t adjacency_threshold = 2;
   double subcluster_dist = 0.2; /* -1.0: auto */
+  double flank_ratio = 0.3;
 
   ketopt_t opt = KETOPT_INIT;
   int c;
-  while ((c = ketopt(&opt, argc, argv, 1, "k:s:e:w:t:b:d:m:M:o:p:a:D:h", 0)) >=
-         0) {
+  while ((c = ketopt(&opt, argc, argv, 1, "k:s:e:w:t:b:d:m:M:o:p:a:D:f:h",
+                     0)) >= 0) {
     if (c == 'h') {
       print_usage();
       return 0;
@@ -97,6 +98,8 @@ int main(int argc, char **argv) {
       adjacency_threshold = (uint32_t)atoi(opt.arg);
     else if (c == 'D')
       subcluster_dist = atof(opt.arg);
+    else if (c == 'f')
+      flank_ratio = atof(opt.arg);
     else
       return 1;
   }
@@ -105,7 +108,7 @@ int main(int argc, char **argv) {
     subcluster_dist = max_dist;
 
   if (step_size == 0)
-    step_size = window_size / 2;
+    step_size = window_size * 9 / 10;
 
   if (opt.ind == argc) {
     fprintf(stderr, "[ERROR] Input FASTA files are required.\n");
@@ -151,7 +154,7 @@ int main(int argc, char **argv) {
   fprintf(stderr,
           "[INFO] Extracting flanking sequences for sub-clustering...\n");
   extract_flankings(files, num_files, &r, def_scale, dup_regions, n_merged,
-                    n_threads);
+                    n_threads, flank_ratio);
 
   fprintf(stderr, "[INFO] Sub-clustering based on flanking similarities...\n");
   perform_subclustering(dup_regions, n_merged, subcluster_dist, n_threads,
@@ -323,8 +326,9 @@ void merge_global_data(StreamWorkerData *workers, int num_files,
   size_t g_seq_offset = 0;
 
   char path_buf[PATH_MAX];
+  FILE *bed_fp;
   snprintf(path_buf, sizeof(path_buf), "%s.window.bed", out_prefix);
-  FILE *bed_fp = fopen(path_buf, "w");
+  bed_fp = fopen(path_buf, "w");
 
   for (int i = 0; i < num_files; i++) {
     StreamWorkerData *w = &workers[i];
@@ -658,8 +662,8 @@ size_t merge_dup_regions(PlantsdsDupRegion *regions, size_t n,
 
 void extract_flankings(char **files, int num_files, const Plantsds *r,
                        uint64_t scale, PlantsdsDupRegion *regions,
-                       size_t n_regions, int n_threads) {
-  FlankingWorkerData w = {files, r, scale, regions, n_regions};
+                       size_t n_regions, int n_threads, double flank_ratio) {
+  FlankingWorkerData w = {files, r, scale, regions, n_regions, flank_ratio};
   kt_for(n_threads, extract_flankings_worker, &w, num_files);
 }
 
@@ -688,7 +692,7 @@ void extract_flankings_worker(void *data, long f, int tid) {
         size_t start = w->regions[i].start;
         size_t end = w->regions[i].end;
         size_t region_size = end > start ? end - start : 0;
-        size_t dynamic_flank_size = (size_t)(region_size * 0.2);
+        size_t dynamic_flank_size = (size_t)(region_size * w->flank_ratio);
         size_t left_start =
             start > dynamic_flank_size ? start - dynamic_flank_size : 0;
         size_t right_end = end + dynamic_flank_size > ks->seq.l
