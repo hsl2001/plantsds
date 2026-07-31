@@ -6,7 +6,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import time
 
-def generate_simulated_genome(genome_length=5000000, num_dups=200, dup_len=3000):
+def generate_simulated_genome(genome_length=50_000_000, num_dups=1000, dup_len=3000):
     bases = ['A', 'C', 'G', 'T']
     genome = [random.choice(bases) for _ in range(genome_length)]
     
@@ -193,7 +193,6 @@ def evaluate_bedpe(true_pairs, filepath):
 
 
 if __name__ == "__main__":
-    print("Generating simulated genome (5Mb) with 200 duplicates...")
     true_pairs = generate_simulated_genome()
     print("Genome generated: sim.fa\n")
 
@@ -255,7 +254,7 @@ if __name__ == "__main__":
         env = os.environ.copy()
         env['PATH'] = "/opt/homebrew/bin:" + os.path.abspath("sedef") + ":" + env.get('PATH', '')
         t0 = time.time()
-        subprocess.run(["./sedef/sedef.sh", "-o", "sedef_out", "-f", "-j", "4", "sim.fa"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env)
+        subprocess.run(["./sedef/sedef.sh", "-o", "sedef_out", "-f", "-j", "8", "sim.fa"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env)
         sedef_exec_time = time.time() - t0
         if os.path.exists("sedef_out/final.bed"):
             sedef_sn, sedef_pr, sedef_f1 = evaluate_bedpe(true_pairs, "sedef_out/final.bed")
