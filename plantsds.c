@@ -108,7 +108,7 @@ int main(int argc, char **argv) {
     subcluster_dist = max_dist;
 
   if (step_size == 0)
-    step_size = window_size * 9 / 10;
+    step_size = window_size * 4 / 5;
 
   if (opt.ind == argc) {
     fprintf(stderr, "[ERROR] Input FASTA files are required.\n");
@@ -183,13 +183,16 @@ void print_usage(void) {
   printf("PlantSDS: Plant Segmental Duplication Scanner\n\n"
          "Usage: plantsds [options] fasta1 [fasta2 ...]\n\n"
          "Options:\n"
-         "  -k: kmer size (default: 15, max: 32)\n"
+         "  -k: kmer size (default: 21)\n"
          "  -s: scale factor (default: 10)\n"
+         "  -e: hash seed (default: 42)\n"
          "  -w: window size in bp (default: 1000)\n"
-         "  -t: step size in bp (default: window/2)\n"
+         "  -t: step size in bp (default: 0 [auto: 80%% of window size])\n"
          "  -b: minimum valid bases per window (default: 1000)\n"
-         "  -d: maximum distance to consider as copy (default: 0.1)\n"
+         "  -d: maximum distance to consider as copy (default: 0.15)\n"
          "  -D: sub-cluster distance threshold (default: 0.2)\n"
+         "  -f: flanking ratio for sub-clustering (default: 0.3)\n"
+         "  -a: adjacency threshold for merging regions (default: 2)\n"
          "  -m: minimum copy count (default: 2)\n"
          "  -M: maximum copy count to filter ubiquitous repeats (default: 30)\n"
          "  -o: output file prefix (default: plantsds)\n"
