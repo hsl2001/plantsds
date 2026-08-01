@@ -43,13 +43,18 @@ def generate_simulated_genome(genome_length=50_000_000, num_dups=1000, dup_len=3
                 
         true_pairs.append(((s1, s1 + dup_len), (s2, s2 + dup_len)))
         
-    with open("sim.fa", "w") as f:
+    fasta_path = f"sim_{os.getpid()}.fa"
+    with open(fasta_path, "w") as f:
         f.write(">sim\n")
         seq = "".join(genome)
         for i in range(0, len(seq), 80):
             f.write(seq[i:i+80] + "\n")
             
-    return true_pairs
+    for ext in [".fai", ".sdx"]:
+        if os.path.exists(fasta_path + ext):
+            os.remove(fasta_path + ext)
+            
+    return true_pairs, fasta_path
 
 def save_bedpe(pairs, filepath, chrom="sim"):
     norm_pairs = []
@@ -144,15 +149,16 @@ def evaluate_bp(true_pairs, predicted_pairs):
     f1 = 2 * Sn * Pr / (Sn + Pr) if (Sn + Pr) > 0 else 0.0
     return Sn, Pr, f1
 
-def evaluate(true_pairs, max_dist, sub_dist, flank_ratio):
+def evaluate(true_pairs, max_dist, sub_dist, flank_ratio, fasta_path):
     start_time = time.time()
-    subprocess.run(["./plantsds", "-d", str(max_dist), "-D", str(sub_dist), "-f", str(flank_ratio), "-p", "8", "-w", "1000", "sim.fa", "-o", "sim_out"], 
+    plantsds_out = f"sim_out_{os.getpid()}"
+    subprocess.run(["./plantsds", "-d", str(max_dist), "-D", str(sub_dist), "-f", str(flank_ratio), "-p", "8", "-w", "1000", fasta_path, "-o", plantsds_out], 
                    check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     exec_time = time.time() - start_time
     
     clusters = {}
-    if os.path.exists("sim_out.dup.bed"):
-        with open("sim_out.dup.bed") as f:
+    if os.path.exists(f"{plantsds_out}.dup.bed"):
+        with open(f"{plantsds_out}.dup.bed") as f:
             for line in f:
                 if line.startswith("#"): continue
                 parts = line.strip().split()
@@ -193,8 +199,8 @@ def evaluate_bedpe(true_pairs, filepath):
 
 
 if __name__ == "__main__":
-    true_pairs = generate_simulated_genome()
-    print("Genome generated: sim.fa\n")
+    true_pairs, fasta_path = generate_simulated_genome()
+    print("Genome generated\n")
 
     save_bedpe(true_pairs, "true.bedpe")
     print("Saved true.bedpe\n")
@@ -213,17 +219,17 @@ if __name__ == "__main__":
     for sd in D_values:
         for md in d_values:
             for f_val in f_values:
-                sn, pr, f1, exec_time, pred_pairs = evaluate(true_pairs, md, sd, f_val)
+                Sn, Pr, f1, exec_time, pred_pairs = evaluate(true_pairs, md, sd, f_val, fasta_path)
                 if f1 > best_f1:
                     best_f1 = f1
                     best_pred_pairs = pred_pairs
-                print(f"{sd:12.2f} | {md:12.2f} | {f_val:15.2f} | {sn:12.4f} | {pr:12.4f} | {f1:12.4f} | {exec_time:10.4f}")
+                print(f"{sd:12.2f} | {md:12.2f} | {f_val:15.2f} | {Sn:12.4f} | {Pr:12.4f} | {f1:12.4f} | {exec_time:10.4f}")
                 results.append({
                     'sub_dist': sd,
                     'max_dist': md,
                     'flank_ratio': f_val,
-                    'Recall': sn,
-                    'Precision': pr,
+                    'Recall': Sn,
+                    'Precision': Pr,
                     'F1-Score': f1,
                     'Time(s)': exec_time
                 })
@@ -253,14 +259,17 @@ if __name__ == "__main__":
     try:
         env = os.environ.copy()
         env['PATH'] = "/opt/homebrew/bin:" + os.path.abspath("sedef") + ":" + env.get('PATH', '')
+        sedef_out_dir = f"sedef_out_{os.getpid()}"
         t0 = time.time()
-        subprocess.run(["./sedef/sedef.sh", "-o", "sedef_out", "-f", "-j", "8", "sim.fa"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env)
+        subprocess.run(["./sedef/sedef.sh", "-o", sedef_out_dir, "-f", "-j", "8", fasta_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env)
         sedef_exec_time = time.time() - t0
-        if os.path.exists("sedef_out/final.bed"):
-            sedef_sn, sedef_pr, sedef_f1 = evaluate_bedpe(true_pairs, "sedef_out/final.bed")
+        if os.path.exists(f"{sedef_out_dir}/final.bed"):
+            sedef_sn, sedef_pr, sedef_f1 = evaluate_bedpe(true_pairs, f"{sedef_out_dir}/final.bed")
+        else:
+            sedef_sn, sedef_pr, sedef_f1 = 0, 0, 0
         print(f"SEDEF -> Recall: {sedef_sn:.4f}, Pr: {sedef_pr:.4f}, F1: {sedef_f1:.4f}, Time: {sedef_exec_time:.4f}s")
     except Exception as e:
-        print("SEDEF execution failed:", e)
+        print(f"SEDEF -> Failed to run: {e}")
 
     # Plotting Sn-Pr Curve
     plt.figure(figsize=(8, 6))
