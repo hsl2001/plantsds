@@ -643,8 +643,7 @@ size_t merge_dup_regions(PlantsdsDupRegion *regions, size_t n,
 
   size_t out = 0;
   for (size_t i = 1; i < n; i++) {
-    if (strcmp(regions[i].cluster_id, regions[out].cluster_id) == 0 &&
-        strcmp(regions[i].chrom, regions[out].chrom) == 0 &&
+    if (strcmp(regions[i].chrom, regions[out].chrom) == 0 &&
         (regions[i].window_idx <=
              regions[out].window_idx + adjacency_threshold ||
          regions[i].start <= regions[out].end)) {
@@ -1028,9 +1027,6 @@ int compare_hash_entry(const void *a, const void *b) {
 int compare_dup_region(const void *a, const void *b) {
   const PlantsdsDupRegion *ra = (const PlantsdsDupRegion *)a,
                           *rb = (const PlantsdsDupRegion *)b;
-  int c1 = strcmp(ra->cluster_id, rb->cluster_id);
-  if (c1)
-    return c1;
   int c2 = strcmp(ra->chrom, rb->chrom);
   return c2 ? c2 : CMP(ra->start, rb->start);
 }
