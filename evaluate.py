@@ -8,77 +8,113 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import time
 
-def generate_simulated_genome(genome_length=100_000_000, num_dups=1000, min_dup_len=1000, max_dup_len=10_000):
+def generate_simulated_genome(num_dups=5000, min_dup_len=1000, max_dup_len=10_000):
+    chrom_sizes = {
+        "chr1": 248956422, "chr2": 242193529, "chr3": 198295559, "chr4": 190214555,
+        "chr5": 181538259, "chr6": 170805979, "chr7": 159345973, "chr8": 145138636,
+        "chr9": 138394717, "chr10": 133797422, "chr11": 135086622, "chr12": 133275309,
+        "chr13": 114364328, "chr14": 107043718, "chr15": 101991189, "chr16": 90338345,
+        "chr17": 83257441, "chr18": 80373285, "chr19": 58617616, "chr20": 64444167,
+        "chr21": 46709983, "chr22": 50818468, "chrX": 156040895, "chrY": 57227415
+    }
+    
     bases_bytes = np.frombuffer(b'ACGT', dtype=np.uint8)
-    genome = bytearray(np.random.choice(bases_bytes, size=genome_length).tobytes())
+    print("Generating 24 human chromosomes in memory (3.1 Gb)...")
+    genomes = {}
+    for chrom, size in chrom_sizes.items():
+        genomes[chrom] = bytearray(np.random.choice(bases_bytes, size=size).tobytes())
     
     true_pairs = []
-    used_intervals = []
+    used_intervals = {chrom: [] for chrom in chrom_sizes}
+    chrom_names = list(chrom_sizes.keys())
     
-    def is_overlap(s, e):
-        idx = bisect.bisect_left(used_intervals, (s, e))
-        if idx > 0 and used_intervals[idx - 1][1] > s:
+    def is_overlap(chrom, s, e):
+        intervals = used_intervals[chrom]
+        idx = bisect.bisect_left(intervals, (s, e))
+        if idx > 0 and intervals[idx - 1][1] > s:
             return True
-        if idx < len(used_intervals) and used_intervals[idx][0] < e:
+        if idx < len(intervals) and intervals[idx][0] < e:
             return True
         return False
 
-    def add_interval(s, e):
-        bisect.insort_left(used_intervals, (s, e))
+    def add_interval(chrom, s, e):
+        bisect.insort_left(used_intervals[chrom], (s, e))
 
+    print(f"Injecting {num_dups} duplications (inter and intra-chromosomal)...")
     for _ in range(num_dups):
         dup_len = random.randint(min_dup_len, max_dup_len)
+        
         while True:
-            s1 = random.randint(0, genome_length - dup_len)
-            if not is_overlap(s1, s1 + dup_len):
-                add_interval(s1, s1 + dup_len)
+            c1 = random.choice(chrom_names)
+            s1 = random.randint(0, chrom_sizes[c1] - dup_len)
+            if not is_overlap(c1, s1, s1 + dup_len):
+                add_interval(c1, s1, s1 + dup_len)
                 break
         
         while True:
-            s2 = random.randint(0, genome_length - dup_len)
-            if not is_overlap(s2, s2 + dup_len):
-                add_interval(s2, s2 + dup_len)
+            c2 = random.choice(chrom_names)
+            s2 = random.randint(0, chrom_sizes[c2] - dup_len)
+            if not is_overlap(c2, s2, s2 + dup_len):
+                add_interval(c2, s2, s2 + dup_len)
                 break
         
-        genome[s2:s2 + dup_len] = genome[s1:s1 + dup_len]
+        genomes[c2][s2:s2 + dup_len] = genomes[c1][s1:s1 + dup_len]
 
         div = random.uniform(0.0, 0.1)
         num_muts = np.random.binomial(dup_len, div)
         if num_muts > 0:
             mut_offsets = np.random.choice(dup_len, size=num_muts, replace=False)
             for offset in mut_offsets:
-                orig = genome[s1 + offset]
+                orig = genomes[c1][s1 + offset]
                 if orig == 65: mut = random.choice(b'CGT')
                 elif orig == 67: mut = random.choice(b'AGT')
                 elif orig == 71: mut = random.choice(b'ACT')
                 else: mut = random.choice(b'ACG')
-                genome[s2 + offset] = mut
+                genomes[c2][s2 + offset] = mut
                 
-        true_pairs.append(((s1, s1 + dup_len), (s2, s2 + dup_len)))
+        true_pairs.append(((c1, s1, s1 + dup_len), (c2, s2, s2 + dup_len)))
         
     fasta_path = f"sim_{os.getpid()}.fa"
+    print("Writing 3.1 Gb genome to FASTA...")
     with open(fasta_path, "wb") as f:
-        f.write(b">sim\n")
-        for i in range(0, len(genome), 80):
-            f.write(genome[i:i+80] + b"\n")
+        for chrom, seq in genomes.items():
+            f.write(f">{chrom}\n".encode())
+            for i in range(0, len(seq), 80):
+                f.write(seq[i:i+80] + b"\n")
             
     for ext in [".fai", ".sdx"]:
         if os.path.exists(fasta_path + ext):
             os.remove(fasta_path + ext)
             
-    return true_pairs, fasta_path
+    global_offset = 0
+    chrom_offsets = {}
+    for chrom, size in chrom_sizes.items():
+        chrom_offsets[chrom] = global_offset
+        global_offset += size + 100_000_000
+            
+    return true_pairs, fasta_path, chrom_offsets
 
-def save_bedpe(pairs, filepath, chrom="sim"):
+def to_global_pairs(pairs, chrom_offsets):
+    global_pairs = []
+    for (c1, s1, e1), (c2, s2, e2) in pairs:
+        g1_s = chrom_offsets[c1] + s1
+        g1_e = chrom_offsets[c1] + e1
+        g2_s = chrom_offsets[c2] + s2
+        g2_e = chrom_offsets[c2] + e2
+        global_pairs.append(((g1_s, g1_e), (g2_s, g2_e)))
+    return global_pairs
+
+def save_bedpe(pairs, filepath):
     norm_pairs = []
-    for (s1, e1), (s2, e2) in pairs:
-        if s1 > s2 or (s1 == s2 and e1 > e2):
-            norm_pairs.append(((s2, e2), (s1, e1)))
+    for (c1, s1, e1), (c2, s2, e2) in pairs:
+        if c1 > c2 or (c1 == c2 and (s1 > s2 or (s1 == s2 and e1 > e2))):
+            norm_pairs.append(((c2, s2, e2), (c1, s1, e1)))
         else:
-            norm_pairs.append(((s1, e1), (s2, e2)))
-    norm_pairs.sort(key=lambda p: (p[0][0], p[0][1], p[1][0], p[1][1]))
+            norm_pairs.append(((c1, s1, e1), (c2, s2, e2)))
+    norm_pairs.sort(key=lambda p: (p[0][0], p[0][1], p[0][2], p[1][0], p[1][1], p[1][2]))
     with open(filepath, "w") as f:
-        for (s1, e1), (s2, e2) in norm_pairs:
-            f.write(f"{chrom}\t{s1}\t{e1}\t{chrom}\t{s2}\t{e2}\n")
+        for (c1, s1, e1), (c2, s2, e2) in norm_pairs:
+            f.write(f"{c1}\t{s1}\t{e1}\t{c2}\t{s2}\t{e2}\n")
     return norm_pairs
 
 def merge_intervals(intervals):
@@ -271,9 +307,10 @@ def evaluate_frag(true_pairs, predicted_pairs, threshold=0.5):
     f1 = 2 * Sn * Pr / (Sn + Pr) if (Sn + Pr) > 0 else 0.0
     return Sn, Pr, f1
 
-def evaluate(true_pairs, max_dist, sub_dist, flank_ratio, fasta_path):
+def evaluate(true_pairs, max_dist, sub_dist, flank_ratio, fasta_path, chrom_offsets):
     start_time = time.time()
     plantsds_out = f"sim_out_{os.getpid()}"
+    print(f"Running PlantSDS with -d {max_dist} -D {sub_dist} -f {flank_ratio}...")
     subprocess.run(["./plantsds", "-d", str(max_dist), "-D", str(sub_dist), "-f", str(flank_ratio), "-p", "8", "-w", "1000", fasta_path, "-o", plantsds_out], 
                    check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     exec_time = time.time() - start_time
@@ -286,23 +323,27 @@ def evaluate(true_pairs, max_dist, sub_dist, flank_ratio, fasta_path):
                 parts = line.strip().split()
                 if len(parts) < 5: continue
                 chrom, start, end, cluster_id, subcluster_id = parts[0], int(parts[1]), int(parts[2]), parts[3], parts[4]
+                if "-" in chrom: chrom = chrom.split("-", 1)[-1]
                 if cluster_id not in clusters:
                     clusters[cluster_id] = []
-                clusters[cluster_id].append((start, end, subcluster_id))
+                clusters[cluster_id].append((chrom, start, end, subcluster_id))
                 
     predicted_pairs = []
     for cluster_id, regions in clusters.items():
         for i in range(len(regions)):
             for j in range(i + 1, len(regions)):
-                ra_s, ra_e, ra_sub = regions[i]
-                rb_s, rb_e, rb_sub = regions[j]
-                predicted_pairs.append(((ra_s, ra_e), (rb_s, rb_e)))
+                ra_c, ra_s, ra_e, ra_sub = regions[i]
+                rb_c, rb_s, rb_e, rb_sub = regions[j]
+                predicted_pairs.append(((ra_c, ra_s, ra_e), (rb_c, rb_s, rb_e)))
 
-    Sn_bp, Pr_bp, f1_bp = evaluate_bp(true_pairs, predicted_pairs)
-    Sn_frag, Pr_frag, f1_frag = evaluate_frag(true_pairs, predicted_pairs)
+    global_true = to_global_pairs(true_pairs, chrom_offsets)
+    global_pred = to_global_pairs(predicted_pairs, chrom_offsets)
+
+    Sn_bp, Pr_bp, f1_bp = evaluate_bp(global_true, global_pred)
+    Sn_frag, Pr_frag, f1_frag = evaluate_frag(global_true, global_pred)
     return Sn_bp, Pr_bp, f1_bp, Sn_frag, Pr_frag, f1_frag, exec_time, predicted_pairs
 
-def evaluate_bedpe(true_pairs, filepath):
+def evaluate_bedpe(true_pairs, filepath, chrom_offsets):
     if not os.path.exists(filepath): return 0, 0, 0, 0, 0, 0
     predicted_pairs = []
     with open(filepath) as f:
@@ -311,25 +352,32 @@ def evaluate_bedpe(true_pairs, filepath):
             parts = line.strip().split()
             if len(parts) < 6: continue
             try:
-                ra_s, ra_e = int(parts[1]), int(parts[2])
-                rb_s, rb_e = int(parts[4]), int(parts[5])
-                predicted_pairs.append(((ra_s, ra_e), (rb_s, rb_e)))
+                c1, ra_s, ra_e = parts[0], int(parts[1]), int(parts[2])
+                c2, rb_s, rb_e = parts[3], int(parts[4]), int(parts[5])
+                if "-" in c1: c1 = c1.split("-", 1)[-1]
+                if "-" in c2: c2 = c2.split("-", 1)[-1]
+                predicted_pairs.append(((c1, ra_s, ra_e), (c2, rb_s, rb_e)))
             except ValueError: continue
             
     save_bedpe(predicted_pairs, "sedef_predict.bedpe")
-    Sn_bp, Pr_bp, f1_bp = evaluate_bp(true_pairs, predicted_pairs)
-    Sn_frag, Pr_frag, f1_frag = evaluate_frag(true_pairs, predicted_pairs)
+    
+    global_true = to_global_pairs(true_pairs, chrom_offsets)
+    global_pred = to_global_pairs(predicted_pairs, chrom_offsets)
+    
+    Sn_bp, Pr_bp, f1_bp = evaluate_bp(global_true, global_pred)
+    Sn_frag, Pr_frag, f1_frag = evaluate_frag(global_true, global_pred)
     return Sn_bp, Pr_bp, f1_bp, Sn_frag, Pr_frag, f1_frag
 
 
 if __name__ == "__main__":
-    true_pairs, fasta_path = generate_simulated_genome()
+    true_pairs, fasta_path, chrom_offsets = generate_simulated_genome()
     print("Genome generated\n")
 
     save_bedpe(true_pairs, "true.bedpe")
     print("Saved true.bedpe\n")
 
-    d_values = [i / 1000.0 + 0.01 for i in range(201)]
+    # Only evaluate a few parameters to save time for 3Gb genome
+    d_values = [0.10, 0.15]
     D_values = [0.1]
     f_values = [0.1]
     
@@ -343,7 +391,7 @@ if __name__ == "__main__":
     for sd in D_values:
         for md in d_values:
             for f_val in f_values:
-                Sn_bp, Pr_bp, f1_bp, Sn_frag, Pr_frag, f1_frag, exec_time, pred_pairs = evaluate(true_pairs, md, sd, f_val, fasta_path)
+                Sn_bp, Pr_bp, f1_bp, Sn_frag, Pr_frag, f1_frag, exec_time, pred_pairs = evaluate(true_pairs, md, sd, f_val, fasta_path, chrom_offsets)
                 if f1_bp > best_f1_bp:
                     best_f1_bp = f1_bp
                     best_pred_pairs = pred_pairs
@@ -396,7 +444,7 @@ if __name__ == "__main__":
         subprocess.run([os.path.join(sedef_dir, "sedef.sh"), "-o", sedef_out_dir, "-f", "-j", "8", fasta_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env)
         sedef_exec_time = time.time() - t0
         if os.path.exists(f"{sedef_out_dir}/final.bed"):
-            sedef_sn_bp, sedef_pr_bp, sedef_f1_bp, sedef_sn_frag, sedef_pr_frag, sedef_f1_frag = evaluate_bedpe(true_pairs, f"{sedef_out_dir}/final.bed")
+            sedef_sn_bp, sedef_pr_bp, sedef_f1_bp, sedef_sn_frag, sedef_pr_frag, sedef_f1_frag = evaluate_bedpe(true_pairs, f"{sedef_out_dir}/final.bed", chrom_offsets)
         print(f"SEDEF -> BP Recall: {sedef_sn_bp:.4f}, Pr: {sedef_pr_bp:.4f}, F1: {sedef_f1_bp:.4f} | Frag Recall: {sedef_sn_frag:.4f}, Pr: {sedef_pr_frag:.4f}, F1: {sedef_f1_frag:.4f}, Time: {sedef_exec_time:.4f}s")
     except Exception as e:
         print(f"SEDEF -> Failed to run: {e}")
