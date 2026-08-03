@@ -232,6 +232,8 @@ void perform_subclustering(PlantsdsDupRegion *regions, size_t n_merged,
 void process_subcluster(void *data, long i, int tid);
 void write_dup_bed(const char *out_prefix, PlantsdsDupRegion *dup_regions,
                    size_t n_merged);
+void write_dup_bedpe(const char *out_prefix, PlantsdsDupRegion *dup_regions,
+                     size_t n_merged);
 
 // 6. CORE ALGORITHMS
 void init_plantsds(Plantsds *r, size_t hash_window);

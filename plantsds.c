@@ -161,6 +161,7 @@ int main(int argc, char **argv) {
                         r.hash_window);
 
   write_dup_bed(out_prefix, dup_regions, n_merged);
+  write_dup_bedpe(out_prefix, dup_regions, n_merged);
 
   for (size_t i = 0; i < n_merged; i++) {
     free(dup_regions[i].chrom);
@@ -812,6 +813,122 @@ void write_dup_bed(const char *out_prefix, PlantsdsDupRegion *dup_regions,
       max_subcluster = dup_regions[i].subcluster_id;
   }
   fclose(out_bed);
+}
+
+typedef struct {
+  const char *c1;
+  size_t s1, e1;
+  const char *c2;
+  size_t s2, e2;
+} BedpePair;
+
+static int compare_dup_region_by_cluster(const void *a, const void *b) {
+  const PlantsdsDupRegion *ra = (const PlantsdsDupRegion *)a,
+                          *rb = (const PlantsdsDupRegion *)b;
+  int c_id = strcmp(ra->cluster_id, rb->cluster_id);
+  if (c_id != 0)
+    return c_id;
+  int c_chr = strcmp(ra->chrom, rb->chrom);
+  if (c_chr != 0)
+    return c_chr;
+  if (ra->start != rb->start)
+    return CMP(ra->start, rb->start);
+  return CMP(ra->end, rb->end);
+}
+
+static int compare_bedpe_pair(const void *a, const void *b) {
+  const BedpePair *pa = (const BedpePair *)a, *pb = (const BedpePair *)b;
+  int c;
+  c = strcmp(pa->c1, pb->c1);
+  if (c != 0)
+    return c;
+  if (pa->s1 != pb->s1)
+    return CMP(pa->s1, pb->s1);
+  if (pa->e1 != pb->e1)
+    return CMP(pa->e1, pb->e1);
+  c = strcmp(pa->c2, pb->c2);
+  if (c != 0)
+    return c;
+  if (pa->s2 != pb->s2)
+    return CMP(pa->s2, pb->s2);
+  return CMP(pa->e2, pb->e2);
+}
+
+void write_dup_bedpe(const char *out_prefix, PlantsdsDupRegion *dup_regions,
+                     size_t n_merged) {
+  if (n_merged == 0)
+    return;
+
+  PlantsdsDupRegion *regions_copy =
+      malloc(n_merged * sizeof(PlantsdsDupRegion));
+  memcpy(regions_copy, dup_regions, n_merged * sizeof(PlantsdsDupRegion));
+  qsort(regions_copy, n_merged, sizeof(PlantsdsDupRegion),
+        compare_dup_region_by_cluster);
+
+  BedpePair *pairs = NULL;
+  size_t n_pairs = 0, cap_pairs = 0;
+
+  size_t i = 0;
+  while (i < n_merged) {
+    size_t j = i + 1;
+    while (j < n_merged && strcmp(regions_copy[i].cluster_id,
+                                  regions_copy[j].cluster_id) == 0) {
+      j++;
+    }
+
+    for (size_t a = i; a < j; a++) {
+      for (size_t b = a + 1; b < j; b++) {
+        const char *c1 = regions_copy[a].chrom;
+        size_t s1 = regions_copy[a].start;
+        size_t e1 = regions_copy[a].end;
+
+        const char *c2 = regions_copy[b].chrom;
+        size_t s2 = regions_copy[b].start;
+        size_t e2 = regions_copy[b].end;
+
+        int swap = 0;
+        int cmp_chrom = strcmp(c1, c2);
+        if (cmp_chrom > 0)
+          swap = 1;
+        else if (cmp_chrom == 0) {
+          if (s1 > s2)
+            swap = 1;
+          else if (s1 == s2 && e1 > e2)
+            swap = 1;
+        }
+
+        if (swap) {
+          DA_PUSH(pairs, n_pairs, cap_pairs,
+                  ((BedpePair){c2, s2, e2, c1, s1, e1}));
+        } else {
+          DA_PUSH(pairs, n_pairs, cap_pairs,
+                  ((BedpePair){c1, s1, e1, c2, s2, e2}));
+        }
+      }
+    }
+    i = j;
+  }
+  free(regions_copy);
+
+  if (n_pairs > 0) {
+    qsort(pairs, n_pairs, sizeof(BedpePair), compare_bedpe_pair);
+  }
+
+  char path_buf[PATH_MAX];
+  snprintf(path_buf, sizeof(path_buf), "%s.dup.bedpe", out_prefix);
+  FILE *out_bedpe = fopen(path_buf, "w");
+  if (!out_bedpe) {
+    fprintf(stderr, "[ERROR] Cannot open output file: %s\n", path_buf);
+    free(pairs);
+    return;
+  }
+
+  for (size_t p = 0; p < n_pairs; p++) {
+    fprintf(out_bedpe, "%s\t%zu\t%zu\t%s\t%zu\t%zu\n", pairs[p].c1, pairs[p].s1,
+            pairs[p].e1, pairs[p].c2, pairs[p].s2, pairs[p].e2);
+  }
+  fclose(out_bedpe);
+  free(pairs);
 }
 
 // ==============================================================
