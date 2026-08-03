@@ -7,6 +7,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
 import time
+import sys
 
 def generate_simulated_genome(num_dups=5000, min_dup_len=1000, max_dup_len=10_000):
     chrom_sizes = {
@@ -307,11 +308,11 @@ def evaluate_frag(true_pairs, predicted_pairs, threshold=0.5):
     f1 = 2 * Sn * Pr / (Sn + Pr) if (Sn + Pr) > 0 else 0.0
     return Sn, Pr, f1
 
-def evaluate(true_pairs, max_dist, sub_dist, flank_ratio, fasta_path, chrom_offsets):
+def evaluate(true_pairs, max_dist, sub_dist, flank_ratio, kmer, scale, window, fasta_path, chrom_offsets):
     start_time = time.time()
     plantsds_out = f"sim_out_{os.getpid()}"
-    print(f"Running PlantSDS with -d {max_dist} -D {sub_dist} -f {flank_ratio}...")
-    subprocess.run(["./plantsds", "-d", str(max_dist), "-D", str(sub_dist), "-f", str(flank_ratio), "-p", "8", "-w", "1000", fasta_path, "-o", plantsds_out], 
+    print(f"Running PlantSDS with -d {max_dist} -D {sub_dist} -f {flank_ratio} -k {kmer} -s {scale} -w {window}...")
+    subprocess.run(["./plantsds", "-k", str(kmer), "-s", str(scale), "-w", str(window), "-d", str(max_dist), "-D", str(sub_dist), "-f", str(flank_ratio), "-p", "8", fasta_path, "-o", plantsds_out], 
                    check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     exec_time = time.time() - start_time
     
@@ -380,9 +381,12 @@ if __name__ == "__main__":
     d_values = [0.10, 0.15]
     D_values = [0.1]
     f_values = [0.1]
+    k_values = [15, 21, 31]
+    s_values = [10, 20]
+    w_values = [1000, 2000]
     
-    print(f"{'sub_dist(-D)':>12} | {'max_dist(-d)':>12} | {'flank_ratio(-f)':>15} | {'BP Sn':>10} | {'BP Pr':>10} | {'BP F1':>10} | {'Frag Sn':>10} | {'Frag Pr':>10} | {'Frag F1':>10} | {'Time(s)':>8}")
-    print("-" * 135)
+    print(f"{'sub_dist(-D)':>12} | {'max_dist(-d)':>12} | {'flank_ratio(-f)':>15} | {'kmer(-k)':>8} | {'scale(-s)':>9} | {'window(-w)':>10} | {'BP Sn':>8} | {'BP Pr':>8} | {'BP F1':>8} | {'Frag Sn':>8} | {'Frag Pr':>8} | {'Frag F1':>8} | {'Time(s)':>8}")
+    print("-" * 165)
     
     results = []
     best_f1_bp = -1.0
@@ -391,24 +395,30 @@ if __name__ == "__main__":
     for sd in D_values:
         for md in d_values:
             for f_val in f_values:
-                Sn_bp, Pr_bp, f1_bp, Sn_frag, Pr_frag, f1_frag, exec_time, pred_pairs = evaluate(true_pairs, md, sd, f_val, fasta_path, chrom_offsets)
-                if f1_bp > best_f1_bp:
-                    best_f1_bp = f1_bp
-                    best_pred_pairs = pred_pairs
-                print(f"{sd:12.2f} | {md:12.2f} | {f_val:15.2f} | {Sn_bp:10.4f} | {Pr_bp:10.4f} | {f1_bp:10.4f} | {Sn_frag:10.4f} | {Pr_frag:10.4f} | {f1_frag:10.4f} | {exec_time:8.4f}")
-                results.append({
-                    'sub_dist': sd,
-                    'max_dist': md,
-                    'flank_ratio': f_val,
-                    'Recall_bp': Sn_bp,
-                    'Precision_bp': Pr_bp,
-                    'F1-Score_bp': f1_bp,
-                    'Recall_frag': Sn_frag,
-                    'Precision_frag': Pr_frag,
-                    'F1-Score_frag': f1_frag,
-                    'Time(s)': exec_time
-                })
-            print("-" * 135)
+                for k in k_values:
+                    for s in s_values:
+                        for w in w_values:
+                            Sn_bp, Pr_bp, f1_bp, Sn_frag, Pr_frag, f1_frag, exec_time, pred_pairs = evaluate(true_pairs, md, sd, f_val, k, s, w, fasta_path, chrom_offsets)
+                            if f1_bp > best_f1_bp:
+                                best_f1_bp = f1_bp
+                                best_pred_pairs = pred_pairs
+                            print(f"{sd:12.2f} | {md:12.2f} | {f_val:15.2f} | {k:8d} | {s:9d} | {w:10d} | {Sn_bp:8.4f} | {Pr_bp:8.4f} | {f1_bp:8.4f} | {Sn_frag:8.4f} | {Pr_frag:8.4f} | {f1_frag:8.4f} | {exec_time:8.4f}")
+                            results.append({
+                                'sub_dist': sd,
+                                'max_dist': md,
+                                'flank_ratio': f_val,
+                                'kmer': k,
+                                'scale': s,
+                                'window': w,
+                                'Recall_bp': Sn_bp,
+                                'Precision_bp': Pr_bp,
+                                'F1-Score_bp': f1_bp,
+                                'Recall_frag': Sn_frag,
+                                'Precision_frag': Pr_frag,
+                                'F1-Score_frag': f1_frag,
+                                'Time(s)': exec_time
+                            })
+                        print("-" * 165)
 
     save_bedpe(best_pred_pairs, "predict.bedpe")
     print("Saved predict.bedpe\n")
@@ -424,6 +434,9 @@ if __name__ == "__main__":
         print(f"sub_dist(-D)   : {best_row_bp['sub_dist']:.2f}")
         print(f"max_dist(-d)   : {best_row_bp['max_dist']:.2f}")
         print(f"flank_ratio(-f): {best_row_bp['flank_ratio']:.2f}")
+        print(f"kmer(-k)       : {int(best_row_bp['kmer'])}")
+        print(f"scale(-s)      : {int(best_row_bp['scale'])}")
+        print(f"window(-w)     : {int(best_row_bp['window'])}")
         print(f"BP Recall      : {best_row_bp['Recall_bp']:.4f}")
         print(f"BP Precision   : {best_row_bp['Precision_bp']:.4f}")
         print(f"BP F1-Score    : {best_row_bp['F1-Score_bp']:.4f}")
@@ -432,22 +445,26 @@ if __name__ == "__main__":
         print(f"Frag F1-Score  : {best_row_bp['F1-Score_frag']:.4f}")
         print(f"Time(s)        : {best_row_bp['Time(s)']:.4f}")
 
-    print("\nRunning SEDEF benchmark...")
     sedef_sn_bp, sedef_pr_bp, sedef_f1_bp = 0, 0, 0
     sedef_sn_frag, sedef_pr_frag, sedef_f1_frag = 0, 0, 0
-    try:
-        env = os.environ.copy()
-        sedef_dir = os.path.abspath("sedef")
-        env['PATH'] = f"{sedef_dir}:{env.get('PATH', '')}"
-        sedef_out_dir = f"sedef_out_{os.getpid()}"
-        t0 = time.time()
-        subprocess.run([os.path.join(sedef_dir, "sedef.sh"), "-o", sedef_out_dir, "-f", "-j", "8", fasta_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env)
-        sedef_exec_time = time.time() - t0
-        if os.path.exists(f"{sedef_out_dir}/final.bed"):
-            sedef_sn_bp, sedef_pr_bp, sedef_f1_bp, sedef_sn_frag, sedef_pr_frag, sedef_f1_frag = evaluate_bedpe(true_pairs, f"{sedef_out_dir}/final.bed", chrom_offsets)
-        print(f"SEDEF -> BP Recall: {sedef_sn_bp:.4f}, Pr: {sedef_pr_bp:.4f}, F1: {sedef_f1_bp:.4f} | Frag Recall: {sedef_sn_frag:.4f}, Pr: {sedef_pr_frag:.4f}, F1: {sedef_f1_frag:.4f}, Time: {sedef_exec_time:.4f}s")
-    except Exception as e:
-        print(f"SEDEF -> Failed to run: {e}")
+
+    if "--no-sedef" not in sys.argv:
+        print("\nRunning SEDEF benchmark...")
+        try:
+            env = os.environ.copy()
+            sedef_dir = os.path.abspath("sedef")
+            env['PATH'] = f"{sedef_dir}:{env.get('PATH', '')}"
+            sedef_out_dir = f"sedef_out_{os.getpid()}"
+            t0 = time.time()
+            subprocess.run([os.path.join(sedef_dir, "sedef.sh"), "-o", sedef_out_dir, "-f", "-j", "8", fasta_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env)
+            sedef_exec_time = time.time() - t0
+            if os.path.exists(f"{sedef_out_dir}/final.bed"):
+                sedef_sn_bp, sedef_pr_bp, sedef_f1_bp, sedef_sn_frag, sedef_pr_frag, sedef_f1_frag = evaluate_bedpe(true_pairs, f"{sedef_out_dir}/final.bed", chrom_offsets)
+            print(f"SEDEF -> BP Recall: {sedef_sn_bp:.4f}, Pr: {sedef_pr_bp:.4f}, F1: {sedef_f1_bp:.4f} | Frag Recall: {sedef_sn_frag:.4f}, Pr: {sedef_pr_frag:.4f}, F1: {sedef_f1_frag:.4f}, Time: {sedef_exec_time:.4f}s")
+        except Exception as e:
+            print(f"SEDEF -> Failed to run: {e}")
+    else:
+        print("\nSkipping SEDEF benchmark (--no-sedef provided).")
 
     # Plotting Sn-Pr Curve (BP and Fragment side-by-side)
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
