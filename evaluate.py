@@ -8,7 +8,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import time
 
-def generate_simulated_genome(genome_length=50_000_000, num_dups=1000, min_dup_len=1000, max_dup_len=20_000):
+def generate_simulated_genome(genome_length=100_000_000, num_dups=1000, min_dup_len=1000, max_dup_len=10_000):
     bases_bytes = np.frombuffer(b'ACGT', dtype=np.uint8)
     genome = bytearray(np.random.choice(bases_bytes, size=genome_length).tobytes())
     
@@ -389,10 +389,11 @@ if __name__ == "__main__":
     sedef_sn_frag, sedef_pr_frag, sedef_f1_frag = 0, 0, 0
     try:
         env = os.environ.copy()
-        env['PATH'] = "/opt/homebrew/bin:" + os.path.abspath("sedef") + ":" + env.get('PATH', '')
+        sedef_dir = os.path.abspath("sedef")
+        env['PATH'] = f"{sedef_dir}:{env.get('PATH', '')}"
         sedef_out_dir = f"sedef_out_{os.getpid()}"
         t0 = time.time()
-        subprocess.run(["./sedef/sedef.sh", "-o", sedef_out_dir, "-f", "-j", "8", fasta_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env)
+        subprocess.run([os.path.join(sedef_dir, "sedef.sh"), "-o", sedef_out_dir, "-f", "-j", "8", fasta_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env)
         sedef_exec_time = time.time() - t0
         if os.path.exists(f"{sedef_out_dir}/final.bed"):
             sedef_sn_bp, sedef_pr_bp, sedef_f1_bp, sedef_sn_frag, sedef_pr_frag, sedef_f1_frag = evaluate_bedpe(true_pairs, f"{sedef_out_dir}/final.bed")
@@ -421,10 +422,10 @@ if __name__ == "__main__":
     sns.scatterplot(data=df, x='Recall_frag', y='Precision_frag', hue='max_dist', style='sub_dist', palette='viridis', s=100, ax=ax2)
     if sedef_f1_frag > 0:
         ax2.scatter([sedef_sn_frag], [sedef_pr_frag], color='red', marker='*', s=300, label='SEDEF', zorder=5)
-    ax2.set_xlabel('Recall (Fragment 90%)')
-    ax2.set_ylabel('Precision (Fragment 90%)')
+    ax2.set_xlabel('Recall')
+    ax2.set_ylabel('Precision')
     ax2.set_ylim(0, 1.1)
-    ax2.set_title('Fragment-level (90% Reciprocal) Recall vs Precision')
+    ax2.set_title('Fragment-level Recall vs Precision')
     ax2.grid(True)
 
     plt.tight_layout()
