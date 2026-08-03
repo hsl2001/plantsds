@@ -51,9 +51,9 @@ int main(int argc, char **argv) {
   // ==============================================================
 
   uint32_t def_kmer_size = 21;
-  uint64_t def_scale = 20;
+  uint64_t def_scale = 16;
   uint64_t def_hash_seed = 42;
-  size_t window_size = 1000;
+  size_t window_size = 1024;
   size_t step_size = 0; /* 0 = auto (window/2) */
   size_t min_bases = 1000;
   double max_dist = 0.15;

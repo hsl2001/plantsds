@@ -378,12 +378,12 @@ if __name__ == "__main__":
     print("Saved true.bedpe\n")
 
     # Only evaluate a few parameters to save time for 3Gb genome
-    d_values = [0.10, 0.15]
-    D_values = [0.1]
-    f_values = [0.1]
-    k_values = [15, 21, 31]
-    s_values = [10, 20]
-    w_values = [1000, 2000]
+    d_values = [0.15]
+    D_values = [0.2]
+    f_values = [0.3]
+    k_values = [21]
+    s_values = [10, 15, 20]
+    w_values = [1000]
     
     print(f"{'sub_dist(-D)':>12} | {'max_dist(-d)':>12} | {'flank_ratio(-f)':>15} | {'kmer(-k)':>8} | {'scale(-s)':>9} | {'window(-w)':>10} | {'BP Sn':>8} | {'BP Pr':>8} | {'BP F1':>8} | {'Frag Sn':>8} | {'Frag Pr':>8} | {'Frag F1':>8} | {'Time(s)':>8}")
     print("-" * 165)
