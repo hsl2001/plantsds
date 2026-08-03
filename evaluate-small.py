@@ -14,15 +14,12 @@ import glob
 chrom_sizes = {
     "chr1": 30_000_000,
     "chr2": 30_000_000,
-    "chr3": 30_000_000,
-    "chr4": 30_000_000,
-    "chr5": 30_000_000
 }
 
-def generate_simulated_genome(num_dups=5000, min_dup_len=1000, max_dup_len=10_000):
+def generate_simulated_genome(num_dups=1000, min_dup_len=1000, max_dup_len=10_000):
     
     bases_bytes = np.frombuffer(b'ACGT', dtype=np.uint8)
-    print("Generating 5 chromosomes in memory (150 Mb)...")
+    print("Generating 5 chromosomes in memory ...")
     genomes = {}
     for chrom, size in chrom_sizes.items():
         genomes[chrom] = bytearray(np.random.choice(bases_bytes, size=size).tobytes())
@@ -78,7 +75,6 @@ def generate_simulated_genome(num_dups=5000, min_dup_len=1000, max_dup_len=10_00
         true_pairs.append(((c1, s1, s1 + dup_len), (c2, s2, s2 + dup_len)))
         
     fasta_path = f"sim_{os.getpid()}.fa"
-    print("Writing 3.1 Gb genome to FASTA...")
     with open(fasta_path, "wb") as f:
         for chrom, seq in genomes.items():
             f.write(f">{chrom}\n".encode())
@@ -310,11 +306,11 @@ def evaluate_frag(true_pairs, predicted_pairs, threshold=0.5):
     f1 = 2 * Sn * Pr / (Sn + Pr) if (Sn + Pr) > 0 else 0.0
     return Sn, Pr, f1
 
-def evaluate(true_pairs, max_dist, sub_dist, flank_ratio, fasta_path, chrom_offsets):
+def evaluate(true_pairs, max_dist, sub_dist, flank_ratio, k_val, s_val, fasta_path, chrom_offsets):
     start_time = time.time()
     plantsds_out = f"sim_out_{os.getpid()}"
-    print(f"Running PlantSDS with -d {max_dist} -D {sub_dist} -f {flank_ratio}...")
-    subprocess.run(["./plantsds", "-d", str(max_dist), "-D", str(sub_dist), "-f", str(flank_ratio), "-p", "8", "-w", "1000", fasta_path, "-o", plantsds_out], 
+    print(f"Running PlantSDS with -d {max_dist} -D {sub_dist} -f {flank_ratio} -k {k_val} -s {s_val}...")
+    subprocess.run(["./plantsds", "-d", str(max_dist), "-D", str(sub_dist), "-f", str(flank_ratio), "-k", str(k_val), "-s", str(s_val), "-p", "8", "-w", "1000", fasta_path, "-o", plantsds_out], 
                    check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     exec_time = time.time() - start_time
     
@@ -374,150 +370,84 @@ def evaluate_bedpe(true_pairs, filepath, chrom_offsets):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Evaluate plantsds performance.")
-    parser.add_argument('--no-gen', action='store_true', help="Skip simulated genome generation")
     parser.add_argument('--no-sedef', action='store_true', help="Skip SEDEF benchmark")
     args = parser.parse_args()
 
-    if args.no_gen:
-        print("Skipping genome generation...")
-        fasta_files = glob.glob("sim_*.fa")
-        if not fasta_files:
-            print("Error: No sim_*.fa file found in current directory.")
-            sys.exit(1)
-        fasta_path = fasta_files[0]
-        
-        if not os.path.exists("true.bedpe"):
-            print("Error: true.bedpe not found. Need true pairs to evaluate.")
-            sys.exit(1)
-            
-        true_pairs = []
-        with open("true.bedpe") as f:
-            for line in f:
-                parts = line.strip().split()
-                if len(parts) >= 6:
-                    c1, s1, e1 = parts[0], int(parts[1]), int(parts[2])
-                    c2, s2, e2 = parts[3], int(parts[4]), int(parts[5])
-                    true_pairs.append(((c1, s1, e1), (c2, s2, e2)))
-                    
-        global_offset = 0
-        chrom_offsets = {}
-        for chrom, size in chrom_sizes.items():
-            chrom_offsets[chrom] = global_offset
-            global_offset += size + 100_000_000
-            
-        print(f"Loaded {len(true_pairs)} true pairs and found fasta {fasta_path}\n")
-    else:
-        true_pairs, fasta_path, chrom_offsets = generate_simulated_genome()
-        print("Genome generated\n")
-
-        save_bedpe(true_pairs, "true.bedpe")
-        print("Saved true.bedpe\n")
-
-    # Only evaluate a few parameters to save time for 3Gb genome
-    d_values = [0.10, 0.15]
-    D_values = [0.1]
-    f_values = [0.1]
-    
-    print(f"{'sub_dist(-D)':>12} | {'max_dist(-d)':>12} | {'flank_ratio(-f)':>15} | {'BP Sn':>10} | {'BP Pr':>10} | {'BP F1':>10} | {'Frag Sn':>10} | {'Frag Pr':>10} | {'Frag F1':>10} | {'Time(s)':>8}")
-    print("-" * 135)
-    
     results = []
-    best_f1_bp = -1.0
-    best_pred_pairs = []
     
-    for sd in D_values:
-        for md in d_values:
-            for f_val in f_values:
-                Sn_bp, Pr_bp, f1_bp, Sn_frag, Pr_frag, f1_frag, exec_time, pred_pairs = evaluate(true_pairs, md, sd, f_val, fasta_path, chrom_offsets)
-                if f1_bp > best_f1_bp:
-                    best_f1_bp = f1_bp
-                    best_pred_pairs = pred_pairs
-                print(f"{sd:12.2f} | {md:12.2f} | {f_val:15.2f} | {Sn_bp:10.4f} | {Pr_bp:10.4f} | {f1_bp:10.4f} | {Sn_frag:10.4f} | {Pr_frag:10.4f} | {f1_frag:10.4f} | {exec_time:8.4f}")
+    print(f"Starting Benchmark: 100 Iterations with Default Parameters")
+    print(f"PlantSDS Defaults: -d 0.15, -D 0.20, -f 0.30, -k 21, -s 16")
+    print("-" * 100)
+    
+    for i in range(1, 101):
+        print(f"\n[Iteration {i}/100]")
+        true_pairs, fasta_path, chrom_offsets = generate_simulated_genome()
+        
+        # PlantSDS parameters
+        md, sd, f_val, k_val, s_val = 0.15, 0.2, 0.3, 21, 16
+        
+        Sn_bp, Pr_bp, f1_bp, Sn_frag, Pr_frag, f1_frag, exec_time, pred_pairs = evaluate(
+            true_pairs, md, sd, f_val, k_val, s_val, fasta_path, chrom_offsets
+        )
+        print(f"PlantSDS -> BP F1: {f1_bp:.4f} | Frag F1: {f1_frag:.4f} | Time: {exec_time:.4f}s")
+        
+        results.append({
+            'Iteration': i,
+            'Tool': 'PlantSDS',
+            'Recall_bp': Sn_bp, 'Precision_bp': Pr_bp, 'F1-Score_bp': f1_bp,
+            'Recall_frag': Sn_frag, 'Precision_frag': Pr_frag, 'F1-Score_frag': f1_frag,
+            'Time(s)': exec_time
+        })
+        
+        if not args.no_sedef:
+            sedef_sn_bp, sedef_pr_bp, sedef_f1_bp = 0, 0, 0
+            sedef_sn_frag, sedef_pr_frag, sedef_f1_frag = 0, 0, 0
+            try:
+                env = os.environ.copy()
+                sedef_dir = os.path.abspath("sedef")
+                env['PATH'] = f"{sedef_dir}:{env.get('PATH', '')}"
+                sedef_out_dir = f"sedef_out_{os.getpid()}_{i}"
+                t0 = time.time()
+                subprocess.run([os.path.join(sedef_dir, "sedef.sh"), "-o", sedef_out_dir, "-f", "-j", "8", fasta_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env)
+                sedef_exec_time = time.time() - t0
+                if os.path.exists(f"{sedef_out_dir}/final.bed"):
+                    sedef_sn_bp, sedef_pr_bp, sedef_f1_bp, sedef_sn_frag, sedef_pr_frag, sedef_f1_frag = evaluate_bedpe(true_pairs, f"{sedef_out_dir}/final.bed", chrom_offsets)
+                print(f"SEDEF    -> BP F1: {sedef_f1_bp:.4f} | Frag F1: {sedef_f1_frag:.4f} | Time: {sedef_exec_time:.4f}s")
                 results.append({
-                    'sub_dist': sd,
-                    'max_dist': md,
-                    'flank_ratio': f_val,
-                    'Recall_bp': Sn_bp,
-                    'Precision_bp': Pr_bp,
-                    'F1-Score_bp': f1_bp,
-                    'Recall_frag': Sn_frag,
-                    'Precision_frag': Pr_frag,
-                    'F1-Score_frag': f1_frag,
-                    'Time(s)': exec_time
+                    'Iteration': i,
+                    'Tool': 'SEDEF',
+                    'Recall_bp': sedef_sn_bp, 'Precision_bp': sedef_pr_bp, 'F1-Score_bp': sedef_f1_bp,
+                    'Recall_frag': sedef_sn_frag, 'Precision_frag': sedef_pr_frag, 'F1-Score_frag': sedef_f1_frag,
+                    'Time(s)': sedef_exec_time
                 })
-            print("-" * 135)
+                subprocess.run(["rm", "-rf", sedef_out_dir])
+            except Exception as e:
+                print(f"SEDEF -> Failed to run: {e}")
+                
+        # Clean up fasta to save space
+        for ext in ["", ".fai", ".sdx"]:
+            if os.path.exists(fasta_path + ext):
+                os.remove(fasta_path + ext)
+        
+        # Save intermediate results in case it crashes
+        df = pd.DataFrame(results)
+        df.to_csv("benchmark_100_results.csv", index=False)
 
-    save_bedpe(best_pred_pairs, "predict.bedpe")
-    print("Saved predict.bedpe\n")
-
-    # Save to CSV
-    df = pd.DataFrame(results)
-    df.to_csv("evaluation_results.csv", index=False)
-    print("Saved evaluation_results.csv")
-
-    if not df.empty:
-        best_row_bp = df.loc[df['F1-Score_bp'].idxmax()]
-        print(f"\n[Best Combination (Max BP F1-Score)]")
-        print(f"sub_dist(-D)   : {best_row_bp['sub_dist']:.2f}")
-        print(f"max_dist(-d)   : {best_row_bp['max_dist']:.2f}")
-        print(f"flank_ratio(-f): {best_row_bp['flank_ratio']:.2f}")
-        print(f"BP Recall      : {best_row_bp['Recall_bp']:.4f}")
-        print(f"BP Precision   : {best_row_bp['Precision_bp']:.4f}")
-        print(f"BP F1-Score    : {best_row_bp['F1-Score_bp']:.4f}")
-        print(f"Frag Recall    : {best_row_bp['Recall_frag']:.4f}")
-        print(f"Frag Precision : {best_row_bp['Precision_frag']:.4f}")
-        print(f"Frag F1-Score  : {best_row_bp['F1-Score_frag']:.4f}")
-        print(f"Time(s)        : {best_row_bp['Time(s)']:.4f}")
-
-    sedef_sn_bp, sedef_pr_bp, sedef_f1_bp = 0, 0, 0
-    sedef_sn_frag, sedef_pr_frag, sedef_f1_frag = 0, 0, 0
-
-    if not args.no_sedef:
-        print("\nRunning SEDEF benchmark...")
-        try:
-            env = os.environ.copy()
-            sedef_dir = os.path.abspath("sedef")
-            env['PATH'] = f"{sedef_dir}:{env.get('PATH', '')}"
-            sedef_out_dir = f"sedef_out_{os.getpid()}"
-            t0 = time.time()
-            subprocess.run([os.path.join(sedef_dir, "sedef.sh"), "-o", sedef_out_dir, "-f", "-j", "8", fasta_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env)
-            sedef_exec_time = time.time() - t0
-            if os.path.exists(f"{sedef_out_dir}/final.bed"):
-                sedef_sn_bp, sedef_pr_bp, sedef_f1_bp, sedef_sn_frag, sedef_pr_frag, sedef_f1_frag = evaluate_bedpe(true_pairs, f"{sedef_out_dir}/final.bed", chrom_offsets)
-            print(f"SEDEF -> BP Recall: {sedef_sn_bp:.4f}, Pr: {sedef_pr_bp:.4f}, F1: {sedef_f1_bp:.4f} | Frag Recall: {sedef_sn_frag:.4f}, Pr: {sedef_pr_frag:.4f}, F1: {sedef_f1_frag:.4f}, Time: {sedef_exec_time:.4f}s")
-        except Exception as e:
-            print(f"SEDEF -> Failed to run: {e}")
-    else:
-        print("\nSkipping SEDEF benchmark (--no-sedef provided).")
-
-    # Plotting Sn-Pr Curve (BP and Fragment side-by-side)
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
-
-    df_sorted = df.sort_values('max_dist')
-
-    # BP plot
-    sns.lineplot(data=df_sorted, x='Recall_bp', y='Precision_bp', hue='sub_dist', palette='tab10', legend=False, alpha=0.5, sort=False, ax=ax1)
-    sns.scatterplot(data=df, x='Recall_bp', y='Precision_bp', hue='max_dist', style='sub_dist', palette='viridis', s=100, ax=ax1)
-    if sedef_f1_bp > 0:
-        ax1.scatter([sedef_sn_bp], [sedef_pr_bp], color='red', marker='*', s=300, label='SEDEF', zorder=5)
-    ax1.set_xlabel('Recall (BP)')
-    ax1.set_ylabel('Precision (BP)')
-    ax1.set_ylim(0, 1.1)
-    ax1.set_title('BP-level Recall vs Precision')
-    ax1.grid(True)
-
-    # Frag plot
-    sns.lineplot(data=df_sorted, x='Recall_frag', y='Precision_frag', hue='sub_dist', palette='tab10', legend=False, alpha=0.5, sort=False, ax=ax2)
-    sns.scatterplot(data=df, x='Recall_frag', y='Precision_frag', hue='max_dist', style='sub_dist', palette='viridis', s=100, ax=ax2)
-    if sedef_f1_frag > 0:
-        ax2.scatter([sedef_sn_frag], [sedef_pr_frag], color='red', marker='*', s=300, label='SEDEF', zorder=5)
-    ax2.set_xlabel('Recall')
-    ax2.set_ylabel('Precision')
-    ax2.set_ylim(0, 1.1)
-    ax2.set_title('Fragment-level Recall vs Precision')
-    ax2.grid(True)
-
-    plt.tight_layout()
-    plt.savefig('evaluation_sn_pr_curve.png', dpi=300)
-    plt.close()
-    print("Saved evaluation_sn_pr_curve.png")
+    print("\n" + "=" * 50)
+    print("Benchmark Complete!")
+    print("Results saved to benchmark_100_results.csv")
+    
+    try:
+        fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+        sns.boxplot(data=df, x='Tool', y='F1-Score_bp', ax=axes[0])
+        axes[0].set_title('BP F1-Score')
+        sns.boxplot(data=df, x='Tool', y='F1-Score_frag', ax=axes[1])
+        axes[1].set_title('Fragment F1-Score')
+        sns.boxplot(data=df, x='Tool', y='Time(s)', ax=axes[2])
+        axes[2].set_title('Execution Time (s)')
+        plt.tight_layout()
+        plt.savefig('benchmark_100_summary.png', dpi=300)
+        plt.close()
+        print("Saved summary plot to benchmark_100_summary.png")
+    except Exception as e:
+        print(f"Failed to generate plot: {e}")
