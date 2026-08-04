@@ -12,15 +12,16 @@ import argparse
 import glob
 
 chrom_sizes = {
-    "chr1": 248956422, "chr2": 242193529, "chr3": 198295559, "chr4": 190214555,
-    "chr5": 181538259, "chr6": 170805979, "chr7": 159345973, "chr8": 145138636,
-    "chr9": 138394717, "chr10": 133797422, "chr11": 135086622, "chr12": 133275309,
-    "chr13": 114364328, "chr14": 107043718, "chr15": 101991189, "chr16": 90338345,
-    "chr17": 83257441, "chr18": 80373285, "chr19": 58617616, "chr20": 64444167,
-    "chr21": 46709983, "chr22": 50818468, "chrX": 156040895, "chrY": 57227415
+    "chr1": 248956422, 
+    #"chr2": 242193529, "chr3": 198295559, "chr4": 190214555,
+    #"chr5": 181538259, "chr6": 170805979, "chr7": 159345973, "chr8": 145138636,
+    #"chr9": 138394717, "chr10": 133797422, "chr11": 135086622, "chr12": 133275309,
+    #"chr13": 114364328, "chr14": 107043718, "chr15": 101991189, "chr16": 90338345,
+    #"chr17": 83257441, "chr18": 80373285, "chr19": 58617616, "chr20": 64444167,
+    #"chr21": 46709983, "chr22": 50818468, "chrX": 156040895, "chrY": 57227415
 }
 
-def generate_simulated_genome(num_dups=5000, min_dup_len=1000, max_dup_len=10_000):
+def generate_simulated_genome(num_dups=100, min_dup_len=1000, max_dup_len=10_000):
     bases_bytes = np.frombuffer(b'ACGT', dtype=np.uint8)
     print("Generating 24 human chromosomes in memory (3.1 Gb)...")
     genomes = {}
@@ -515,6 +516,7 @@ if __name__ == "__main__":
     ax1.set_xlabel('Recall (BP)')
     ax1.set_ylabel('Precision (BP)')
     ax1.set_ylim(0, 1.1)
+    ax2.set_xlim(0, 1.1)
     ax1.set_title('BP-level Recall vs Precision')
     ax1.grid(True)
 
@@ -526,6 +528,7 @@ if __name__ == "__main__":
     ax2.set_xlabel('Recall')
     ax2.set_ylabel('Precision')
     ax2.set_ylim(0, 1.1)
+    ax2.set_xlim(0, 1.1)
     ax2.set_title('Fragment-level Recall vs Precision')
     ax2.grid(True)
 

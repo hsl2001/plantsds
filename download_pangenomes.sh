@@ -10,22 +10,13 @@ mkdir -p "$BASE_DIR"
 
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"; }
 
-# 1. CUCUMBER (Cucumis sativus) - NGDC
-download_cucumber() {
-    log "=== Downloading Cucumber Pangenome ==="
-    local DIR="$BASE_DIR/cucumber/assemblies"
-    mkdir -p "$DIR" && cd "$DIR"
-    # Requires NGDC GSA download links for PRJCA038097, PRJCA043228, PRJCA038675
-    # wget -q "https://ngdc.cncb.ac.cn/gsa/browse/PRJCA038097/download"
-    log "Cucumber: Check NGDC PRJCA038097 for exact fasta URLs."
-}
 
 # 2. WATERMELON (Citrullus lanatus) - CuGenDBv2
 download_watermelon() {
     log "=== Downloading Watermelon Super-Pangenome ==="
     local DIR="$BASE_DIR/watermelon/assemblies"
     mkdir -p "$DIR" && cd "$DIR"
-    wget -c -r -np -nH --cut-dirs=4 "http://cucurbitgenomics.org/v2/ftp/pan-genome/watermelon/graph_pangenome/assemblies/" || true
+    wget -c -r -np -nH --cut-dirs=4 "http://cucurbitgenomics.org/v2/ftp/pan-genome/watermelon/graph_pangenome/assembly/" || true
 }
 
 # 3. TOMATO (Solanum lycopersicum) - Zenodo
@@ -33,8 +24,22 @@ download_tomato() {
     log "=== Downloading Tomato T2T Super-Pangenome ==="
     local DIR="$BASE_DIR/tomato/assemblies"
     mkdir -p "$DIR" && cd "$DIR"
-    wget -c "https://zenodo.org/records/17878268/files/Tomato_T2T_assemblies.tar.gz" || true
-    [ -f "Tomato_T2T_assemblies.tar.gz" ] && tar -xzf Tomato_T2T_assemblies.tar.gz
+    
+    # Zenodo record 17878268 files are individual instead of a single tar.gz
+    python3 -c "
+import urllib.request, json
+url = 'https://zenodo.org/api/records/17878268'
+try:
+    d = json.loads(urllib.request.urlopen(url).read())
+    for f in d.get('files', []):
+        print(f\"{f['links']['self']}\t{f['key']}\")
+except Exception as e:
+    pass
+" | while read -r link key; do
+        if [ -n "$link" ] && [ -n "$key" ]; then
+            wget -c "$link" -O "$key" || true
+        fi
+    done
 }
 
 # 4. MARCHANTIA (Marchantia polymorpha) - MarpolBase
@@ -65,14 +70,26 @@ download_citrus() {
     wget -c -r -np -A "*.fa.gz" "http://citrus.hzau.edu.cn/download/assemblies/" || true
 }
 
-# 7. ARABIDOPSIS (Arabidopsis thaliana) - GitHub
+# 7. ARABIDOPSIS (Arabidopsis thaliana) - GitHub / Edmond
 download_arabidopsis() {
     log "=== Downloading Arabidopsis 69 Pangenome ==="
     local DIR="$BASE_DIR/arabidopsis/assemblies"
     mkdir -p "$DIR" && cd "$DIR"
-    # Download from GitHub release assets
-    # wget -c "https://github.com/qclian/Pan_Ath/releases/download/.../genomes.tar.gz"
-    log "Arabidopsis: Check https://github.com/qclian/Pan_Ath/releases for exact asset URLs."
+    # Download from Edmond Dataverse 10.17617/3.AEOJBL
+    python3 -c "
+import urllib.request, json
+url = 'https://edmond.mpdl.mpg.de/api/datasets/:persistentId/?persistentId=doi:10.17617/3.AEOJBL'
+try:
+    d = json.loads(urllib.request.urlopen(url).read())
+    for f in d['data']['latestVersion']['files']:
+        print(f\"https://edmond.mpdl.mpg.de/api/access/datafile/{f['dataFile']['id']}\t{f['dataFile']['filename']}\")
+except Exception:
+    pass
+" | while read -r link key; do
+        if [ -n "$link" ] && [ -n "$key" ]; then
+            wget -c "$link" -O "$key" || true
+        fi
+    done
 }
 
 # 8. RICE (Oryza sativa) - Figshare / ENA
@@ -80,14 +97,25 @@ download_rice() {
     log "=== Downloading Rice 149 Pangenome ==="
     local DIR="$BASE_DIR/rice/assemblies"
     mkdir -p "$DIR" && cd "$DIR"
-    # Figshare API or direct wget if known
-    # wget -c "https://doi.org/10.25452/figshare.plus.25697817"
-    log "Rice: Check Figshare 25697817 or ENA PRJEB73710 for exact fasta URLs."
+    # Download from Figshare API 25697817
+    python3 -c "
+import urllib.request, json
+url = 'https://api.figshare.com/v2/articles/25697817/files'
+try:
+    d = json.loads(urllib.request.urlopen(url).read())
+    for f in d:
+        print(f\"{f['download_url']}\t{f['name']}\")
+except Exception:
+    pass
+" | while read -r link key; do
+        if [ -n "$link" ] && [ -n "$key" ]; then
+            wget -c "$link" -O "$key" || true
+        fi
+    done
 }
 
 main() {
     log "Starting data downloads..."
-    download_cucumber
     download_watermelon
     download_tomato
     download_marchantia
