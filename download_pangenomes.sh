@@ -10,13 +10,33 @@ mkdir -p "$BASE_DIR"
 
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"; }
 
+DRY_RUN=0
+
+run_wget() {
+    if [[ $DRY_RUN -eq 1 ]]; then
+        echo "[DRY RUN] wget $*"
+    else
+        wget "$@"
+    fi
+}
+
+run_tar_if_exists() {
+    local file="$1"
+    shift
+    if [[ $DRY_RUN -eq 1 ]]; then
+        echo "[DRY RUN] (if $file exists) tar $*"
+    elif [ -f "$file" ]; then
+        tar "$@" || true
+    fi
+}
+
 
 # 2. WATERMELON (Citrullus lanatus) - CuGenDBv2
 download_watermelon() {
     log "=== Downloading Watermelon Super-Pangenome ==="
     local DIR="$BASE_DIR/watermelon/assemblies"
     mkdir -p "$DIR" && cd "$DIR"
-    wget -c -r -np -nH --cut-dirs=4 "http://cucurbitgenomics.org/v2/ftp/pan-genome/watermelon/graph_pangenome/assembly/" || true
+    run_wget -c -r -np -nH --cut-dirs=4 "http://cucurbitgenomics.org/v2/ftp/pan-genome/watermelon/graph_pangenome/assembly/" || true
 }
 
 # 3. TOMATO (Solanum lycopersicum) - Zenodo
@@ -37,7 +57,7 @@ except Exception as e:
     pass
 " | while read -r link key; do
         if [ -n "$link" ] && [ -n "$key" ]; then
-            wget -c "$link" -O "$key" || true
+            run_wget -c "$link" -O "$key" || true
         fi
     done
 }
@@ -47,8 +67,8 @@ download_marchantia() {
     log "=== Downloading Marchantia Pangenome ==="
     local DIR="$BASE_DIR/marchantia/assemblies"
     mkdir -p "$DIR" && cd "$DIR"
-    wget -c "https://marchantia.info/download/pangenome_assemblies.tar.gz" || true
-    [ -f "pangenome_assemblies.tar.gz" ] && tar -xzf pangenome_assemblies.tar.gz
+    run_wget -c "https://marchantia.info/download/pangenome_assemblies.tar.gz" || true
+    run_tar_if_exists "pangenome_assemblies.tar.gz" -xzf pangenome_assemblies.tar.gz
 }
 
 # 5. GRAPEVINE (Vitis vinifera) - Zenodo
@@ -56,10 +76,25 @@ download_grapevine() {
     log "=== Downloading Grapevine Pangenome ==="
     local DIR="$BASE_DIR/grapevine/assemblies"
     mkdir -p "$DIR" && cd "$DIR"
-    wget -c "https://zenodo.org/records/10851547/files/Grapepan_v1.0.tar.gz" || true
-    wget -c "https://zenodo.org/records/10846425/files/T2T_genomes.tar.gz" || true
-    [ -f "Grapepan_v1.0.tar.gz" ] && tar -xzf Grapepan_v1.0.tar.gz
-    [ -f "T2T_genomes.tar.gz" ] && tar -xzf T2T_genomes.tar.gz
+    
+    for rec in 10851548 10846425; do
+        curl -sL "https://zenodo.org/api/records/$rec" | python3 -c "
+import sys, json
+try:
+    d = json.load(sys.stdin)
+    for f in d.get('files', []):
+        link = f.get('links', {}).get('self')
+        key = f.get('key')
+        if link and key and key.endswith('.fa.gz'):
+            print(f'{link}\\t{key}')
+except Exception:
+    pass
+" | while read -r link key; do
+        if [ -n "$link" ] && [ -n "$key" ]; then
+            run_wget -c "$link" -O "$key" || true
+        fi
+    done
+    done
 }
 
 # 6. CITRUS (Citrus spp.) - HZAU FTP
@@ -67,7 +102,22 @@ download_citrus() {
     log "=== Downloading Citrus Pangenome ==="
     local DIR="$BASE_DIR/citrus/assemblies"
     mkdir -p "$DIR" && cd "$DIR"
-    wget -c -r -np -A "*.fa.gz" "http://citrus.hzau.edu.cn/download/assemblies/" || true
+    
+    curl -s "http://citrus.hzau.edu.cn/download.php" | python3 -c "
+import sys, re
+try:
+    html = sys.stdin.read()
+    links = set(re.findall(r'href=\"(/data/Genome_info/[^\"]+)\"', html))
+    for link in links:
+        if link.endswith('.fa') or link.endswith('.fa.gz'):
+            print(f'http://citrus.hzau.edu.cn{link}')
+except Exception:
+    pass
+" | while read -r link; do
+        if [ -n "$link" ]; then
+            run_wget -c "$link" || true
+        fi
+    done
 }
 
 # 7. ARABIDOPSIS (Arabidopsis thaliana) - GitHub / Edmond
@@ -78,16 +128,16 @@ download_arabidopsis() {
     # Download from Edmond Dataverse 10.17617/3.AEOJBL
     python3 -c "
 import urllib.request, json
-url = 'https://edmond.mpdl.mpg.de/api/datasets/:persistentId/?persistentId=doi:10.17617/3.AEOJBL'
+url = 'https://edmond.mpg.de/api/datasets/:persistentId/?persistentId=doi:10.17617/3.AEOJBL'
 try:
     d = json.loads(urllib.request.urlopen(url).read())
     for f in d['data']['latestVersion']['files']:
-        print(f\"https://edmond.mpdl.mpg.de/api/access/datafile/{f['dataFile']['id']}\t{f['dataFile']['filename']}\")
+        print(f\"https://edmond.mpg.de/api/access/datafile/{f['dataFile']['id']}\t{f['dataFile']['filename']}\")
 except Exception:
     pass
 " | while read -r link key; do
         if [ -n "$link" ] && [ -n "$key" ]; then
-            wget -c "$link" -O "$key" || true
+            run_wget -c "$link" -O "$key" || true
         fi
     done
 }
@@ -109,12 +159,19 @@ except Exception:
     pass
 " | while read -r link key; do
         if [ -n "$link" ] && [ -n "$key" ]; then
-            wget -c "$link" -O "$key" || true
+            run_wget -c "$link" -O "$key" || true
         fi
     done
 }
 
 main() {
+    for arg in "$@"; do
+        if [[ "$arg" == "--dry-run" ]]; then
+            DRY_RUN=1
+            log "Running in DRY RUN mode"
+        fi
+    done
+
     log "Starting data downloads..."
     download_watermelon
     download_tomato
