@@ -368,7 +368,7 @@ if __name__ == "__main__":
     all_results = []
 
     # genome_sizes_to_test = [100_000_00, 200_000_00, 500_000_00, 1_000_000_00, 1_500_000_00, 2_500_000_00]
-    genome_sizes_to_test = [10_000_000]
+    genome_sizes_to_test = [100_000_000]
 
     for g_size in genome_sizes_to_test:
         print(f"\n======================================")
@@ -376,7 +376,7 @@ if __name__ == "__main__":
         print(f"======================================")
             
         chrom_sizes = {"chr1": g_size}
-        num_dups = num_dups = g_size // 100_000
+        num_dups = num_dups = g_size // 1_000_000
         
         true_pairs, fasta_path, chrom_offsets = generate_simulated_genome(chrom_sizes, num_dups=num_dups)
         
