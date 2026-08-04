@@ -516,7 +516,7 @@ if __name__ == "__main__":
     ax1.set_xlabel('Recall (BP)')
     ax1.set_ylabel('Precision (BP)')
     ax1.set_ylim(0, 1.1)
-    ax2.set_xlim(0, 1.1)
+    ax1.set_xlim(0, 1.1)
     ax1.set_title('BP-level Recall vs Precision')
     ax1.grid(True)
 
