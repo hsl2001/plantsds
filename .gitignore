@@ -6,3 +6,4 @@ sedef*
 *.fa*
 *.png
 *.csv
+venv/

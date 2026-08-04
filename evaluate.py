@@ -23,7 +23,6 @@ chrom_sizes = {
 
 def generate_simulated_genome(num_dups=100, min_dup_len=1000, max_dup_len=10_000):
     bases_bytes = np.frombuffer(b'ACGT', dtype=np.uint8)
-    print("Generating 24 human chromosomes in memory (3.1 Gb)...")
     genomes = {}
     for chrom, size in chrom_sizes.items():
         genomes[chrom] = bytearray(np.random.choice(bases_bytes, size=size).tobytes())
@@ -79,7 +78,6 @@ def generate_simulated_genome(num_dups=100, min_dup_len=1000, max_dup_len=10_000
         true_pairs.append(((c1, s1, s1 + dup_len), (c2, s2, s2 + dup_len)))
         
     fasta_path = f"sim_{os.getpid()}.fa"
-    print("Writing 3.1 Gb genome to FASTA...")
     with open(fasta_path, "wb") as f:
         for chrom, seq in genomes.items():
             f.write(f">{chrom}\n".encode())
@@ -484,6 +482,7 @@ if __name__ == "__main__":
 
     sedef_sn_bp, sedef_pr_bp, sedef_f1_bp = 0, 0, 0
     sedef_sn_frag, sedef_pr_frag, sedef_f1_frag = 0, 0, 0
+    sedef_exec_time = 0
 
     if not args.no_sedef:
         print("\nRunning SEDEF benchmark...")
@@ -501,38 +500,86 @@ if __name__ == "__main__":
         except Exception as e:
             print(f"SEDEF -> Failed to run: {e}")
     else:
-        print("\nSkipping SEDEF benchmark (--no-sedef provided).")
+        print("\nSkipping benchmarks (--no-sedef provided).")
 
-    # Plotting Sn-Pr Curve (BP and Fragment side-by-side)
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
+    biser_sn_bp, biser_pr_bp, biser_f1_bp = 0, 0, 0
+    biser_sn_frag, biser_pr_frag, biser_f1_frag = 0, 0, 0
+    biser_exec_time = 0
 
-    df_sorted = df.sort_values('max_dist')
+    if not args.no_sedef:
+        print("\nRunning BISER benchmark...")
+        try:
+            env = os.environ.copy()
+            env['PATH'] = f"{os.path.expanduser('~/.local/bin')}:{env.get('PATH', '')}"
+            biser_out_file = f"biser_out_{os.getpid()}.bedpe"
+            t0 = time.time()
+            subprocess.run(["biser", "-o", biser_out_file, fasta_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env)
+            biser_exec_time = time.time() - t0
+            if os.path.exists(biser_out_file):
+                biser_sn_bp, biser_pr_bp, biser_f1_bp, biser_sn_frag, biser_pr_frag, biser_f1_frag = evaluate_bedpe(true_pairs, biser_out_file, chrom_offsets)
+            print(f"BISER -> BP Recall: {biser_sn_bp:.4f}, Pr: {biser_pr_bp:.4f}, F1: {biser_f1_bp:.4f} | Frag Recall: {biser_sn_frag:.4f}, Pr: {biser_pr_frag:.4f}, F1: {biser_f1_frag:.4f}, Time: {biser_exec_time:.4f}s")
+        except Exception as e:
+            print(f"BISER -> Failed to run: {e}")
 
-    # BP plot
-    sns.lineplot(data=df_sorted, x='Recall_bp', y='Precision_bp', hue='sub_dist', palette='tab10', legend=False, alpha=0.5, sort=False, ax=ax1)
-    sns.scatterplot(data=df, x='Recall_bp', y='Precision_bp', hue='max_dist', style='sub_dist', palette='viridis', s=100, ax=ax1)
-    if sedef_f1_bp > 0:
-        ax1.scatter([sedef_sn_bp], [sedef_pr_bp], color='red', marker='*', s=300, label='SEDEF', zorder=5)
-    ax1.set_xlabel('Recall (BP)')
-    ax1.set_ylabel('Precision (BP)')
+
+
+    # Plotting
+    fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(18, 6))
+
+    if not df.empty:
+        best_row_bp = df.loc[df['F1-Score_bp'].idxmax()]
+        best_row_frag = df.loc[df['F1-Score_frag'].idxmax()]
+    else:
+        best_row_bp = pd.Series({'Recall_bp': 0, 'Precision_bp': 0})
+        best_row_frag = pd.Series({'Recall_frag': 0, 'Precision_frag': 0})
+
+    tools = ['PlantSDS', 'SEDEF', 'BISER']
+    x = np.arange(len(tools))
+    width = 0.35
+
+    # A1) BP Level Bar Plot
+    bp_rec = [best_row_bp.get('Recall_bp', 0), sedef_sn_bp, biser_sn_bp]
+    bp_pre = [best_row_bp.get('Precision_bp', 0), sedef_pr_bp, biser_pr_bp]
+
+    ax1.bar(x - width/2, bp_rec, width, label='Recall', color='skyblue')
+    ax1.bar(x + width/2, bp_pre, width, label='Precision', color='lightcoral')
+    ax1.set_xticks(x)
+    ax1.set_xticklabels(tools)
     ax1.set_ylim(0, 1.1)
-    ax1.set_xlim(0, 1.1)
-    ax1.set_title('BP-level Recall vs Precision')
-    ax1.grid(True)
+    ax1.set_ylabel('Score')
+    ax1.set_title('BP-level Recall & Precision')
+    ax1.legend()
+    ax1.grid(axis='y', alpha=0.3)
 
-    # Frag plot
-    sns.lineplot(data=df_sorted, x='Recall_frag', y='Precision_frag', hue='sub_dist', palette='tab10', legend=False, alpha=0.5, sort=False, ax=ax2)
-    sns.scatterplot(data=df, x='Recall_frag', y='Precision_frag', hue='max_dist', style='sub_dist', palette='viridis', s=100, ax=ax2)
-    if sedef_f1_frag > 0:
-        ax2.scatter([sedef_sn_frag], [sedef_pr_frag], color='red', marker='*', s=300, label='SEDEF', zorder=5)
-    ax2.set_xlabel('Recall')
-    ax2.set_ylabel('Precision')
+    # A2) Fragment Level Bar Plot
+    frag_rec = [best_row_frag.get('Recall_frag', 0), sedef_sn_frag, biser_sn_frag]
+    frag_pre = [best_row_frag.get('Precision_frag', 0), sedef_pr_frag, biser_pr_frag]
+
+    ax2.bar(x - width/2, frag_rec, width, label='Recall', color='skyblue')
+    ax2.bar(x + width/2, frag_pre, width, label='Precision', color='lightcoral')
+    ax2.set_xticks(x)
+    ax2.set_xticklabels(tools)
     ax2.set_ylim(0, 1.1)
-    ax2.set_xlim(0, 1.1)
-    ax2.set_title('Fragment-level Recall vs Precision')
-    ax2.grid(True)
+    ax2.set_ylabel('Score')
+    ax2.set_title('Fragment-level Recall & Precision')
+    ax2.legend()
+    ax2.grid(axis='y', alpha=0.3)
+
+    # B) F1 vs Time Tradeoff
+    if not df.empty:
+        sns.scatterplot(data=df, x='Time(s)', y='F1-Score_bp', color='blue', alpha=0.6, label='PlantSDS (All)', ax=ax3)
+    if sedef_f1_bp > 0:
+        ax3.scatter([sedef_exec_time], [sedef_f1_bp], color='red', marker='*', s=200, label='SEDEF', zorder=5)
+    if biser_f1_bp > 0:
+        ax3.scatter([biser_exec_time], [biser_f1_bp], color='green', marker='*', s=200, label='BISER', zorder=5)
+
+    ax3.set_xlabel('Time (s)')
+    ax3.set_ylabel('F1-Score (BP)')
+    ax3.set_title('F1-Score vs Execution Time')
+    ax3.legend()
+    ax3.grid(True, alpha=0.3)
 
     plt.tight_layout()
-    plt.savefig('evaluation_sn_pr_curve.png', dpi=300)
+    plt.savefig('evaluation_plots.png', dpi=300)
     plt.close()
-    print("Saved evaluation_sn_pr_curve.png")
+    print("Saved evaluation_plots.png")
