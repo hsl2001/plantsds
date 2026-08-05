@@ -40,7 +40,7 @@ int main(int argc, char **argv) {
   }
 
   for (int i = 1; i < argc; i++) {
-    if (strcmp(argv[i], "--help") == 0) {
+    if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
       print_usage();
       return 0;
     }
@@ -212,6 +212,10 @@ StreamWorkerData *extract_all_windows(char **files, int num_files,
                                       size_t min_bases, int n_threads) {
   fprintf(stderr, "[plantsds] Extracting windows across pangenome...\n");
   StreamWorkerData *workers = calloc(num_files, sizeof(StreamWorkerData));
+  if (!workers) {
+    fprintf(stderr, "[ERROR] Failed to allocate memory for workers\n");
+    exit(1);
+  }
   for (int i = 0; i < num_files; i++) {
     workers[i].filename = files[i];
     get_basename(files[i], workers[i].bname, sizeof(workers[i].bname));
@@ -297,10 +301,8 @@ void stream_pangenome_worker(void *data, long i, int tid) {
         wc->sketch_size = (uint32_t)sketch_size;
         free(hashes);
         w->num_sketches++;
-      } else {
-        if (hashes)
-          free(hashes);
       }
+      /* finalize_hash_pool handles cleanup when sketch_size == 0 */
     }
   }
   kseq_destroy(ks);
@@ -401,6 +403,10 @@ void discover_and_compute(const uint64_t *all_hashes, WindowCoord *coords,
   w.t_n_edges = calloc(n_threads, sizeof(size_t));
   w.t_cap_edges = calloc(n_threads, sizeof(size_t));
   w.t_bloom = malloc(n_threads * sizeof(uint8_t *));
+  if (!w.t_edges || !w.t_n_edges || !w.t_cap_edges || !w.t_bloom) {
+    fprintf(stderr, "[ERROR] Failed to allocate memory for discovery data\n");
+    exit(1);
+  }
   for (int t = 0; t < n_threads; t++)
     w.t_bloom[t] = calloc(BLOOM_SIZE_BYTES, 1);
 
@@ -536,7 +542,11 @@ void build_duplicate_regions(UnionFind *uf, size_t num_sketches, int num_files,
     char bname[256];
     get_basename(files[f], bname, sizeof(bname));
     int ret;
-    khiter_t k = kh_put(genome_map, gmap, strdup(bname), &ret);
+    khiter_t k = kh_put(genome_map, gmap, bname, &ret);
+    if (ret > 0) {
+      /* New key inserted: allocate a persistent copy */
+      kh_key(gmap, k) = strdup(bname);
+    }
     kh_val(gmap, k) = f;
   }
 
@@ -562,7 +572,7 @@ void build_duplicate_regions(UnionFind *uf, size_t num_sketches, int num_files,
 
   uint32_t *max_intra_copy = calloc(n_families + 1, sizeof(uint32_t));
   uint32_t *counts =
-      calloc((size_t)(n_families + 1) * num_files, sizeof(uint32_t));
+      calloc((size_t)(n_families + 1) * (size_t)num_files, sizeof(uint32_t));
   for (size_t i = 0; i < num_sketches; i++) {
     uint32_t fam = find_unionfind(uf, (uint32_t)i);
     uint32_t fid = fam_id[fam];
@@ -1010,6 +1020,9 @@ void finalize_hash_pool(HashPool *pool, uint64_t **out_hashes,
     uint64_t *nh = realloc(pool->hashes, n * sizeof(uint64_t));
     if (nh)
       pool->hashes = nh;
+  } else {
+    /* pool had capacity but no hashes survived — free the buffer */
+    free(pool->hashes);
   }
   *out_size = n;
   *out_hashes = n ? pool->hashes : NULL;
@@ -1052,6 +1065,11 @@ void init_unionfind(UnionFind *uf, size_t n) {
   uf->n = n;
   uf->parent = (uint32_t *)malloc(n * sizeof(uint32_t));
   uf->rank = (uint8_t *)calloc(n, sizeof(uint8_t));
+  if (!uf->parent || !uf->rank) {
+    fprintf(stderr, "[ERROR] Failed to allocate UnionFind for %zu elements\n",
+            n);
+    exit(1);
+  }
   for (size_t i = 0; i < n; i++)
     uf->parent[i] = (uint32_t)i;
 }

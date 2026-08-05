@@ -24,6 +24,17 @@
 | 3 | **Watermelon**<br/>(150+) | Sun et al. 2026, *Nat Genet* | - CuGenDBv2 (FTP): `http://cucurbitgenomics.org/v2/ftp/pan-genome/watermelon/`<br/>- NCBI: PRJNA1272048 |
 | 4 | **Citrus**<br/>(80+) | Huang et al. 2023, *Nat Genet* | - HZAU DB (직접 다운로드): `http://citrus.hzau.edu.cn/download.php`<br/>- Figshare: `https://figshare.com/s/a1e8071844912a7495ac` |
 | 5 | **Marchantia**<br/>(133+) | Beaulieu et al. 2025, *Nat Genet* | - MarpolBase (직접 다운로드): `https://marchantia.info/download/`<br/>- NCBI: PRJNA931118, PRJNA1021402 |
-| 6 | **Cucumber**<br/>(100+) | Guan et al. 2026, *Nat Genet* | - NGDC GSA: PRJCA038097, PRJCA043228, PRJCA038675 |
-| 7 | **Arabidopsis**<br/>(69) | 2024, *Nat Genet* | - GitHub Repository: `https://github.com/qclian/Pan_Ath` |
-| 8 | **Rice**<br/>(149) | 2025, *Nature*<br/>(10.1038/s41586-025-08883-6) | - Figshare (직접 다운로드): `https://doi.org/10.25452/figshare.plus.25697817`<br/>- ENA/NCBI: PRJEB73710, NGDC: PRJCA024131<br/>- DB: RicePandb (`http://ricepandb.ncgr.ac.cn`) |
+| 6 | **Arabidopsis**<br/>(69) | 2024, *Nat Genet* | - GitHub Repository: `https://github.com/qclian/Pan_Ath` |
+| 7 | **Rice**<br/>(149) | 2025, *Nature*<br/>(10.1038/s41586-025-08883-6) | - Figshare (직접 다운로드): `https://doi.org/10.25452/figshare.plus.25697817`<br/>- ENA/NCBI: PRJEB73710, NGDC: PRJCA024131<br/>- DB: RicePandb (`http://ricepandb.ncgr.ac.cn`) |
+
+---
+
+## 3. Multi-pangenome의 3x3 으로 해볼 만 한 것
+
+- 검증: 생물학적으로 올바르게 3x3이 assign되었는지
+    - C-C가 다른 패턴보다 dNdS로 보았을 때 선택압을 덜 받았는지, P-P가 다른 패턴보다 dNdS로 보았을 때 선택압을 많이 받고 있는지
+    - Selective sweep 같은 패턴이 P-P일 때 더 많이 나타나는지, Fst나 pi 같은 것들도 P-P일 때 더 많이 나타나는지
+
+    - 실제 알려진 (Human 등)에서의 비율과 비슷한 수만큼 SD가 감지되는가. 
+    
+    - 어느 한 SD를 전체 유전체에 BLAST 하면 이 툴로 분석한 위치와 같은 위치에만 모두 잘 나오는가. 
