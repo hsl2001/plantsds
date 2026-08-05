@@ -301,14 +301,14 @@ def evaluate_frag(true_pairs, predicted_pairs, threshold=0.5):
 
 def evaluate(true_pairs, fasta_path, chrom_offsets):
     start_time = time.time()
-    plantsds_out = "sim_out"
-    subprocess.run(["./plantsds", "-p", "8", fasta_path, "-o", plantsds_out], 
+    segtrace_out = "sim_out"
+    subprocess.run(["./segtrace", "-p", "8", fasta_path, "-o", segtrace_out], 
                    check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     exec_time = time.time() - start_time
     
     clusters = {}
-    if os.path.exists(f"{plantsds_out}.dup.bed"):
-        with open(f"{plantsds_out}.dup.bed") as f:
+    if os.path.exists(f"{segtrace_out}.dup.bed"):
+        with open(f"{segtrace_out}.dup.bed") as f:
             for line in f:
                 if line.startswith("#"): continue
                 parts = line.strip().split()
@@ -361,7 +361,7 @@ def evaluate_bedpe(true_pairs, filepath, chrom_offsets):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Evaluate plantsds performance.")
+    parser = argparse.ArgumentParser(description="Evaluate segtrace performance.")
     parser.add_argument('--no-sedef', action='store_true', help="Skip SEDEF benchmark")
     args = parser.parse_args()
 
@@ -380,10 +380,10 @@ if __name__ == "__main__":
         
         true_pairs, fasta_path, chrom_offsets = generate_simulated_genome(chrom_sizes, num_dups=num_dups)
         
-        # PlantSDS
+        # Segtrace
         Sn_bp, Pr_bp, f1_bp, Sn_frag, Pr_frag, f1_frag, exec_time, pred_pairs = evaluate(true_pairs, fasta_path, chrom_offsets)
         all_results.append({
-            'Tool': 'PlantSDS',
+            'Tool': 'Segtrace',
             'GenomeSize': g_size,
             'Recall_bp': Sn_bp,
             'Precision_bp': Pr_bp,
@@ -483,8 +483,8 @@ if __name__ == "__main__":
     ax2.grid(axis='y', alpha=0.3)
 
     # B) F1 vs Time Tradeoff (Scatter Plot)
-    palette = {'PlantSDS': 'blue', 'SEDEF': 'red', 'BISER': 'green'}
-    markers = {'PlantSDS': 'o', 'SEDEF': '*', 'BISER': 's'}
+    palette = {'Segtrace': 'blue', 'SEDEF': 'red', 'BISER': 'green'}
+    markers = {'Segtrace': 'o', 'SEDEF': '*', 'BISER': 's'}
     
     sns.scatterplot(data=df_all, x='Time(s)', y='F1-Score_bp', hue='Tool', style='Tool', 
                     palette=palette, markers=markers, s=150, alpha=0.8, ax=ax3)

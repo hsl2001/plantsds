@@ -308,15 +308,15 @@ def evaluate_frag(true_pairs, predicted_pairs, threshold=0.5):
 
 def evaluate(true_pairs, max_dist, sub_dist, flank_ratio, k_val, s_val, fasta_path, chrom_offsets):
     start_time = time.time()
-    plantsds_out = f"sim_out_{os.getpid()}"
-    print(f"Running PlantSDS with -d {max_dist} -D {sub_dist} -f {flank_ratio} -k {k_val} -s {s_val}...")
-    subprocess.run(["./plantsds", "-d", str(max_dist), "-D", str(sub_dist), "-f", str(flank_ratio), "-k", str(k_val), "-s", str(s_val), "-p", "8", "-w", "1000", fasta_path, "-o", plantsds_out], 
+    segtrace_out = f"sim_out_{os.getpid()}"
+    print(f"Running Segtrace with -d {max_dist} -D {sub_dist} -f {flank_ratio} -k {k_val} -s {s_val}...")
+    subprocess.run(["./segtrace", "-d", str(max_dist), "-D", str(sub_dist), "-f", str(flank_ratio), "-k", str(k_val), "-s", str(s_val), "-p", "8", "-w", "1000", fasta_path, "-o", segtrace_out], 
                    check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     exec_time = time.time() - start_time
     
     clusters = {}
-    if os.path.exists(f"{plantsds_out}.dup.bed"):
-        with open(f"{plantsds_out}.dup.bed") as f:
+    if os.path.exists(f"{segtrace_out}.dup.bed"):
+        with open(f"{segtrace_out}.dup.bed") as f:
             for line in f:
                 if line.startswith("#"): continue
                 parts = line.strip().split()
@@ -369,31 +369,31 @@ def evaluate_bedpe(true_pairs, filepath, chrom_offsets):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Evaluate plantsds performance.")
+    parser = argparse.ArgumentParser(description="Evaluate segtrace performance.")
     parser.add_argument('--no-sedef', action='store_true', help="Skip SEDEF benchmark")
     args = parser.parse_args()
 
     results = []
     
     print(f"Starting Benchmark: 100 Iterations with Default Parameters")
-    print(f"PlantSDS Defaults: -d 0.15, -D 0.20, -f 0.30, -k 21, -s 16")
+    print(f"Segtrace Defaults: -d 0.15, -D 0.20, -f 0.30, -k 21, -s 16")
     print("-" * 100)
     
     for i in range(1, 101):
         print(f"\n[Iteration {i}/100]")
         true_pairs, fasta_path, chrom_offsets = generate_simulated_genome()
         
-        # PlantSDS parameters
+        # Segtrace parameters
         md, sd, f_val, k_val, s_val = 0.15, 0.2, 0.3, 21, 16
         
         Sn_bp, Pr_bp, f1_bp, Sn_frag, Pr_frag, f1_frag, exec_time, pred_pairs = evaluate(
             true_pairs, md, sd, f_val, k_val, s_val, fasta_path, chrom_offsets
         )
-        print(f"PlantSDS -> BP F1: {f1_bp:.4f} | Frag F1: {f1_frag:.4f} | Time: {exec_time:.4f}s")
+        print(f"Segtrace -> BP F1: {f1_bp:.4f} | Frag F1: {f1_frag:.4f} | Time: {exec_time:.4f}s")
         
         results.append({
             'Iteration': i,
-            'Tool': 'PlantSDS',
+            'Tool': 'Segtrace',
             'Recall_bp': Sn_bp, 'Precision_bp': Pr_bp, 'F1-Score_bp': f1_bp,
             'Recall_frag': Sn_frag, 'Precision_frag': Pr_frag, 'F1-Score_frag': f1_frag,
             'Time(s)': exec_time

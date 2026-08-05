@@ -5,13 +5,13 @@
 #include "klib/ketopt.h"
 #include "klib/khash.h"
 #include "klib/kseq.h"
-#include "plantsds.h"
+#include "segtrace.h"
 
 /* Reader initiation */
 KSEQ_INIT(gzFile, gzread)
 KHASH_MAP_INIT_STR(genome_map, uint32_t)
 
-/* PlantSDS encoding: A = 00, C = 01, G = 10, T = 11 */
+/* Segtrace encoding: A = 00, C = 01, G = 10, T = 11 */
 const int8_t BASE_LOOKUP[256] = {
     -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
     -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
@@ -59,7 +59,7 @@ int main(int argc, char **argv) {
   double max_dist = 0.15;
   int min_copy = 2;
   int max_copy = 30;
-  const char *out_prefix = "plantsds";
+  const char *out_prefix = "segtrace";
   int n_threads = 8;
   uint32_t adjacency_threshold = 2;
   double subcluster_dist = 0.2; /* -1.0: auto */
@@ -118,8 +118,8 @@ int main(int argc, char **argv) {
   int num_files = argc - opt.ind;
   char **files = &argv[opt.ind];
 
-  Plantsds r;
-  init_plantsds(&r, def_kmer_size);
+  Segtrace r;
+  init_segtrace(&r, def_kmer_size);
   r.hash_seed = def_hash_seed;
 
   uint64_t *all_hashes = NULL;
@@ -139,11 +139,11 @@ int main(int argc, char **argv) {
   init_unionfind(&uf, num_sketches);
 
   fprintf(stderr,
-          "[plantsds] Discovering candidates and computing distances...\n");
+          "[segtrace] Discovering candidates and computing distances...\n");
   discover_and_compute(all_hashes, coords, num_sketches, window_size, max_dist,
                        n_threads, r.hash_window, &uf);
 
-  PlantsdsDupRegion *dup_regions = NULL;
+  SegtraceDupRegion *dup_regions = NULL;
   size_t n_dup_regions = 0;
   build_duplicate_regions(&uf, num_sketches, num_files, files, seq_lens, coords,
                           min_copy, max_copy, &dup_regions, &n_dup_regions);
@@ -181,8 +181,8 @@ int main(int argc, char **argv) {
 }
 
 void print_usage(void) {
-  printf("PlantSDS: Plant Segmental Duplication Scanner\n\n"
-         "Usage: plantsds [options] fasta1 [fasta2 ...]\n\n"
+  printf("Segtrace: Segmental Duplication Tracer\n\n"
+         "Usage: segtrace [options] fasta1 [fasta2 ...]\n\n"
          "Options:\n"
          "  -k: kmer size (default: 21)\n"
          "  -s: scale factor (default: 10)\n"
@@ -196,7 +196,7 @@ void print_usage(void) {
          "  -a: adjacency threshold for merging regions (default: 2)\n"
          "  -m: minimum copy count (default: 2)\n"
          "  -M: maximum copy count to filter ubiquitous repeats (default: 30)\n"
-         "  -o: output file prefix (default: plantsds)\n"
+         "  -o: output file prefix (default: segtrace)\n"
          "  -p: number of threads (default: 8)\n"
          "  -h, --help: show this help message\n"
          "\n");
@@ -207,10 +207,10 @@ void print_usage(void) {
 // ==============================================================
 
 StreamWorkerData *extract_all_windows(char **files, int num_files,
-                                      const Plantsds *r, uint64_t scale,
+                                      const Segtrace *r, uint64_t scale,
                                       size_t window_size, size_t step_size,
                                       size_t min_bases, int n_threads) {
-  fprintf(stderr, "[plantsds] Extracting windows across pangenome...\n");
+  fprintf(stderr, "[segtrace] Extracting windows across pangenome...\n");
   StreamWorkerData *workers = calloc(num_files, sizeof(StreamWorkerData));
   if (!workers) {
     fprintf(stderr, "[ERROR] Failed to allocate memory for workers\n");
@@ -399,7 +399,7 @@ void discover_and_compute(const uint64_t *all_hashes, WindowCoord *coords,
   w.window_size = window_size;
   w.max_dist = max_dist;
   w.kmer_size = kmer_size;
-  w.t_edges = calloc(n_threads, sizeof(PlantsdsDupEdge *));
+  w.t_edges = calloc(n_threads, sizeof(SegtraceDupEdge *));
   w.t_n_edges = calloc(n_threads, sizeof(size_t));
   w.t_cap_edges = calloc(n_threads, sizeof(size_t));
   w.t_bloom = malloc(n_threads * sizeof(uint8_t *));
@@ -427,7 +427,7 @@ void discover_and_compute(const uint64_t *all_hashes, WindowCoord *coords,
   free(w.t_cap_edges);
   free(w.t_bloom);
 
-  fprintf(stderr, "[plantsds] Total edges after distance filter: %zu\n",
+  fprintf(stderr, "[segtrace] Total edges after distance filter: %zu\n",
           total_edges);
 }
 
@@ -499,13 +499,13 @@ void discover_compute_worker(void *data, long p, int tid) {
             continue;
 
           /* Compute distance immediately (fused Phase 2) */
-          PlantsdsDistResult d =
+          SegtraceDistResult d =
               calculate_window_dist(w_data->all_hashes, &w_data->coords[wa],
                                     &w_data->coords[wb], w_data->kmer_size);
           if (d.distance < w_data->max_dist) {
             DA_PUSH(w_data->t_edges[tid], w_data->t_n_edges[tid],
                     w_data->t_cap_edges[tid],
-                    ((PlantsdsDupEdge){wa, wb, d.distance}));
+                    ((SegtraceDupEdge){wa, wb, d.distance}));
           }
         }
       }
@@ -516,15 +516,15 @@ void discover_compute_worker(void *data, long p, int tid) {
 }
 
 /* Helper: compute distance between two windows using in-memory hashes */
-PlantsdsDistResult calculate_window_dist(const uint64_t *all_hashes,
+SegtraceDistResult calculate_window_dist(const uint64_t *all_hashes,
                                          const WindowCoord *wa,
                                          const WindowCoord *wb,
                                          uint32_t kmer_size) {
-  PlantsdsSketch sa = {.sketch_size = wa->sketch_size,
+  SegtraceSketch sa = {.sketch_size = wa->sketch_size,
                        .hashes = (uint64_t *)(all_hashes + wa->sketch_offset)};
-  PlantsdsSketch sb = {.sketch_size = wb->sketch_size,
+  SegtraceSketch sb = {.sketch_size = wb->sketch_size,
                        .hashes = (uint64_t *)(all_hashes + wb->sketch_offset)};
-  return calculate_plantsds_dist(&sa, &sb, kmer_size);
+  return calculate_segtrace_dist(&sa, &sb, kmer_size);
 }
 
 // ==============================================================
@@ -534,7 +534,7 @@ PlantsdsDistResult calculate_window_dist(const uint64_t *all_hashes,
 void build_duplicate_regions(UnionFind *uf, size_t num_sketches, int num_files,
                              char **files, GenomeSeqLen *seq_lens,
                              WindowCoord *coords, int min_copy, int max_copy,
-                             PlantsdsDupRegion **out_regions,
+                             SegtraceDupRegion **out_regions,
                              size_t *out_n_regions) {
   /* O(1) genome -> file_id lookup via hash map (replaces O(N*F) loop) */
   khash_t(genome_map) *gmap = kh_init(genome_map);
@@ -606,7 +606,7 @@ void build_duplicate_regions(UnionFind *uf, size_t num_sketches, int num_files,
   free(max_intra_copy);
 
   size_t n_dup_regions = 0, cap_dup_regions = 0;
-  PlantsdsDupRegion *dup_regions = NULL;
+  SegtraceDupRegion *dup_regions = NULL;
   for (size_t i = 0; i < num_sketches; i++) {
     uint32_t fam = find_unionfind(uf, (uint32_t)i);
     uint32_t fid = fam_id[fam];
@@ -620,7 +620,7 @@ void build_duplicate_regions(UnionFind *uf, size_t num_sketches, int num_files,
              seq_lens[coords[i].seq_id].genome, seq_lens[coords[i].seq_id].seq);
 
     DA_PUSH(dup_regions, n_dup_regions, cap_dup_regions,
-            ((PlantsdsDupRegion){.chrom = strdup(chrom_name),
+            ((SegtraceDupRegion){.chrom = strdup(chrom_name),
                                  .start = coords[i].start,
                                  .end = coords[i].end,
                                  .cluster_id = strdup(label),
@@ -645,12 +645,12 @@ void build_duplicate_regions(UnionFind *uf, size_t num_sketches, int num_files,
 
 /* Merge adjacent/overlapping regions in the same SD family.
  * Returns the new count of merged regions. */
-size_t merge_dup_regions(PlantsdsDupRegion *regions, size_t n,
+size_t merge_dup_regions(SegtraceDupRegion *regions, size_t n,
                          uint32_t adjacency_threshold) {
   if (n <= 1)
     return n;
 
-  qsort(regions, n, sizeof(PlantsdsDupRegion), compare_dup_region);
+  qsort(regions, n, sizeof(SegtraceDupRegion), compare_dup_region);
 
   size_t out = 0;
   for (size_t i = 1; i < n; i++) {
@@ -673,8 +673,8 @@ size_t merge_dup_regions(PlantsdsDupRegion *regions, size_t n,
   return out + 1;
 }
 
-void extract_flankings(char **files, int num_files, const Plantsds *r,
-                       uint64_t scale, PlantsdsDupRegion *regions,
+void extract_flankings(char **files, int num_files, const Segtrace *r,
+                       uint64_t scale, SegtraceDupRegion *regions,
                        size_t n_regions, int n_threads, double flank_ratio) {
   FlankingWorkerData w = {files, r, scale, regions, n_regions, flank_ratio};
   kt_for(n_threads, extract_flankings_worker, &w, num_files);
@@ -740,7 +740,7 @@ void extract_flankings_worker(void *data, long f, int tid) {
   gzclose(fp);
 }
 
-void perform_subclustering(PlantsdsDupRegion *regions, size_t n_merged,
+void perform_subclustering(SegtraceDupRegion *regions, size_t n_merged,
                            double max_dist, int n_threads, uint32_t kmer_size) {
   UnionFind sub_uf;
   init_unionfind(&sub_uf, n_merged);
@@ -792,7 +792,7 @@ void process_subcluster(void *data, long i, int tid) {
     if (w->regions[j].flank_sketch.sketch_size == 0)
       continue;
 
-    PlantsdsDistResult d = calculate_plantsds_dist(
+    SegtraceDistResult d = calculate_segtrace_dist(
         &w->regions[i].flank_sketch, &w->regions[j].flank_sketch, w->kmer_size);
     if (d.distance < w->max_dist) {
       DA_PUSH(w->t_pairs[tid], w->t_n_pairs[tid], w->t_cap_pairs[tid],
@@ -801,7 +801,7 @@ void process_subcluster(void *data, long i, int tid) {
   }
 }
 
-void write_dup_bed(const char *out_prefix, PlantsdsDupRegion *dup_regions,
+void write_dup_bed(const char *out_prefix, SegtraceDupRegion *dup_regions,
                    size_t n_merged) {
   char path_buf[PATH_MAX];
   snprintf(path_buf, sizeof(path_buf), "%s.dup.bed", out_prefix);
@@ -833,8 +833,8 @@ typedef struct {
 } BedpePair;
 
 static int compare_dup_region_by_cluster(const void *a, const void *b) {
-  const PlantsdsDupRegion *ra = (const PlantsdsDupRegion *)a,
-                          *rb = (const PlantsdsDupRegion *)b;
+  const SegtraceDupRegion *ra = (const SegtraceDupRegion *)a,
+                          *rb = (const SegtraceDupRegion *)b;
   int c_id = strcmp(ra->cluster_id, rb->cluster_id);
   if (c_id != 0)
     return c_id;
@@ -864,15 +864,15 @@ static int compare_bedpe_pair(const void *a, const void *b) {
   return CMP(pa->e2, pb->e2);
 }
 
-void write_dup_bedpe(const char *out_prefix, PlantsdsDupRegion *dup_regions,
+void write_dup_bedpe(const char *out_prefix, SegtraceDupRegion *dup_regions,
                      size_t n_merged) {
   if (n_merged == 0)
     return;
 
-  PlantsdsDupRegion *regions_copy =
-      malloc(n_merged * sizeof(PlantsdsDupRegion));
-  memcpy(regions_copy, dup_regions, n_merged * sizeof(PlantsdsDupRegion));
-  qsort(regions_copy, n_merged, sizeof(PlantsdsDupRegion),
+  SegtraceDupRegion *regions_copy =
+      malloc(n_merged * sizeof(SegtraceDupRegion));
+  memcpy(regions_copy, dup_regions, n_merged * sizeof(SegtraceDupRegion));
+  qsort(regions_copy, n_merged, sizeof(SegtraceDupRegion),
         compare_dup_region_by_cluster);
 
   BedpePair *pairs = NULL;
@@ -945,7 +945,7 @@ void write_dup_bedpe(const char *out_prefix, PlantsdsDupRegion *dup_regions,
 // 6. CORE ALGORITHMS
 // ==============================================================
 
-void init_plantsds(Plantsds *r, size_t hash_window) {
+void init_segtrace(Segtrace *r, size_t hash_window) {
   size_t k = hash_window < 32 ? hash_window : 32; /* 2*32=64 bits */
   uint32_t kmer_bits = 2 * (uint32_t)k;
 
@@ -960,8 +960,8 @@ void init_plantsds(Plantsds *r, size_t hash_window) {
       (kmer_bits > 0) ? (kmer_bits - 2) : 0; /* reverse_complement shift */
 }
 
-/* Extract plantsds hash and insert in HashPool */
-__attribute__((hot)) void extract_hash(const Plantsds *r, HashPool *pool,
+/* Extract segtrace hash and insert in HashPool */
+__attribute__((hot)) void extract_hash(const Segtrace *r, HashPool *pool,
                                        const uint8_t *seq, size_t len) {
   size_t K = r->hash_window;
   size_t valid = 0;
@@ -1031,10 +1031,10 @@ void finalize_hash_pool(HashPool *pool, uint64_t **out_hashes,
 }
 
 /* Calculate distance between two sketch sets */
-PlantsdsDistResult calculate_plantsds_dist(const PlantsdsSketch *ref,
-                                           const PlantsdsSketch *query,
+SegtraceDistResult calculate_segtrace_dist(const SegtraceSketch *ref,
+                                           const SegtraceSketch *query,
                                            uint32_t kmer_size) {
-  PlantsdsDistResult res = {0.0, 1.0, 0};
+  SegtraceDistResult res = {0.0, 1.0, 0};
 
   size_t shared = 0, i = 0, j = 0;
 
@@ -1160,8 +1160,8 @@ int compare_hash_entry(const void *a, const void *b) {
 }
 
 int compare_dup_region(const void *a, const void *b) {
-  const PlantsdsDupRegion *ra = (const PlantsdsDupRegion *)a,
-                          *rb = (const PlantsdsDupRegion *)b;
+  const SegtraceDupRegion *ra = (const SegtraceDupRegion *)a,
+                          *rb = (const SegtraceDupRegion *)b;
   int c2 = strcmp(ra->chrom, rb->chrom);
   return c2 ? c2 : CMP(ra->start, rb->start);
 }

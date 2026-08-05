@@ -1,8 +1,8 @@
 CC = gcc
 CFLAGS = -O3 -march=native -Wall -Wextra
 LDFLAGS = -lm -lpthread -lz
-TARGET = plantsds
-SRCS = plantsds.c klib/kthread.c
+TARGET = segtrace
+SRCS = segtrace.c klib/kthread.c
 
 .PHONY: clean static
 

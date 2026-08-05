@@ -1,5 +1,5 @@
-#ifndef PLANTSDS_H
-#define PLANTSDS_H
+#ifndef SEGTRACE_H
+#define SEGTRACE_H
 
 #include <stddef.h>
 #include <stdint.h>
@@ -64,24 +64,24 @@ typedef struct {
   uint32_t kmer_bits;
   uint32_t rc_shift;
   uint64_t hash_seed;
-} Plantsds;
+} Segtrace;
 
 typedef struct {
   size_t sketch_size;
   uint64_t *hashes;
-} PlantsdsSketch;
+} SegtraceSketch;
 
 typedef struct {
   double containment;
   double distance;
   size_t shared_hashes;
-} PlantsdsDistResult;
+} SegtraceDistResult;
 
 typedef struct {
   uint32_t win_a;
   uint32_t win_b;
   double distance;
-} PlantsdsDupEdge;
+} SegtraceDupEdge;
 
 typedef struct {
   uint32_t *parent;
@@ -96,9 +96,9 @@ typedef struct {
   char *cluster_id;
   uint32_t copy_count;
   uint32_t subcluster_id;
-  PlantsdsSketch flank_sketch;
+  SegtraceSketch flank_sketch;
   uint32_t window_idx;
-} PlantsdsDupRegion;
+} SegtraceDupRegion;
 
 // ==============================================================
 // INTERNAL DATA STRUCTURES
@@ -127,7 +127,7 @@ typedef struct {
 typedef struct {
   const char *filename;
   char bname[256];
-  const Plantsds *r;
+  const Segtrace *r;
   uint64_t scale;
   size_t window_size;
   size_t step_size;
@@ -145,9 +145,9 @@ typedef struct {
 
 typedef struct {
   char **files;
-  const Plantsds *r;
+  const Segtrace *r;
   uint64_t scale;
-  PlantsdsDupRegion *regions;
+  SegtraceDupRegion *regions;
   size_t n_regions;
   double flank_ratio;
 } FlankingWorkerData;
@@ -157,7 +157,7 @@ typedef struct {
 } SubclusterPair;
 
 typedef struct {
-  PlantsdsDupRegion *regions;
+  SegtraceDupRegion *regions;
   double max_dist;
   size_t n_merged;
   SubclusterPair **t_pairs;
@@ -178,7 +178,7 @@ typedef struct {
   size_t window_size;
   double max_dist;
   uint32_t kmer_size;
-  PlantsdsDupEdge **t_edges;
+  SegtraceDupEdge **t_edges;
   size_t *t_n_edges;
   size_t *t_cap_edges;
   uint8_t **t_bloom;
@@ -196,7 +196,7 @@ void print_usage(void);
 
 // 3. WINDOW EXTRACTION
 StreamWorkerData *extract_all_windows(char **files, int num_files,
-                                      const Plantsds *r, uint64_t scale,
+                                      const Segtrace *r, uint64_t scale,
                                       size_t window_size, size_t step_size,
                                       size_t min_bases, int n_threads);
 void stream_pangenome_worker(void *data, long i, int tid);
@@ -210,7 +210,7 @@ void discover_and_compute(const uint64_t *all_hashes, WindowCoord *coords,
                           size_t n_windows, size_t window_size, double max_dist,
                           int n_threads, uint32_t kmer_size, UnionFind *uf);
 void discover_compute_worker(void *data, long p, int tid);
-PlantsdsDistResult calculate_window_dist(const uint64_t *all_hashes,
+SegtraceDistResult calculate_window_dist(const uint64_t *all_hashes,
                                          const WindowCoord *wa,
                                          const WindowCoord *wb,
                                          uint32_t kmer_size);
@@ -219,32 +219,32 @@ PlantsdsDistResult calculate_window_dist(const uint64_t *all_hashes,
 void build_duplicate_regions(UnionFind *uf, size_t num_sketches, int num_files,
                              char **files, GenomeSeqLen *seq_lens,
                              WindowCoord *coords, int min_copy, int max_copy,
-                             PlantsdsDupRegion **out_regions,
+                             SegtraceDupRegion **out_regions,
                              size_t *out_n_regions);
-size_t merge_dup_regions(PlantsdsDupRegion *regions, size_t n,
+size_t merge_dup_regions(SegtraceDupRegion *regions, size_t n,
                          uint32_t adjacency_threshold);
-void extract_flankings(char **files, int num_files, const Plantsds *r,
-                       uint64_t scale, PlantsdsDupRegion *regions,
+void extract_flankings(char **files, int num_files, const Segtrace *r,
+                       uint64_t scale, SegtraceDupRegion *regions,
                        size_t n_regions, int n_threads, double flank_ratio);
 void extract_flankings_worker(void *data, long f, int tid);
-void perform_subclustering(PlantsdsDupRegion *regions, size_t n_merged,
+void perform_subclustering(SegtraceDupRegion *regions, size_t n_merged,
                            double max_dist, int n_threads, uint32_t kmer_size);
 void process_subcluster(void *data, long i, int tid);
-void write_dup_bed(const char *out_prefix, PlantsdsDupRegion *dup_regions,
+void write_dup_bed(const char *out_prefix, SegtraceDupRegion *dup_regions,
                    size_t n_merged);
-void write_dup_bedpe(const char *out_prefix, PlantsdsDupRegion *dup_regions,
+void write_dup_bedpe(const char *out_prefix, SegtraceDupRegion *dup_regions,
                      size_t n_merged);
 
 // 6. CORE ALGORITHMS
-void init_plantsds(Plantsds *r, size_t hash_window);
-void extract_hash(const Plantsds *r, HashPool *pool, const uint8_t *seq,
+void init_segtrace(Segtrace *r, size_t hash_window);
+void extract_hash(const Segtrace *r, HashPool *pool, const uint8_t *seq,
                   size_t len);
 void init_hash_pool(HashPool *pool, uint64_t threshold);
 void insert_hash_pool(HashPool *pool, uint64_t h);
 void finalize_hash_pool(HashPool *pool, uint64_t **out_hashes,
                         size_t *out_size);
-PlantsdsDistResult calculate_plantsds_dist(const PlantsdsSketch *ref,
-                                           const PlantsdsSketch *query,
+SegtraceDistResult calculate_segtrace_dist(const SegtraceSketch *ref,
+                                           const SegtraceSketch *query,
                                            uint32_t kmer_size);
 void init_unionfind(UnionFind *uf, size_t n);
 uint32_t find_unionfind(UnionFind *uf, uint32_t x);

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# Segmental Duplication (SD) Pipeline Script using PlantSDS
+# Segmental Duplication (SD) Pipeline Script using Segtrace
 # Pipelines for:
 #   1) t2t-chm13 (Human T2T CHM13 v2.0)
 #   2) t2t-nip   (Rice T2T Nipponbare AGIS1.0)
@@ -49,14 +49,14 @@ usage() {
     cat << EOF
 Usage: $0 [OPTIONS]
 
-Run Segmental Duplication (SD) detection pipeline using PlantSDS for target genomes.
+Run Segmental Duplication (SD) detection pipeline using Segtrace for target genomes.
 
 Options:
   -s, --target TARGET    Genome target to process: t2t-chm13, t2t-nip, col-cen, or all [default: all]
   -t, --threads NUM      Number of CPU threads to use [default: $THREADS]
   -d, --data-dir DIR     Directory to store downloaded genome fasta files [default: $DATA_DIR]
   -r, --results-dir DIR  Directory to store pipeline output results [default: $RESULTS_DIR]
-  --download-only        Only download the genome datasets, do not run PlantSDS
+  --download-only        Only download the genome datasets, do not run Segtrace
   --skip-download        Skip downloading (assumes genome fasta files exist)
   --decompress           Decompress downloaded .gz files into raw .fa files
   -h, --help             Display this help message and exit
@@ -207,7 +207,7 @@ else
 fi
 
 echo "=========================================================="
-echo " Segmental Duplication Detection Pipeline (PlantSDS)"
+echo " Segmental Duplication Detection Pipeline (Segtrace)"
 echo " Target(s): ${TARGET_LIST[*]}"
 echo " Threads:   ${THREADS}"
 echo " Data Dir:  ${DATA_DIR}"
@@ -232,16 +232,16 @@ if [[ $DOWNLOAD_ONLY -eq 1 ]]; then
     exit 0
 fi
 
-# 2. Build PlantSDS Phase
+# 2. Build Segtrace Phase
 echo ""
 echo "----------------------------------------------------------"
-echo "[STEP 2/3] Building PlantSDS Binary"
+echo "[STEP 2/3] Building Segtrace Binary"
 echo "----------------------------------------------------------"
-if [[ ! -f "./plantsds" ]]; then
-    echo "[INFO] Compiling PlantSDS..."
+if [[ ! -f "./segtrace" ]]; then
+    echo "[INFO] Compiling Segtrace..."
     make clean && make
 else
-    echo "[INFO] PlantSDS binary already exists (./plantsds)."
+    echo "[INFO] Segtrace binary already exists (./segtrace)."
 fi
 
 # 3. Execution Phase
@@ -261,13 +261,13 @@ for t in "${TARGET_LIST[@]}"; do
     bed_out="${out_prefix}.dup.bed"
 
     echo ""
-    echo ">>> Running PlantSDS for [$t] (${DESCRIPTIONS[$t]})"
+    echo ">>> Running Segtrace for [$t] (${DESCRIPTIONS[$t]})"
     echo "    Input:   $fasta_input"
     echo "    Output:  $bed_out"
     echo "    Threads: $THREADS"
     
     start_time=$SECONDS
-    ./plantsds -p "$THREADS" -o "$out_prefix" "$fasta_input"
+    ./segtrace -p "$THREADS" -o "$out_prefix" "$fasta_input"
     elapsed=$(( SECONDS - start_time ))
 
     if [[ -f "$bed_out" && -s "$bed_out" ]]; then
@@ -275,7 +275,7 @@ for t in "${TARGET_LIST[@]}"; do
         size=$(du -h "$bed_out" | cut -f1)
         echo "[SUCCESS] Finished [$t] in ${elapsed}s. Results saved to $bed_out ($lines SD regions, $size)."
     else
-        echo "[WARNING] PlantSDS finished, but output file $bed_out was not created or is empty."
+        echo "[WARNING] Segtrace finished, but output file $bed_out was not created or is empty."
     fi
 done
 
