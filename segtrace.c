@@ -61,7 +61,7 @@ int main(int argc, char **argv) {
   int n_threads = 8;
   uint32_t adjacency_threshold = 2;
   double subcluster_dist = 0.2; /* -1.0: auto */
-  double flank_ratio = 0.3;
+  size_t flank_size = 2000;
 
   ketopt_t opt = KETOPT_INIT;
   int c;
@@ -93,7 +93,7 @@ int main(int argc, char **argv) {
     else if (c == 'D')
       subcluster_dist = atof(opt.arg);
     else if (c == 'f')
-      flank_ratio = atof(opt.arg);
+      flank_size = (size_t)strtoull(opt.arg, NULL, 10);
     else
       return 1;
   }
@@ -148,7 +148,7 @@ int main(int argc, char **argv) {
   fprintf(stderr,
           "[INFO] Extracting flanking sequences for sub-clustering...\n");
   extract_flankings(files, num_files, &r, def_scale, dup_regions, n_merged,
-                    n_threads, flank_ratio);
+                    n_threads, flank_size);
 
   fprintf(stderr, "[INFO] Sub-clustering based on flanking similarities...\n");
   perform_subclustering(dup_regions, n_merged, subcluster_dist, n_threads,
@@ -186,7 +186,7 @@ void print_usage(void) {
          "  -b: minimum valid bases per window (default: 1000)\n"
          "  -d: maximum distance to consider as copy (default: 0.15)\n"
          "  -D: sub-cluster distance threshold (default: 0.2)\n"
-         "  -f: flanking ratio for sub-clustering (default: 0.3)\n"
+         "  -f: flanking size in bp for sub-clustering (default: 2000)\n"
          "  -a: adjacency threshold for merging regions (default: 2)\n"
          "  -o: output file prefix (default: segtrace)\n"
          "  -p: number of threads (default: 8)\n"
@@ -682,8 +682,8 @@ size_t merge_dup_regions(SegtraceDupRegion *regions, size_t n,
 
 void extract_flankings(char **files, int num_files, const Segtrace *r,
                        uint64_t scale, SegtraceDupRegion *regions,
-                       size_t n_regions, int n_threads, double flank_ratio) {
-  FlankingWorkerData w = {files, r, scale, regions, n_regions, flank_ratio};
+                       size_t n_regions, int n_threads, size_t flank_size) {
+  FlankingWorkerData w = {files, r, scale, regions, n_regions, flank_size};
   kt_for(n_threads, extract_flankings_worker, &w, num_files);
 }
 
@@ -711,13 +711,10 @@ void extract_flankings_worker(void *data, long f, int tid) {
       if (strcmp(w->regions[i].chrom, chr_name) == 0) {
         size_t start = w->regions[i].start;
         size_t end = w->regions[i].end;
-        size_t region_size = end > start ? end - start : 0;
-        size_t dynamic_flank_size = (size_t)(region_size * w->flank_ratio);
-        size_t left_start =
-            start > dynamic_flank_size ? start - dynamic_flank_size : 0;
-        size_t right_end = end + dynamic_flank_size > ks->seq.l
-                               ? ks->seq.l
-                               : end + dynamic_flank_size;
+        size_t flank_size = w->flank_size;
+        size_t left_start = start > flank_size ? start - flank_size : 0;
+        size_t right_end =
+            end + flank_size > ks->seq.l ? ks->seq.l : end + flank_size;
 
         size_t left_len = start - left_start;
         size_t right_len = right_end - end;
@@ -768,7 +765,8 @@ void perform_subclustering(SegtraceDupRegion *regions, size_t n_merged,
     return;
 
   /* Group regions into contiguous spans of the same cluster_id */
-  qsort(regions, n_merged, sizeof(SegtraceDupRegion), compare_dup_region_by_cluster);
+  qsort(regions, n_merged, sizeof(SegtraceDupRegion),
+        compare_dup_region_by_cluster);
 
   ClusterSpan *spans = NULL;
   size_t n_spans = 0, cap_spans = 0;
@@ -845,9 +843,9 @@ void process_subcluster(void *data, long s, int tid) {
         if (w->regions[rb].flank_sketch.sketch_size == 0)
           continue;
 
-        SegtraceDistResult d = calculate_segtrace_dist(
-            &w->regions[ra].flank_sketch, &w->regions[rb].flank_sketch,
-            w->kmer_size);
+        SegtraceDistResult d =
+            calculate_segtrace_dist(&w->regions[ra].flank_sketch,
+                                    &w->regions[rb].flank_sketch, w->kmer_size);
         if (d.distance < w->max_dist) {
           DA_PUSH(w->t_pairs[tid], w->t_n_pairs[tid], w->t_cap_pairs[tid],
                   ((SubclusterPair){(uint32_t)ra, (uint32_t)rb}));
@@ -880,7 +878,8 @@ void process_subcluster(void *data, long s, int tid) {
 
     qsort(entries, n_entries, sizeof(FlankHashEntry), compare_flank_hash_entry);
 
-    /* Small 1MB Bloom filter to deduplicate candidate pairs within this cluster */
+    /* Small 1MB Bloom filter to deduplicate candidate pairs within this cluster
+     */
     uint32_t bloom_bits = (1 << 23);
     uint32_t mask = bloom_bits - 1;
     uint8_t *bloom = calloc(bloom_bits / 8, 1);

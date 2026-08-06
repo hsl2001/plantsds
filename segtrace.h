@@ -51,7 +51,7 @@ extern "C" {
 #define NUM_PARTITIONS 1024
 #define MAX_RUN_LEN 100
 
-#define BLOOM_SIZE_BITS (1 << 30)
+#define BLOOM_SIZE_BITS (1 << 26)
 #define BLOOM_SIZE_BYTES (BLOOM_SIZE_BITS / 8)
 #define BLOOM_MASK (BLOOM_SIZE_BITS - 1)
 
@@ -149,7 +149,7 @@ typedef struct {
   uint64_t scale;
   SegtraceDupRegion *regions;
   size_t n_regions;
-  double flank_ratio;
+  size_t flank_size;
 } FlankingWorkerData;
 
 typedef struct {
@@ -231,7 +231,7 @@ size_t merge_dup_regions(SegtraceDupRegion *regions, size_t n,
                          uint32_t adjacency_threshold);
 void extract_flankings(char **files, int num_files, const Segtrace *r,
                        uint64_t scale, SegtraceDupRegion *regions,
-                       size_t n_regions, int n_threads, double flank_ratio);
+                       size_t n_regions, int n_threads, size_t flank_size);
 void extract_flankings_worker(void *data, long f, int tid);
 void perform_subclustering(SegtraceDupRegion *regions, size_t n_merged,
                            double max_dist, int n_threads, uint32_t kmer_size);
