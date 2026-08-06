@@ -142,6 +142,13 @@ int main(int argc, char **argv) {
   build_duplicate_regions(&uf, num_sketches, num_files, files, seq_lens, coords,
                           &dup_regions, &n_dup_regions);
 
+  /* Free discovery data immediately to release 5GB~10GB RAM */
+  free_unionfind(&uf);
+  free(all_hashes);
+  all_hashes = NULL;
+  free(coords);
+  coords = NULL;
+
   size_t n_merged =
       merge_dup_regions(dup_regions, n_dup_regions, adjacency_threshold);
 
@@ -163,9 +170,6 @@ int main(int argc, char **argv) {
     free(dup_regions[i].flank_sketch.hashes);
   }
   free(dup_regions);
-  free_unionfind(&uf);
-  free(all_hashes);
-  free(coords);
   for (size_t i = 0; i < num_seqs; i++) {
     free(seq_lens[i].genome);
     free(seq_lens[i].seq);
