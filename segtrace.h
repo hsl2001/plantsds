@@ -51,7 +51,7 @@ extern "C" {
 #define NUM_PARTITIONS 256
 #define MAX_RUN_LEN 100
 
-#define BLOOM_SIZE_BITS (1 << 22)
+#define BLOOM_SIZE_BITS (1 << 28)
 #define BLOOM_SIZE_BYTES (BLOOM_SIZE_BITS / 8)
 #define BLOOM_MASK (BLOOM_SIZE_BITS - 1)
 

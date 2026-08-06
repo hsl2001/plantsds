@@ -1186,7 +1186,7 @@ uint64_t encode_pair(uint32_t a, uint32_t b) {
 
 int bloom_test_and_set(uint8_t *bloom, uint64_t key) {
   uint32_t h1 = (uint32_t)(key)&BLOOM_MASK;
-  uint32_t h2 = (uint32_t)(key >> 22) & BLOOM_MASK;
+  uint32_t h2 = (uint32_t)(key >> 28) & BLOOM_MASK;
   int was_set =
       ((bloom[h1 >> 3] >> (h1 & 7)) & 1) & ((bloom[h2 >> 3] >> (h2 & 7)) & 1);
   bloom[h1 >> 3] |= (uint8_t)(1 << (h1 & 7));
