@@ -53,7 +53,6 @@ void print_usage(void) {
          "  -d: maximum distance to consider as copy (default: 0.15)\n"
          "  -D: sub-cluster distance threshold (default: 0.3)\n"
          "  -f: flanking size in bp for sub-clustering (default: 1000)\n"
-         "  -a: adjacency threshold for merging regions (default: 1)\n"
          "  -o: output file prefix (default: segtrace)\n"
          "  -p: number of threads (default: 8)\n"
          "  -h, --help: show this help message\n"
@@ -82,14 +81,12 @@ int main(int argc, char **argv) {
   double max_dist = 0.15;
   const char *out_prefix = "segtrace";
   int n_threads = 8;
-  uint32_t adjacency_threshold = 0;
   double subcluster_dist = 0.3;
   size_t flank_size = 1000;
 
   ketopt_t opt = KETOPT_INIT;
   int c;
-  while ((c = ketopt(&opt, argc, argv, 1, "k:s:e:w:t:b:d:o:p:a:D:f:h", 0)) >=
-         0) {
+  while ((c = ketopt(&opt, argc, argv, 1, "k:s:e:w:t:b:d:o:p:D:f:h", 0)) >= 0) {
     if (c == 'h') {
       print_usage();
       return 0;
@@ -111,8 +108,6 @@ int main(int argc, char **argv) {
       out_prefix = opt.arg;
     else if (c == 'p')
       n_threads = atoi(opt.arg) < 1 ? 1 : atoi(opt.arg);
-    else if (c == 'a')
-      adjacency_threshold = (uint32_t)atoi(opt.arg);
     else if (c == 'D')
       subcluster_dist = atof(opt.arg);
     else if (c == 'f')
@@ -172,8 +167,7 @@ int main(int argc, char **argv) {
   free(coords);
   coords = NULL;
 
-  size_t n_merged =
-      merge_dup_regions(dup_regions, n_dup_regions, adjacency_threshold);
+  size_t n_merged = merge_dup_regions(dup_regions, n_dup_regions);
 
   fprintf(stderr,
           "[INFO] Extracting flanking sequences for sub-clustering...\n");
@@ -605,8 +599,7 @@ static int compare_dup_region_by_pos(const void *a, const void *b) {
   return CMP(ra->end, rb->end);
 }
 
-size_t merge_dup_regions(SegtraceDupRegion *regions, size_t n,
-                         uint32_t adjacency_threshold) {
+size_t merge_dup_regions(SegtraceDupRegion *regions, size_t n) {
   if (n <= 1)
     return n;
 
@@ -615,9 +608,7 @@ size_t merge_dup_regions(SegtraceDupRegion *regions, size_t n,
   size_t out = 0;
   for (size_t i = 1; i < n; i++) {
     if (strcmp(regions[i].chrom, regions[out].chrom) == 0 &&
-        (regions[i].window_idx <=
-             regions[out].window_idx + adjacency_threshold ||
-         regions[i].start <= regions[out].end)) {
+        regions[i].start <= regions[out].end) {
       if (regions[i].end > regions[out].end)
         regions[out].end = regions[i].end;
       if (regions[i].window_idx > regions[out].window_idx)
