@@ -1278,7 +1278,7 @@ static inline uint64_t splitmix64(uint64_t x) {
   return x ^ (x >> 31);
 }
 
-int bloom_test_and_set_with_mask(uint8_t *bloom, uint64_t key, uint32_t mask) {
+int bloom_test_and_set(uint8_t *bloom, uint64_t key, uint32_t mask) {
   uint64_t h = splitmix64(key);
   uint32_t h1 = (uint32_t)h & mask;
   uint32_t h2 = (uint32_t)(h >> 32) & mask;
