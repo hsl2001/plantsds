@@ -252,7 +252,6 @@ StreamWorkerData *extract_all_windows(char **files, int num_files,
 
   size_t cap_jobs = 16, num_jobs = 0;
   SeqChunkJob *jobs = malloc(cap_jobs * sizeof(SeqChunkJob));
-  size_t chunk_size = 2000000; /* 2 Mb chunk for thread parallelism */
 
   for (int f = 0; f < num_files; f++) {
     char bname[256];
@@ -280,6 +279,10 @@ StreamWorkerData *extract_all_windows(char **files, int num_files,
 
       uint8_t *seq_copy = malloc(len + 1);
       memcpy(seq_copy, ks->seq.s, len + 1);
+
+      size_t chunk_size = len / (n_threads * 4);
+      if (chunk_size < 100000)
+        chunk_size = 100000;
 
       for (size_t c_start = 0; c_start < len; c_start += chunk_size) {
         size_t c_end = c_start + chunk_size;
