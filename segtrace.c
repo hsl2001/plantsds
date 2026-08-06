@@ -56,11 +56,11 @@ int main(int argc, char **argv) {
   size_t window_size = 1024;
   size_t step_size = 0; /* 0 = auto (window/2) */
   size_t min_bases = 1000;
-  double max_dist = 0.1;
+  double max_dist = 0.15;
   const char *out_prefix = "segtrace";
   int n_threads = 8;
   uint32_t adjacency_threshold = 2;
-  double subcluster_dist = 0.2; /* -1.0: auto */
+  double subcluster_dist = 0.3; /* -1.0: auto */
   size_t flank_size = 2000;
 
   ketopt_t opt = KETOPT_INIT;
