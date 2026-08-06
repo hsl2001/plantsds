@@ -78,7 +78,6 @@ int main(int argc, char **argv) {
   size_t window_size = 1024;
   size_t step_size = 0; /* 0 = auto (50% of window_size) */
   size_t min_bases = 1000;
-  double max_dist = 0.10;
   const char *out_prefix = "segtrace";
   int n_threads = 8;
   double subcluster_dist = 0.3;
@@ -102,8 +101,6 @@ int main(int argc, char **argv) {
       step_size = (size_t)strtoull(opt.arg, NULL, 10);
     else if (c == 'b')
       min_bases = (size_t)strtoull(opt.arg, NULL, 10);
-    else if (c == 'd')
-      max_dist = atof(opt.arg);
     else if (c == 'o')
       out_prefix = opt.arg;
     else if (c == 'p')
@@ -115,9 +112,6 @@ int main(int argc, char **argv) {
     else
       return 1;
   }
-
-  if (subcluster_dist < 0.0)
-    subcluster_dist = max_dist;
 
   if (step_size == 0)
     step_size = window_size / 2;
@@ -152,8 +146,8 @@ int main(int argc, char **argv) {
 
   fprintf(stderr,
           "[segtrace] Discovering candidates and computing distances...\n");
-  discover_and_compute(all_hashes, coords, num_sketches, window_size, max_dist,
-                       n_threads, r.hash_window, &uf);
+  discover_and_compute(all_hashes, coords, num_sketches, window_size, n_threads,
+                       r.hash_window, &uf);
 
   SegtraceDupRegion *dup_regions = NULL;
   size_t n_dup_regions = 0;
@@ -379,14 +373,13 @@ void merge_global_data(StreamWorkerData *workers, int num_files,
 // ==============================================================
 
 void discover_and_compute(const uint64_t *all_hashes, WindowCoord *coords,
-                          size_t n_windows, size_t window_size, double max_dist,
-                          int n_threads, uint32_t kmer_size, UnionFind *uf) {
+                          size_t n_windows, size_t window_size, int n_threads,
+                          uint32_t kmer_size, UnionFind *uf) {
   DiscoverComputeData w;
   w.all_hashes = all_hashes;
   w.coords = coords;
   w.n_windows = n_windows;
   w.window_size = window_size;
-  w.max_dist = max_dist;
   w.kmer_size = kmer_size;
   w.t_edges = calloc(n_threads, sizeof(SegtraceDupEdge *));
   w.t_n_edges = calloc(n_threads, sizeof(size_t));
