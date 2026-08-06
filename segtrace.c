@@ -57,8 +57,6 @@ int main(int argc, char **argv) {
   size_t step_size = 0; /* 0 = auto (window/2) */
   size_t min_bases = 1000;
   double max_dist = 0.15;
-  int min_copy = 2;
-  int max_copy = 30;
   const char *out_prefix = "segtrace";
   int n_threads = 8;
   uint32_t adjacency_threshold = 2;
@@ -67,8 +65,8 @@ int main(int argc, char **argv) {
 
   ketopt_t opt = KETOPT_INIT;
   int c;
-  while ((c = ketopt(&opt, argc, argv, 1, "k:s:e:w:t:b:d:m:M:o:p:a:D:f:h",
-                     0)) >= 0) {
+  while ((c = ketopt(&opt, argc, argv, 1, "k:s:e:w:t:b:d:o:p:a:D:f:h", 0)) >=
+         0) {
     if (c == 'h') {
       print_usage();
       return 0;
@@ -86,10 +84,6 @@ int main(int argc, char **argv) {
       min_bases = (size_t)strtoull(opt.arg, NULL, 10);
     else if (c == 'd')
       max_dist = atof(opt.arg);
-    else if (c == 'm')
-      min_copy = atoi(opt.arg);
-    else if (c == 'M')
-      max_copy = atoi(opt.arg);
     else if (c == 'o')
       out_prefix = opt.arg;
     else if (c == 'p')
@@ -148,8 +142,8 @@ int main(int argc, char **argv) {
   build_duplicate_regions(&uf, num_sketches, num_files, files, seq_lens, coords,
                           &dup_regions, &n_dup_regions);
 
-  size_t n_merged = merge_dup_regions(dup_regions, n_dup_regions,
-                                      adjacency_threshold, min_copy, max_copy);
+  size_t n_merged =
+      merge_dup_regions(dup_regions, n_dup_regions, adjacency_threshold);
 
   fprintf(stderr,
           "[INFO] Extracting flanking sequences for sub-clustering...\n");
@@ -194,8 +188,6 @@ void print_usage(void) {
          "  -D: sub-cluster distance threshold (default: 0.2)\n"
          "  -f: flanking ratio for sub-clustering (default: 0.3)\n"
          "  -a: adjacency threshold for merging regions (default: 2)\n"
-         "  -m: minimum copy count (default: 2)\n"
-         "  -M: maximum copy count to filter ubiquitous repeats (default: 30)\n"
          "  -o: output file prefix (default: segtrace)\n"
          "  -p: number of threads (default: 8)\n"
          "  -h, --help: show this help message\n"
@@ -628,6 +620,8 @@ void build_duplicate_regions(UnionFind *uf, size_t num_sketches, int num_files,
   *out_n_regions = n_dup_regions;
 }
 
+/* Merge adjacent/overlapping regions in the same SD family.
+ * Returns the new count of merged regions. */
 static int compare_dup_region_by_pos(const void *a, const void *b) {
   const SegtraceDupRegion *ra = (const SegtraceDupRegion *)a,
                           *rb = (const SegtraceDupRegion *)b;
@@ -639,11 +633,10 @@ static int compare_dup_region_by_pos(const void *a, const void *b) {
   return CMP(ra->end, rb->end);
 }
 
-/* Merge adjacent/overlapping regions in the same SD family.
+/* Merge adjacent/overlapping regions in the same chromosome.
  * Returns the new count of merged regions. */
 size_t merge_dup_regions(SegtraceDupRegion *regions, size_t n,
-                         uint32_t adjacency_threshold, int min_copy,
-                         int max_copy) {
+                         uint32_t adjacency_threshold) {
   if (n <= 1)
     return n;
 
@@ -658,12 +651,13 @@ size_t merge_dup_regions(SegtraceDupRegion *regions, size_t n,
         (regions[i].window_idx <=
              regions[out].window_idx + adjacency_threshold ||
          regions[i].start <= regions[out].end)) {
+      /* Expand boundary */
       if (regions[i].end > regions[out].end)
         regions[out].end = regions[i].end;
       if (regions[i].window_idx > regions[out].window_idx)
         regions[out].window_idx = regions[i].window_idx;
 
-      /* Pick the minimum cluster_id in the overlapping bundle */
+      /* Pick minimum cluster_id in the overlapping bundle */
       uint32_t c_out = (uint32_t)strtoul(regions[out].cluster_id, NULL, 10);
       uint32_t c_i = (uint32_t)strtoul(regions[i].cluster_id, NULL, 10);
       if (c_i < c_out) {
@@ -681,55 +675,9 @@ size_t merge_dup_regions(SegtraceDupRegion *regions, size_t n,
         regions[out] = regions[i];
     }
   }
-  size_t n_merged = out + 1;
 
-  /* 3. Count distinct genomic loci per cluster_id */
-  uint32_t max_cid = 0;
-  for (size_t i = 0; i < n_merged; i++) {
-    uint32_t cid = (uint32_t)strtoul(regions[i].cluster_id, NULL, 10);
-    if (cid > max_cid)
-      max_cid = cid;
-  }
-
-  uint32_t *cluster_cnt = calloc(max_cid + 1, sizeof(uint32_t));
-  for (size_t i = 0; i < n_merged; i++) {
-    uint32_t cid = (uint32_t)strtoul(regions[i].cluster_id, NULL, 10);
-    cluster_cnt[cid]++;
-  }
-
-  /* 4. Filter by min_copy / max_copy and re-index cluster IDs */
-  size_t valid = 0;
-  uint32_t *new_id_map = calloc(max_cid + 1, sizeof(uint32_t));
-  uint32_t next_id = 1;
-
-  for (size_t i = 0; i < n_merged; i++) {
-    uint32_t cid = (uint32_t)strtoul(regions[i].cluster_id, NULL, 10);
-    uint32_t cnt = cluster_cnt[cid];
-
-    if (cnt < (uint32_t)min_copy ||
-        (max_copy > 0 && cnt > (uint32_t)max_copy)) {
-      free(regions[i].cluster_id);
-      free(regions[i].chrom);
-      continue;
-    }
-
-    if (new_id_map[cid] == 0)
-      new_id_map[cid] = next_id++;
-
-    free(regions[i].cluster_id);
-    char buf[64];
-    snprintf(buf, sizeof(buf), "%u", new_id_map[cid]);
-    regions[i].cluster_id = strdup(buf);
-
-    if (valid != i)
-      regions[valid] = regions[i];
-    valid++;
-  }
-
-  free(cluster_cnt);
-  free(new_id_map);
-
-  return valid;
+  /* Return all merged regions without dropping any */
+  return out + 1;
 }
 
 void extract_flankings(char **files, int num_files, const Segtrace *r,
