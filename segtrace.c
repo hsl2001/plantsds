@@ -694,58 +694,22 @@ size_t merge_dup_regions(SegtraceDupRegion *regions, size_t n,
     }
   }
 
-  /* Phase 3: Re-labeling & Orphan/Ubiquitous Repeat filtering */
-  uint32_t *cluster_region_count = calloc(max_cid + 1, sizeof(uint32_t));
+  /* Update cluster_ids with root from UnionFind */
   for (size_t k = 0; k < n_phase1; k++) {
     uint32_t old_cid = (uint32_t)strtoul(regions[k].cluster_id, NULL, 10);
     uint32_t root = find_unionfind(&cluster_uf, old_cid);
-    cluster_region_count[root]++;
-  }
-
-  size_t valid_merged = 0;
-  uint32_t *new_id_map = calloc(max_cid + 1, sizeof(uint32_t));
-  uint32_t next_new_id = 1;
-
-  for (size_t k = 0; k < n_phase1; k++) {
-    uint32_t old_cid = (uint32_t)strtoul(regions[k].cluster_id, NULL, 10);
-    uint32_t root = find_unionfind(&cluster_uf, old_cid);
-    uint32_t cnt = cluster_region_count[root];
-
-    if (cnt < (uint32_t)min_copy ||
-        (max_copy > 0 && cnt > (uint32_t)max_copy)) {
-      /* Drop orphan (< min_copy) or ubiquitous repeat (> max_copy) */
-      free(regions[k].cluster_id);
-      free(regions[k].chrom);
-      continue;
-    }
-
-    if (new_id_map[root] == 0) {
-      new_id_map[root] = next_new_id++;
-    }
-
     free(regions[k].cluster_id);
     char buf[64];
-    snprintf(buf, sizeof(buf), "%u", new_id_map[root]);
+    snprintf(buf, sizeof(buf), "%u", root);
     regions[k].cluster_id = strdup(buf);
-
-    if (valid_merged != k) {
-      regions[valid_merged] = regions[k];
-    }
-    valid_merged++;
   }
-
-  free(cluster_region_count);
-  free(new_id_map);
   free_unionfind(&cluster_uf);
 
-  /* Phase 4: Final post-relabeling merge of overlapping/adjacent regions sharing the same cluster_id */
-  if (valid_merged <= 1)
-    return valid_merged;
-
-  qsort(regions, valid_merged, sizeof(SegtraceDupRegion), compare_dup_region);
+  /* Phase 3: Intra-cluster physical merging of unified cluster sub-fragments into distinct loci */
+  qsort(regions, n_phase1, sizeof(SegtraceDupRegion), compare_dup_region);
 
   out = 0;
-  for (size_t i = 1; i < valid_merged; i++) {
+  for (size_t i = 1; i < n_phase1; i++) {
     if (strcmp(regions[i].cluster_id, regions[out].cluster_id) == 0 &&
         strcmp(regions[i].chrom, regions[out].chrom) == 0 &&
         (regions[i].window_idx <=
@@ -763,8 +727,57 @@ size_t merge_dup_regions(SegtraceDupRegion *regions, size_t n,
         regions[out] = regions[i];
     }
   }
+  size_t n_phase3 = out + 1;
 
-  return out + 1;
+  /* Phase 4: Copy Count (Locus Count) & Orphan Filtering & Re-indexing */
+  max_cid = 0;
+  for (size_t k = 0; k < n_phase3; k++) {
+    uint32_t cid = (uint32_t)strtoul(regions[k].cluster_id, NULL, 10);
+    if (cid > max_cid)
+      max_cid = cid;
+  }
+
+  uint32_t *cluster_region_count = calloc(max_cid + 1, sizeof(uint32_t));
+  for (size_t k = 0; k < n_phase3; k++) {
+    uint32_t cid = (uint32_t)strtoul(regions[k].cluster_id, NULL, 10);
+    cluster_region_count[cid]++;
+  }
+
+  size_t valid_merged = 0;
+  uint32_t *new_id_map = calloc(max_cid + 1, sizeof(uint32_t));
+  uint32_t next_new_id = 1;
+
+  for (size_t k = 0; k < n_phase3; k++) {
+    uint32_t cid = (uint32_t)strtoul(regions[k].cluster_id, NULL, 10);
+    uint32_t cnt = cluster_region_count[cid];
+
+    if (cnt < (uint32_t)min_copy ||
+        (max_copy > 0 && cnt > (uint32_t)max_copy)) {
+      /* Drop orphan (< min_copy) or ubiquitous repeat (> max_copy) */
+      free(regions[k].cluster_id);
+      free(regions[k].chrom);
+      continue;
+    }
+
+    if (new_id_map[cid] == 0) {
+      new_id_map[cid] = next_new_id++;
+    }
+
+    free(regions[k].cluster_id);
+    char buf[64];
+    snprintf(buf, sizeof(buf), "%u", new_id_map[cid]);
+    regions[k].cluster_id = strdup(buf);
+
+    if (valid_merged != k) {
+      regions[valid_merged] = regions[k];
+    }
+    valid_merged++;
+  }
+
+  free(cluster_region_count);
+  free(new_id_map);
+
+  return valid_merged;
 }
 
 void extract_flankings(char **files, int num_files, const Segtrace *r,

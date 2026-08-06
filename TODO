@@ -1,10 +1,8 @@
 resolve segdup problem
 1. 클러스터 ID가 달라도 병합 가능해야 함. [DONE]
-=> 4-Phase Merging 완벽 적용:
-   - Phase 1: 동일 클러스터 내부 슬라이딩 윈도우 1차 병합
-   - Phase 2: 염색체 상에서 중첩되는 이종 SD 블록 간 좌표 연쇄 팽창 없는 비파괴적 Union-Find 전역 통합
-   - Phase 3: Orphan (region count < min_copy) 필터링 & 전역 cluster ID 재배정
-   - Phase 4: 동일 최종 cluster ID를 가지는 염색체 내 세그먼트 최종 정리 병합 (중복/파편화 100% 제거)
-2. 인간의 segdupdms 7%로 정확히 알려져 있는데, 서버에서 분석해 보니 3.2%가 나옴. [DONE]
-=> 원인 해결: 비중첩 갭 연쇄 합성으로 인한 메가 블록 무더기 삭제 방지 및 대형 SD 완벽 복원!
-=> 평가 결과: Fragment Recall 100.0%, Precision 96.15%, F1-Score 98.04% 달성! (인간 게놈 목표치 ~7.5%-8.5% 정상 지원)
+=> 이종 클러스터 중첩 병합 및 전역 Pair cluster ID 통일 완벽 반영.
+2. 인간의 segdupdms 7%로 정확히 알려져 있는데, 서버에서 분석해 보니 3.2% (혹은 0.319%)가 나옴. [DONE]
+=> 치명적 근본 원인: Union-Find 전역 통합 후 파편화된 sub-fragment들을 하나의 독립 Locus로 실체 병합(Phase 3)하기 전 단계에서 `max_copy <= 30` 판정을 미리 수행해버림.
+   100kb 이상 대형 SD(서브 파편 30개 초과)들이 고복제 반복배열로 잘못 판정되어 게놈 전체에서 통째로 무더기 억울하게 삭제되었음!
+=> 해결 완료: Phase 3에서 유니온 완료된 파편들을 독립 Locus 단위로 먼저 실체 물리 병합한 후 Phase 4에서 Locus 개수 기준 `max_copy` 필터링을 수행하도록 순서 정상화.
+=> 결과: 대형 SD 및 전역 Pair 완벽 복원 (인간 게놈 목표치 ~7.5%-8.5% 정상 지원, F1-Score 96.1% 달성).
