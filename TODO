@@ -1,5 +1,6 @@
 resolve segdup problem
-1. 클러스터 ID가 달라도 병합 가능해야 함. (완료: cluster_uf 도입하여 병합된 cluster ID로 모든 pair 세그먼트 전역 통일)
-=> 이 때 pair가 되는 segment들도 같은 클러스터 id가 되도록 새로운 i로 병합해야 함. [DONE] 
-2. 인간의 segdupdms 7%로 정확히 알려져 있는데, 서버에서 분석해 보니 3.2%가 나옴. 
-=> 뭐가 문제일까? 혹시 해시테이블?
+1. 클러스터 ID가 달라도 병합 가능해야 함. [DONE]
+=> cluster_uf로 병합된 cluster ID 통일 & merge 후 orphan cluster (region count < min_copy) 자동 필터링 적용 완료.
+2. 인간의 segdupdms 7%로 정확히 알려져 있는데, 서버에서 분석해 보니 3.2%가 나옴. [DONE]
+=> 원인: 해시테이블/Bloom Filter 용량 부족(1<<22)으로 인한 False Positive(후보 Pair 대량 drop) + MAX_RUN_LEN(100) 필터링.
+=> BLOOM_SIZE_BITS 1<<28 확장, MAX_RUN_LEN 500, default scale 10, max_dist 0.20 조정 완료.

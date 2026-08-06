@@ -148,8 +148,8 @@ int main(int argc, char **argv) {
   build_duplicate_regions(&uf, num_sketches, num_files, files, seq_lens, coords,
                           min_copy, max_copy, &dup_regions, &n_dup_regions);
 
-  size_t n_merged =
-      merge_dup_regions(dup_regions, n_dup_regions, adjacency_threshold);
+  size_t n_merged = merge_dup_regions(dup_regions, n_dup_regions,
+                                      adjacency_threshold, min_copy);
 
   fprintf(stderr,
           "[INFO] Extracting flanking sequences for sub-clustering...\n");
@@ -644,7 +644,7 @@ void build_duplicate_regions(UnionFind *uf, size_t num_sketches, int num_files,
 }
 
 size_t merge_dup_regions(SegtraceDupRegion *regions, size_t n,
-                         uint32_t adjacency_threshold) {
+                         uint32_t adjacency_threshold, int min_copy) {
   if (n <= 1)
     return n;
 
@@ -685,13 +685,30 @@ size_t merge_dup_regions(SegtraceDupRegion *regions, size_t n,
 
   size_t n_merged = out + 1;
 
-  /* Re-assign unified cluster IDs using cluster_uf */
+  /* Count remaining merged regions per cluster root */
+  uint32_t *cluster_region_count = calloc(max_cid + 1, sizeof(uint32_t));
+  for (size_t k = 0; k < n_merged; k++) {
+    uint32_t old_cid = (uint32_t)strtoul(regions[k].cluster_id, NULL, 10);
+    uint32_t root = find_unionfind(&cluster_uf, old_cid);
+    cluster_region_count[root]++;
+  }
+
+  /* Filter out orphan clusters (region count < min_copy) and re-assign unified
+   * IDs */
+  size_t valid_merged = 0;
   uint32_t *new_id_map = calloc(max_cid + 1, sizeof(uint32_t));
   uint32_t next_new_id = 1;
 
   for (size_t k = 0; k < n_merged; k++) {
     uint32_t old_cid = (uint32_t)strtoul(regions[k].cluster_id, NULL, 10);
     uint32_t root = find_unionfind(&cluster_uf, old_cid);
+    if (cluster_region_count[root] < (uint32_t)min_copy) {
+      /* Orphan cluster: drop this single region */
+      free(regions[k].cluster_id);
+      free(regions[k].chrom);
+      continue;
+    }
+
     if (new_id_map[root] == 0) {
       new_id_map[root] = next_new_id++;
     }
@@ -700,12 +717,18 @@ size_t merge_dup_regions(SegtraceDupRegion *regions, size_t n,
     char buf[64];
     snprintf(buf, sizeof(buf), "%u", new_id_map[root]);
     regions[k].cluster_id = strdup(buf);
+
+    if (valid_merged != k) {
+      regions[valid_merged] = regions[k];
+    }
+    valid_merged++;
   }
 
+  free(cluster_region_count);
   free(new_id_map);
   free_unionfind(&cluster_uf);
 
-  return n_merged;
+  return valid_merged;
 }
 
 void extract_flankings(char **files, int num_files, const Segtrace *r,
