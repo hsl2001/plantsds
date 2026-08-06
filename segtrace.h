@@ -173,34 +173,9 @@ typedef struct {
 } SubclusterData;
 
 typedef struct {
-  const Segtrace *r;
-  uint64_t scale;
-  size_t window_size;
-  size_t step_size;
-  size_t min_bases;
-  uint32_t seq_id;
-  const uint8_t *seq_ptr;
-  size_t seq_len;
-  size_t chunk_start_idx;
-  size_t chunk_end_idx;
-  uint64_t *hashes;
-  size_t num_hashes;
-  size_t cap_hashes;
-  WindowCoord *coords;
-  size_t num_coords;
-  size_t cap_coords;
-} SeqChunkJob;
-
-typedef struct {
   uint64_t hash;
   uint32_t window_id;
 } HashWindowEntry;
-
-typedef struct {
-  HashWindowEntry *entries;
-  size_t size;
-  size_t cap;
-} PartitionBucket;
 
 typedef struct {
   const uint64_t *all_hashes;
@@ -208,7 +183,6 @@ typedef struct {
   size_t n_windows;
   size_t window_size;
   uint32_t kmer_size;
-  PartitionBucket *buckets;
   SegtraceDupEdge **t_edges;
   size_t *t_n_edges;
   size_t *t_cap_edges;

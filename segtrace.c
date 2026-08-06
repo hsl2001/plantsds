@@ -193,180 +193,105 @@ int main(int argc, char **argv) {
 // SECTION 3: WINDOW EXTRACTION & FASTA STREAMING
 // ==============================================================
 
-static void seq_chunk_worker(void *data, long i, int tid) {
-  (void)tid;
-  SeqChunkJob *job = &((SeqChunkJob *)data)[i];
-
-  uint32_t current_window_idx =
-      (uint32_t)(job->chunk_start_idx / job->step_size);
-  for (size_t idx = job->chunk_start_idx;
-       idx + job->window_size <= job->chunk_end_idx;
-       idx += job->step_size, current_window_idx++) {
-
-    size_t valid_bases = 0;
-    for (size_t j = 0; j < job->window_size; j++) {
-      if (BASE_LOOKUP[job->seq_ptr[idx + j]] >= 0)
-        valid_bases++;
-    }
-    if (valid_bases < job->min_bases)
-      continue;
-
-    HashPool pool;
-    init_hash_pool(&pool, UINT64_MAX / job->scale);
-    extract_hash(job->r, &pool, job->seq_ptr + idx, job->window_size);
-
-    uint64_t *hashes = NULL;
-    size_t sketch_size = 0;
-    finalize_hash_pool(&pool, &hashes, &sketch_size);
-
-    if (sketch_size > 0) {
-      DA_RESERVE(job->coords, job->cap_coords, job->num_coords + 1);
-      WindowCoord *wc = &job->coords[job->num_coords++];
-      wc->seq_id = job->seq_id;
-      wc->start = idx;
-      wc->end = idx + job->window_size;
-      wc->window_idx = current_window_idx;
-
-      size_t h_idx = job->num_hashes;
-      DA_RESERVE(job->hashes, job->cap_hashes, job->num_hashes + sketch_size);
-      memcpy(job->hashes + h_idx, hashes, sketch_size * sizeof(uint64_t));
-      job->num_hashes += sketch_size;
-
-      wc->sketch_offset = h_idx;
-      wc->sketch_size = (uint32_t)sketch_size;
-      free(hashes);
-    }
-  }
-}
-
 StreamWorkerData *extract_all_windows(char **files, int num_files,
                                       const Segtrace *r, uint64_t scale,
                                       size_t window_size, size_t step_size,
                                       size_t min_bases, int n_threads) {
   fprintf(stderr, "[segtrace] Extracting windows across pangenome...\n");
-  StreamWorkerData *workers = calloc(1, sizeof(StreamWorkerData));
+  StreamWorkerData *workers = calloc(num_files, sizeof(StreamWorkerData));
   if (!workers) {
     fprintf(stderr, "[ERROR] Failed to allocate memory for workers\n");
     exit(1);
   }
+  for (int i = 0; i < num_files; i++) {
+    workers[i].filename = files[i];
+    get_basename(files[i], workers[i].bname, sizeof(workers[i].bname));
+    workers[i].r = r;
+    workers[i].scale = scale;
+    workers[i].window_size = window_size;
+    workers[i].step_size = step_size;
+    workers[i].min_bases = min_bases;
+  }
+  kt_for(n_threads, stream_pangenome_worker, workers, num_files);
+  return workers;
+}
 
-  size_t cap_jobs = 16, num_jobs = 0;
-  SeqChunkJob *jobs = malloc(cap_jobs * sizeof(SeqChunkJob));
+void stream_pangenome_worker(void *data, long i, int tid) {
+  (void)tid;
+  StreamWorkerData *w = &((StreamWorkerData *)data)[i];
 
-  for (int f = 0; f < num_files; f++) {
-    char bname[256];
-    get_basename(files[f], bname, sizeof(bname));
+  gzFile fp = gzopen(w->filename, "r");
+  if (!fp)
+    return;
+  kseq_t *ks = kseq_init(fp);
+  if (!ks) {
+    gzclose(fp);
+    return;
+  }
 
-    gzFile fp = gzopen(files[f], "r");
-    if (!fp)
-      continue;
-    kseq_t *ks = kseq_init(fp);
-    if (!ks) {
-      gzclose(fp);
-      continue;
-    }
+  while (kseq_read(ks) >= 0) {
+    size_t len = ks->seq.l;
 
-    while (kseq_read(ks) >= 0) {
-      size_t len = ks->seq.l;
-      if (len < window_size)
+    DA_RESERVE(w->seq_lens, w->cap_seqs, w->num_seqs + 1);
+    w->seq_lens[w->num_seqs].genome = strdup(w->bname);
+    w->seq_lens[w->num_seqs].seq = strdup(ks->name.s);
+    w->num_seqs++;
+
+    /* Pre-allocate estimated windows to reduce realloc overhead */
+    size_t est_windows =
+        len >= w->window_size ? (len - w->window_size) / w->step_size + 1 : 0;
+    DA_RESERVE(w->coords, w->cap_sketches, w->num_sketches + est_windows);
+
+    uint32_t current_window_idx = 0;
+    for (size_t idx = 0; idx + w->window_size <= len;
+         idx += w->step_size, current_window_idx++) {
+      size_t valid_bases = 0;
+      for (size_t j = 0; j < w->window_size; j++) {
+        if (BASE_LOOKUP[(uint8_t)ks->seq.s[idx + j]] >= 0)
+          valid_bases++;
+      }
+      if (valid_bases < w->min_bases)
         continue;
 
-      DA_RESERVE(workers[0].seq_lens, workers[0].cap_seqs,
-                 workers[0].num_seqs + 1);
-      workers[0].seq_lens[workers[0].num_seqs].genome = strdup(bname);
-      workers[0].seq_lens[workers[0].num_seqs].seq = strdup(ks->name.s);
-      uint32_t seq_id = (uint32_t)workers[0].num_seqs++;
+      DA_RESERVE(w->coords, w->cap_sketches, w->num_sketches + 1);
 
-      uint8_t *seq_copy = malloc(len + 1);
-      memcpy(seq_copy, ks->seq.s, len + 1);
+      WindowCoord *wc = &w->coords[w->num_sketches];
 
-      size_t chunk_size = len / (n_threads * 4);
-      if (chunk_size < 100000)
-        chunk_size = 100000;
+      wc->seq_id = (uint32_t)(w->num_seqs - 1);
+      wc->start = idx;
+      wc->end = idx + w->window_size;
+      wc->window_idx = current_window_idx;
 
-      for (size_t c_start = 0; c_start < len; c_start += chunk_size) {
-        size_t c_end = c_start + chunk_size;
-        if (c_end > len)
-          c_end = len;
-        if (c_end - c_start < window_size)
-          break;
+      HashPool pool;
+      init_hash_pool(&pool, UINT64_MAX / w->scale);
+      extract_hash(w->r, &pool, (const uint8_t *)ks->seq.s + idx,
+                   w->window_size);
 
-        DA_RESERVE(jobs, cap_jobs, num_jobs + 1);
-        jobs[num_jobs++] = (SeqChunkJob){
-            .r = r,
-            .scale = scale,
-            .window_size = window_size,
-            .step_size = step_size,
-            .min_bases = min_bases,
-            .seq_id = seq_id,
-            .seq_ptr = seq_copy,
-            .seq_len = len,
-            .chunk_start_idx = c_start,
-            .chunk_end_idx = c_end,
-            .hashes = NULL,
-            .num_hashes = 0,
-            .cap_hashes = 0,
-            .coords = NULL,
-            .num_coords = 0,
-            .cap_coords = 0,
-        };
+      uint64_t *hashes = NULL;
+      size_t sketch_size = 0;
+      finalize_hash_pool(&pool, &hashes, &sketch_size);
+
+      if (sketch_size > 0) {
+        size_t hash_idx = w->num_all_hashes;
+        if (w->cap_all_hashes == 0) {
+          w->cap_all_hashes = 524288;
+          w->all_hashes = malloc(w->cap_all_hashes * sizeof(uint64_t));
+        }
+        DA_RESERVE(w->all_hashes, w->cap_all_hashes,
+                   w->num_all_hashes + sketch_size);
+        memcpy(w->all_hashes + hash_idx, hashes,
+               sketch_size * sizeof(uint64_t));
+        w->num_all_hashes += sketch_size;
+
+        wc->sketch_offset = hash_idx;
+        wc->sketch_size = (uint32_t)sketch_size;
+        free(hashes);
+        w->num_sketches++;
       }
     }
-    kseq_destroy(ks);
-    gzclose(fp);
   }
-
-  kt_for(n_threads, seq_chunk_worker, jobs, num_jobs);
-
-  /* Merge parallel chunk outputs into workers[0] */
-  for (size_t j = 0; j < num_jobs; j++) {
-    SeqChunkJob *job = &jobs[j];
-    if (job->num_coords > 0) {
-      size_t base_h_offset = workers[0].num_all_hashes;
-      DA_RESERVE(workers[0].all_hashes, workers[0].cap_all_hashes,
-                 workers[0].num_all_hashes + job->num_hashes);
-      memcpy(workers[0].all_hashes + base_h_offset, job->hashes,
-             job->num_hashes * sizeof(uint64_t));
-      workers[0].num_all_hashes += job->num_hashes;
-
-      size_t base_c_offset = workers[0].num_sketches;
-      DA_RESERVE(workers[0].coords, workers[0].cap_sketches,
-                 workers[0].num_sketches + job->num_coords);
-
-      for (size_t k = 0; k < job->num_coords; k++) {
-        WindowCoord wc = job->coords[k];
-        wc.sketch_offset += base_h_offset;
-        workers[0].coords[base_c_offset + k] = wc;
-      }
-      workers[0].num_sketches += job->num_coords;
-    }
-
-    free(job->hashes);
-    free(job->coords);
-  }
-
-  /* Free sequence copies */
-  uint8_t **freed_seqs = NULL;
-  size_t n_freed = 0, cap_freed = 0;
-  for (size_t j = 0; j < num_jobs; j++) {
-    uint8_t *p = (uint8_t *)jobs[j].seq_ptr;
-    int already = 0;
-    for (size_t k = 0; k < n_freed; k++) {
-      if (freed_seqs[k] == p) {
-        already = 1;
-        break;
-      }
-    }
-    if (!already) {
-      DA_RESERVE(freed_seqs, cap_freed, n_freed + 1);
-      freed_seqs[n_freed++] = p;
-      free(p);
-    }
-  }
-  free(freed_seqs);
-  free(jobs);
-
-  return workers;
+  kseq_destroy(ks);
+  gzclose(fp);
 }
 
 void merge_global_data(StreamWorkerData *workers, int num_files,
@@ -456,35 +381,16 @@ void discover_and_compute(const uint64_t *all_hashes, WindowCoord *coords,
   w.n_windows = n_windows;
   w.window_size = window_size;
   w.kmer_size = kmer_size;
-  w.buckets = calloc(NUM_PARTITIONS, sizeof(PartitionBucket));
   w.t_edges = calloc(n_threads, sizeof(SegtraceDupEdge *));
   w.t_n_edges = calloc(n_threads, sizeof(size_t));
   w.t_cap_edges = calloc(n_threads, sizeof(size_t));
   w.t_bloom = malloc(n_threads * sizeof(uint8_t *));
-  if (!w.buckets || !w.t_edges || !w.t_n_edges || !w.t_cap_edges ||
-      !w.t_bloom) {
+  if (!w.t_edges || !w.t_n_edges || !w.t_cap_edges || !w.t_bloom) {
     fprintf(stderr, "[ERROR] Failed to allocate memory for discovery data\n");
     exit(1);
   }
   for (int t = 0; t < n_threads; t++)
     w.t_bloom[t] = calloc(BLOOM_SIZE_BYTES, 1);
-
-  uint64_t part_size = UINT64_MAX / NUM_PARTITIONS;
-
-  /* Single O(N) pass to distribute window hashes directly into partition
-   * buckets */
-  for (size_t win = 0; win < n_windows; win++) {
-    const uint64_t *h = all_hashes + coords[win].sketch_offset;
-    size_t sz = coords[win].sketch_size;
-    for (size_t k = 0; k < sz; k++) {
-      uint64_t val = h[k];
-      size_t p = (size_t)(val / part_size);
-      if (p >= NUM_PARTITIONS)
-        p = NUM_PARTITIONS - 1;
-      DA_PUSH(w.buckets[p].entries, w.buckets[p].size, w.buckets[p].cap,
-              ((HashWindowEntry){val, (uint32_t)win}));
-    }
-  }
 
   kt_for(n_threads, discover_compute_worker, &w, NUM_PARTITIONS);
 
@@ -498,10 +404,6 @@ void discover_and_compute(const uint64_t *all_hashes, WindowCoord *coords,
     free(w.t_edges[t]);
     free(w.t_bloom[t]);
   }
-  for (size_t p = 0; p < NUM_PARTITIONS; p++) {
-    free(w.buckets[p].entries);
-  }
-  free(w.buckets);
   free(w.t_edges);
   free(w.t_n_edges);
   free(w.t_cap_edges);
@@ -513,28 +415,53 @@ void discover_and_compute(const uint64_t *all_hashes, WindowCoord *coords,
 
 void discover_compute_worker(void *data, long p, int tid) {
   DiscoverComputeData *w_data = (DiscoverComputeData *)data;
-  PartitionBucket *b = &w_data->buckets[p];
 
-  if (b->size == 0)
+  uint64_t part_size = UINT64_MAX / NUM_PARTITIONS;
+  uint64_t lo = part_size * (uint64_t)p;
+  uint64_t hi = (p == NUM_PARTITIONS - 1) ? UINT64_MAX
+                                          : part_size * (uint64_t)(p + 1) - 1;
+
+  size_t total_in_partition = 0;
+  for (size_t w = 0; w < w_data->n_windows; w++) {
+    const uint64_t *h = w_data->all_hashes + w_data->coords[w].sketch_offset;
+    size_t sz = w_data->coords[w].sketch_size;
+    size_t s = lower_bound_u64(h, sz, lo);
+    size_t e = (hi == UINT64_MAX) ? sz : lower_bound_u64(h, sz, hi + 1);
+    total_in_partition += e - s;
+  }
+
+  if (total_in_partition == 0)
     return;
 
-  qsort(b->entries, b->size, sizeof(HashWindowEntry), compare_hash_entry);
+  HashWindowEntry *entries =
+      malloc(total_in_partition * sizeof(HashWindowEntry));
+  size_t n_entries = 0;
+
+  for (size_t w = 0; w < w_data->n_windows; w++) {
+    const uint64_t *h = w_data->all_hashes + w_data->coords[w].sketch_offset;
+    size_t sz = w_data->coords[w].sketch_size;
+    size_t s = lower_bound_u64(h, sz, lo);
+    size_t e = (hi == UINT64_MAX) ? sz : lower_bound_u64(h, sz, hi + 1);
+
+    for (size_t k = s; k < e; k++)
+      entries[n_entries++] = (HashWindowEntry){h[k], (uint32_t)w};
+  }
+
+  qsort(entries, n_entries, sizeof(HashWindowEntry), compare_hash_entry);
   memset(w_data->t_bloom[tid], 0, BLOOM_SIZE_BYTES);
 
-  double p_kmer = pow(0.90, (double)w_data->kmer_size);
-
   size_t i = 0;
-  while (i < b->size) {
+  while (i < n_entries) {
     size_t j = i + 1;
-    while (j < b->size && b->entries[j].hash == b->entries[i].hash)
+    while (j < n_entries && entries[j].hash == entries[i].hash)
       j++;
     size_t run_len = j - i;
 
     if (run_len >= 2 && run_len <= MAX_RUN_LEN) {
       for (size_t a = i; a < j; a++) {
-        for (size_t b_idx = a + 1; b_idx < j; b_idx++) {
-          uint32_t wa = b->entries[a].window_id;
-          uint32_t wb = b->entries[b_idx].window_id;
+        for (size_t b = a + 1; b < j; b++) {
+          uint32_t wa = entries[a].window_id;
+          uint32_t wb = entries[b].window_id;
 
           if (w_data->coords[wa].seq_id == w_data->coords[wb].seq_id &&
               ABS_DIFF(w_data->coords[wa].start, w_data->coords[wb].start) <
@@ -549,6 +476,9 @@ void discover_compute_worker(void *data, long p, int tid) {
               w_data->coords[wa].sketch_size < w_data->coords[wb].sketch_size
                   ? w_data->coords[wa].sketch_size
                   : w_data->coords[wb].sketch_size;
+          /* 10% divergence threshold (90% identity): p_kmer = (1 - 0.10)^k =
+           * (0.90)^k */
+          double p_kmer = pow(0.90, (double)w_data->kmer_size);
           size_t min_shared = (size_t)floor((double)min_sz * p_kmer) - 1;
           if (min_shared < 1)
             min_shared = 1;
@@ -566,6 +496,7 @@ void discover_compute_worker(void *data, long p, int tid) {
     }
     i = j;
   }
+  free(entries);
 }
 
 SegtraceDistResult calculate_window_dist(const uint64_t *all_hashes,
@@ -845,29 +776,6 @@ void perform_subclustering(SegtraceDupRegion *regions, size_t n_merged,
   free_unionfind(&sub_uf);
 }
 
-static inline void check_and_eval_flank_pair(SubclusterData *w, int tid,
-                                             size_t ra, size_t rb,
-                                             double p_kmer) {
-  if (w->regions[ra].flank_sketch.sketch_size == 0 ||
-      w->regions[rb].flank_sketch.sketch_size == 0)
-    return;
-
-  size_t min_sz = w->regions[ra].flank_sketch.sketch_size <
-                          w->regions[rb].flank_sketch.sketch_size
-                      ? w->regions[ra].flank_sketch.sketch_size
-                      : w->regions[rb].flank_sketch.sketch_size;
-  size_t min_shared = (size_t)ceil((double)min_sz * p_kmer);
-  if (min_shared < 1)
-    min_shared = 1;
-
-  SegtraceDistResult d = calculate_segtrace_dist(
-      &w->regions[ra].flank_sketch, &w->regions[rb].flank_sketch, w->kmer_size);
-  if (d.shared_hashes >= min_shared) {
-    DA_PUSH(w->t_pairs[tid], w->t_n_pairs[tid], w->t_cap_pairs[tid],
-            ((SubclusterPair){(uint32_t)ra, (uint32_t)rb}));
-  }
-}
-
 void process_subcluster(void *data, long s, int tid) {
   SubclusterData *w = (SubclusterData *)data;
   size_t start = w->spans[s].start;
@@ -876,12 +784,32 @@ void process_subcluster(void *data, long s, int tid) {
   if (count <= 1)
     return;
 
-  double p_kmer = pow(0.90, (double)w->kmer_size);
-
   if (count <= 64) {
     for (size_t a = 0; a < count; a++) {
+      size_t ra = start + a;
+      if (w->regions[ra].flank_sketch.sketch_size == 0)
+        continue;
       for (size_t b = a + 1; b < count; b++) {
-        check_and_eval_flank_pair(w, tid, start + a, start + b, p_kmer);
+        size_t rb = start + b;
+        if (w->regions[rb].flank_sketch.sketch_size == 0)
+          continue;
+
+        size_t min_sz = w->regions[ra].flank_sketch.sketch_size <
+                                w->regions[rb].flank_sketch.sketch_size
+                            ? w->regions[ra].flank_sketch.sketch_size
+                            : w->regions[rb].flank_sketch.sketch_size;
+        double p_kmer = pow(0.90, (double)w->kmer_size);
+        size_t min_shared = (size_t)ceil((double)min_sz * p_kmer);
+        if (min_shared < 1)
+          min_shared = 1;
+
+        SegtraceDistResult d =
+            calculate_segtrace_dist(&w->regions[ra].flank_sketch,
+                                    &w->regions[rb].flank_sketch, w->kmer_size);
+        if (d.shared_hashes >= min_shared) {
+          DA_PUSH(w->t_pairs[tid], w->t_n_pairs[tid], w->t_cap_pairs[tid],
+                  ((SubclusterPair){(uint32_t)ra, (uint32_t)rb}));
+        }
       }
     }
   } else {
@@ -933,7 +861,24 @@ void process_subcluster(void *data, long s, int tid) {
             if (bloom_test_and_set(bloom, pk))
               continue;
 
-            check_and_eval_flank_pair(w, tid, start + la, start + lb, p_kmer);
+            size_t ra = start + la;
+            size_t rb = start + lb;
+            size_t min_sz = w->regions[ra].flank_sketch.sketch_size <
+                                    w->regions[rb].flank_sketch.sketch_size
+                                ? w->regions[ra].flank_sketch.sketch_size
+                                : w->regions[rb].flank_sketch.sketch_size;
+            double p_kmer = pow(0.90, (double)w->kmer_size);
+            size_t min_shared = (size_t)ceil((double)min_sz * p_kmer);
+            if (min_shared < 1)
+              min_shared = 1;
+
+            SegtraceDistResult d = calculate_segtrace_dist(
+                &w->regions[ra].flank_sketch, &w->regions[rb].flank_sketch,
+                w->kmer_size);
+            if (d.shared_hashes >= min_shared) {
+              DA_PUSH(w->t_pairs[tid], w->t_n_pairs[tid], w->t_cap_pairs[tid],
+                      ((SubclusterPair){(uint32_t)ra, (uint32_t)rb}));
+            }
           }
         }
       }
