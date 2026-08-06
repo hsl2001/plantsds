@@ -48,10 +48,10 @@ extern "C" {
 
 #define ABS_DIFF(a, b) ((a) > (b) ? (a) - (b) : (b) - (a))
 
-#define NUM_PARTITIONS 256
+#define NUM_PARTITIONS 1024
 #define MAX_RUN_LEN 100
 
-#define BLOOM_SIZE_BITS (1 << 28)
+#define BLOOM_SIZE_BITS (1 << 30)
 #define BLOOM_SIZE_BYTES (BLOOM_SIZE_BITS / 8)
 #define BLOOM_MASK (BLOOM_SIZE_BITS - 1)
 
