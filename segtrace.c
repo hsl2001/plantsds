@@ -643,8 +643,6 @@ void build_duplicate_regions(UnionFind *uf, size_t num_sketches, int num_files,
   *out_n_regions = n_dup_regions;
 }
 
-/* Merge adjacent/overlapping regions in the same SD family.
- * Returns the new count of merged regions. */
 size_t merge_dup_regions(SegtraceDupRegion *regions, size_t n,
                          uint32_t adjacency_threshold) {
   if (n <= 1)
@@ -652,12 +650,26 @@ size_t merge_dup_regions(SegtraceDupRegion *regions, size_t n,
 
   qsort(regions, n, sizeof(SegtraceDupRegion), compare_dup_region);
 
+  uint32_t max_cid = 0;
+  for (size_t i = 0; i < n; i++) {
+    uint32_t cid = (uint32_t)strtoul(regions[i].cluster_id, NULL, 10);
+    if (cid > max_cid)
+      max_cid = cid;
+  }
+
+  UnionFind cluster_uf;
+  init_unionfind(&cluster_uf, max_cid + 1);
+
   size_t out = 0;
   for (size_t i = 1; i < n; i++) {
     if (strcmp(regions[i].chrom, regions[out].chrom) == 0 &&
         (regions[i].window_idx <=
              regions[out].window_idx + adjacency_threshold ||
          regions[i].start <= regions[out].end)) {
+      uint32_t c_out = (uint32_t)strtoul(regions[out].cluster_id, NULL, 10);
+      uint32_t c_i = (uint32_t)strtoul(regions[i].cluster_id, NULL, 10);
+      union_unionfind(&cluster_uf, c_out, c_i);
+
       if (regions[i].end > regions[out].end)
         regions[out].end = regions[i].end;
       if (regions[i].window_idx > regions[out].window_idx)
@@ -670,7 +682,30 @@ size_t merge_dup_regions(SegtraceDupRegion *regions, size_t n,
         regions[out] = regions[i];
     }
   }
-  return out + 1;
+
+  size_t n_merged = out + 1;
+
+  /* Re-assign unified cluster IDs using cluster_uf */
+  uint32_t *new_id_map = calloc(max_cid + 1, sizeof(uint32_t));
+  uint32_t next_new_id = 1;
+
+  for (size_t k = 0; k < n_merged; k++) {
+    uint32_t old_cid = (uint32_t)strtoul(regions[k].cluster_id, NULL, 10);
+    uint32_t root = find_unionfind(&cluster_uf, old_cid);
+    if (new_id_map[root] == 0) {
+      new_id_map[root] = next_new_id++;
+    }
+
+    free(regions[k].cluster_id);
+    char buf[64];
+    snprintf(buf, sizeof(buf), "%u", new_id_map[root]);
+    regions[k].cluster_id = strdup(buf);
+  }
+
+  free(new_id_map);
+  free_unionfind(&cluster_uf);
+
+  return n_merged;
 }
 
 void extract_flankings(char **files, int num_files, const Segtrace *r,
@@ -1139,7 +1174,7 @@ uint64_t encode_pair(uint32_t a, uint32_t b) {
 
 int bloom_test_and_set(uint8_t *bloom, uint64_t key) {
   uint32_t h1 = (uint32_t)(key)&BLOOM_MASK;
-  uint32_t h2 = (uint32_t)(key >> 22) & BLOOM_MASK;
+  uint32_t h2 = (uint32_t)(key >> 28) & BLOOM_MASK;
   int was_set =
       ((bloom[h1 >> 3] >> (h1 & 7)) & 1) & ((bloom[h2 >> 3] >> (h2 & 7)) & 1);
   bloom[h1 >> 3] |= (uint8_t)(1 << (h1 & 7));

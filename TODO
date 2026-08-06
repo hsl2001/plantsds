@@ -1,1 +1,5 @@
-resolve orphan segdup problem
+resolve segdup problem
+1. 클러스터 ID가 달라도 병합 가능해야 함. (완료: cluster_uf 도입하여 병합된 cluster ID로 모든 pair 세그먼트 전역 통일)
+=> 이 때 pair가 되는 segment들도 같은 클러스터 id가 되도록 새로운 i로 병합해야 함. [DONE] 
+2. 인간의 segdupdms 7%로 정확히 알려져 있는데, 서버에서 분석해 보니 3.2%가 나옴. 
+=> 뭐가 문제일까? 혹시 해시테이블?
