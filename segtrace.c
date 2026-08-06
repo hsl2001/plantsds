@@ -668,10 +668,7 @@ size_t merge_dup_regions(SegtraceDupRegion *regions, size_t n,
   }
   size_t n_phase1 = out + 1;
 
-  /* Phase 2: Inter-cluster merging of physically overlapping SD blocks */
-  qsort(regions, n_phase1, sizeof(SegtraceDupRegion),
-        compare_dup_region_by_pos);
-
+  /* Phase 2: Inter-cluster UnionFind for overlapping SD blocks on the same chromosome */
   uint32_t max_cid = 0;
   for (size_t i = 0; i < n_phase1; i++) {
     uint32_t cid = (uint32_t)strtoul(regions[i].cluster_id, NULL, 10);
@@ -682,42 +679,24 @@ size_t merge_dup_regions(SegtraceDupRegion *regions, size_t n,
   UnionFind cluster_uf;
   init_unionfind(&cluster_uf, max_cid + 1);
 
-  out = 0;
-  for (size_t i = 1; i < n_phase1; i++) {
-    int same_cluster =
-        (strcmp(regions[i].cluster_id, regions[out].cluster_id) == 0);
-    int should_merge = 0;
-    if (same_cluster) {
-      should_merge = (regions[i].window_idx <=
-                          regions[out].window_idx + adjacency_threshold ||
-                      regions[i].start <= regions[out].end);
-    } else {
-      should_merge = (regions[i].start <= regions[out].end);
-    }
+  qsort(regions, n_phase1, sizeof(SegtraceDupRegion), compare_dup_region_by_pos);
 
-    if (strcmp(regions[i].chrom, regions[out].chrom) == 0 && should_merge) {
-      uint32_t c_out = (uint32_t)strtoul(regions[out].cluster_id, NULL, 10);
+  for (size_t i = 0; i < n_phase1; i++) {
+    for (size_t j = i + 1; j < n_phase1; j++) {
+      if (strcmp(regions[i].chrom, regions[j].chrom) != 0)
+        break;
+      if (regions[j].start >= regions[i].end)
+        break;
+
       uint32_t c_i = (uint32_t)strtoul(regions[i].cluster_id, NULL, 10);
-      union_unionfind(&cluster_uf, c_out, c_i);
-
-      if (regions[i].end > regions[out].end)
-        regions[out].end = regions[i].end;
-      if (regions[i].window_idx > regions[out].window_idx)
-        regions[out].window_idx = regions[i].window_idx;
-      free(regions[i].cluster_id);
-      free(regions[i].chrom);
-    } else {
-      out++;
-      if (out != i)
-        regions[out] = regions[i];
+      uint32_t c_j = (uint32_t)strtoul(regions[j].cluster_id, NULL, 10);
+      union_unionfind(&cluster_uf, c_i, c_j);
     }
   }
 
-  size_t n_merged = out + 1;
-
   /* Phase 3: Re-labeling & Orphan/Ubiquitous Repeat filtering */
   uint32_t *cluster_region_count = calloc(max_cid + 1, sizeof(uint32_t));
-  for (size_t k = 0; k < n_merged; k++) {
+  for (size_t k = 0; k < n_phase1; k++) {
     uint32_t old_cid = (uint32_t)strtoul(regions[k].cluster_id, NULL, 10);
     uint32_t root = find_unionfind(&cluster_uf, old_cid);
     cluster_region_count[root]++;
@@ -727,7 +706,7 @@ size_t merge_dup_regions(SegtraceDupRegion *regions, size_t n,
   uint32_t *new_id_map = calloc(max_cid + 1, sizeof(uint32_t));
   uint32_t next_new_id = 1;
 
-  for (size_t k = 0; k < n_merged; k++) {
+  for (size_t k = 0; k < n_phase1; k++) {
     uint32_t old_cid = (uint32_t)strtoul(regions[k].cluster_id, NULL, 10);
     uint32_t root = find_unionfind(&cluster_uf, old_cid);
     uint32_t cnt = cluster_region_count[root];
@@ -759,7 +738,33 @@ size_t merge_dup_regions(SegtraceDupRegion *regions, size_t n,
   free(new_id_map);
   free_unionfind(&cluster_uf);
 
-  return valid_merged;
+  /* Phase 4: Final post-relabeling merge of overlapping/adjacent regions sharing the same cluster_id */
+  if (valid_merged <= 1)
+    return valid_merged;
+
+  qsort(regions, valid_merged, sizeof(SegtraceDupRegion), compare_dup_region);
+
+  out = 0;
+  for (size_t i = 1; i < valid_merged; i++) {
+    if (strcmp(regions[i].cluster_id, regions[out].cluster_id) == 0 &&
+        strcmp(regions[i].chrom, regions[out].chrom) == 0 &&
+        (regions[i].window_idx <=
+             regions[out].window_idx + adjacency_threshold ||
+         regions[i].start <= regions[out].end)) {
+      if (regions[i].end > regions[out].end)
+        regions[out].end = regions[i].end;
+      if (regions[i].window_idx > regions[out].window_idx)
+        regions[out].window_idx = regions[i].window_idx;
+      free(regions[i].cluster_id);
+      free(regions[i].chrom);
+    } else {
+      out++;
+      if (out != i)
+        regions[out] = regions[i];
+    }
+  }
+
+  return out + 1;
 }
 
 void extract_flankings(char **files, int num_files, const Segtrace *r,
@@ -984,6 +989,11 @@ void write_dup_bedpe(const char *out_prefix, SegtraceDupRegion *dup_regions,
         const char *c2 = regions_copy[b].chrom;
         size_t s2 = regions_copy[b].start;
         size_t e2 = regions_copy[b].end;
+
+        if (strcmp(c1, c2) == 0 && s2 < e1) {
+          /* Skip self-overlapping pairs on the same chromosome */
+          continue;
+        }
 
         int swap = 0;
         int cmp_chrom = strcmp(c1, c2);
