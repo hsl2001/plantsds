@@ -1039,7 +1039,7 @@ void write_dup_bedpe(const char *out_prefix, SegtraceDupRegion *dup_regions,
     }
 
     size_t cluster_size = j - i;
-    if (cluster_size > 1) {
+    if (cluster_size > 1 && cluster_size <= 500) {
       for (size_t a = i; a < j; a++) {
         for (size_t b = a + 1; b < j; b++) {
           const char *c1 = regions_copy[a].chrom;
