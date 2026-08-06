@@ -52,7 +52,7 @@ void print_usage(void) {
          "  -b: minimum valid bases per window (default: 1000)\n"
          "  -d: maximum distance to consider as copy (default: 0.15)\n"
          "  -D: sub-cluster distance threshold (default: 0.3)\n"
-         "  -f: flanking size in bp for sub-clustering (default: 2000)\n"
+         "  -f: flanking size in bp for sub-clustering (default: 1000)\n"
          "  -a: adjacency threshold for merging regions (default: 2)\n"
          "  -o: output file prefix (default: segtrace)\n"
          "  -p: number of threads (default: 8)\n"
@@ -77,7 +77,7 @@ int main(int argc, char **argv) {
   uint64_t def_scale = 16;
   uint64_t def_hash_seed = 42;
   size_t window_size = 1024;
-  size_t step_size = 0; /* 0 = auto (80% of window_size) */
+  size_t step_size = 0; /* 0 = auto (50% of window_size) */
   size_t min_bases = 1000;
   double max_dist = 0.15;
   const char *out_prefix = "segtrace";
