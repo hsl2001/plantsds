@@ -222,7 +222,8 @@ void build_duplicate_regions(UnionFind *uf, size_t num_sketches, int num_files,
                              SegtraceDupRegion **out_regions,
                              size_t *out_n_regions);
 size_t merge_dup_regions(SegtraceDupRegion *regions, size_t n,
-                         uint32_t adjacency_threshold, int min_copy);
+                         uint32_t adjacency_threshold, int min_copy,
+                         int max_copy);
 void extract_flankings(char **files, int num_files, const Segtrace *r,
                        uint64_t scale, SegtraceDupRegion *regions,
                        size_t n_regions, int n_threads, double flank_ratio);

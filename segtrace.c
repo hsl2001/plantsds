@@ -149,7 +149,7 @@ int main(int argc, char **argv) {
                           min_copy, max_copy, &dup_regions, &n_dup_regions);
 
   size_t n_merged = merge_dup_regions(dup_regions, n_dup_regions,
-                                      adjacency_threshold, min_copy);
+                                      adjacency_threshold, min_copy, max_copy);
 
   fprintf(stderr,
           "[INFO] Extracting flanking sequences for sub-clustering...\n");
@@ -570,20 +570,6 @@ void build_duplicate_regions(UnionFind *uf, size_t num_sketches, int num_files,
       fam_id[fam] = ++n_families;
   }
 
-  uint32_t *max_intra_copy = calloc(n_families + 1, sizeof(uint32_t));
-  uint32_t *counts =
-      calloc((size_t)(n_families + 1) * (size_t)num_files, sizeof(uint32_t));
-  for (size_t i = 0; i < num_sketches; i++) {
-    uint32_t fam = find_unionfind(uf, (uint32_t)i);
-    uint32_t fid = fam_id[fam];
-    uint32_t g_id = genome_id[i];
-    counts[(size_t)fid * num_files + g_id]++;
-    if (counts[(size_t)fid * num_files + g_id] > max_intra_copy[fid])
-      max_intra_copy[fid] = counts[(size_t)fid * num_files + g_id];
-  }
-  free(counts);
-  free(genome_id);
-
   uint8_t *final_is_sd = calloc(n_families + 1, sizeof(uint8_t));
   char **hub_label = calloc(n_families + 1, sizeof(char *));
   uint32_t next_cluster_id = 1;
@@ -593,8 +579,12 @@ void build_duplicate_regions(UnionFind *uf, size_t num_sketches, int num_files,
     uint32_t fam = find_unionfind(uf, (uint32_t)i);
     uint32_t fid = fam_id[fam];
     comp_size[fid]++;
-    if (max_intra_copy[fid] >= (uint32_t)min_copy &&
-        (max_copy <= 0 || max_intra_copy[fid] <= (uint32_t)max_copy)) {
+  }
+
+  for (size_t i = 0; i < num_sketches; i++) {
+    uint32_t fam = find_unionfind(uf, (uint32_t)i);
+    uint32_t fid = fam_id[fam];
+    if (comp_size[fid] >= 2) {
       final_is_sd[fid] = 1;
       if (!hub_label[fid]) {
         char buf[64];
@@ -603,7 +593,6 @@ void build_duplicate_regions(UnionFind *uf, size_t num_sketches, int num_files,
       }
     }
   }
-  free(max_intra_copy);
 
   size_t n_dup_regions = 0, cap_dup_regions = 0;
   SegtraceDupRegion *dup_regions = NULL;
@@ -644,7 +633,8 @@ void build_duplicate_regions(UnionFind *uf, size_t num_sketches, int num_files,
 }
 
 size_t merge_dup_regions(SegtraceDupRegion *regions, size_t n,
-                         uint32_t adjacency_threshold, int min_copy) {
+                         uint32_t adjacency_threshold, int min_copy,
+                         int max_copy) {
   if (n <= 1)
     return n;
 
@@ -685,7 +675,7 @@ size_t merge_dup_regions(SegtraceDupRegion *regions, size_t n,
 
   size_t n_merged = out + 1;
 
-  /* Count remaining merged regions per cluster root */
+  /* Count remaining merged regions per cluster root (distinct genomic loci) */
   uint32_t *cluster_region_count = calloc(max_cid + 1, sizeof(uint32_t));
   for (size_t k = 0; k < n_merged; k++) {
     uint32_t old_cid = (uint32_t)strtoul(regions[k].cluster_id, NULL, 10);
@@ -693,8 +683,8 @@ size_t merge_dup_regions(SegtraceDupRegion *regions, size_t n,
     cluster_region_count[root]++;
   }
 
-  /* Filter out orphan clusters (region count < min_copy) and re-assign unified
-   * IDs */
+  /* Filter out orphan clusters (< min_copy) and ubiquitous repeats (> max_copy)
+   */
   size_t valid_merged = 0;
   uint32_t *new_id_map = calloc(max_cid + 1, sizeof(uint32_t));
   uint32_t next_new_id = 1;
@@ -702,8 +692,11 @@ size_t merge_dup_regions(SegtraceDupRegion *regions, size_t n,
   for (size_t k = 0; k < n_merged; k++) {
     uint32_t old_cid = (uint32_t)strtoul(regions[k].cluster_id, NULL, 10);
     uint32_t root = find_unionfind(&cluster_uf, old_cid);
-    if (cluster_region_count[root] < (uint32_t)min_copy) {
-      /* Orphan cluster: drop this single region */
+    uint32_t cnt = cluster_region_count[root];
+
+    if (cnt < (uint32_t)min_copy ||
+        (max_copy > 0 && cnt > (uint32_t)max_copy)) {
+      /* Drop orphan (< min_copy) or ubiquitous repeat (> max_copy) */
       free(regions[k].cluster_id);
       free(regions[k].chrom);
       continue;

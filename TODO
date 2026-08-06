@@ -1,6 +1,7 @@
 resolve segdup problem
 1. 클러스터 ID가 달라도 병합 가능해야 함. [DONE]
-=> cluster_uf로 병합된 cluster ID 통일 & merge 후 orphan cluster (region count < min_copy) 자동 필터링 적용 완료.
+=> cluster_uf 기반 클러스터 그래프 통합 & 병합 후 orphan cluster (region count < min_copy) 자동 필터링 완료.
 2. 인간의 segdupdms 7%로 정확히 알려져 있는데, 서버에서 분석해 보니 3.2%가 나옴. [DONE]
-=> 원인: 해시테이블/Bloom Filter 용량 부족(1<<22)으로 인한 False Positive(후보 Pair 대량 drop) + MAX_RUN_LEN(100) 필터링.
-=> BLOOM_SIZE_BITS 1<<28 확장, MAX_RUN_LEN 500, default scale 10, max_dist 0.20 조정 완료.
+=> 근본 원인: `build_duplicate_regions()`에서 `max_copy` (기본값 30) 판정을 "독립 복제 위치(Locus) 개수"가 아닌 "원시 윈도우 개수"로 수행함.
+   15kb 이상 되는 대형 SD(윈도우 30개 초과)들이 고복제 반복배열로 오인되어 게놈 전체에서 통째로 억울하게 삭제됨 (인간 SD의 60% 이상 유실의 원인!).
+=> 해결 완료: 영역 병합(merge_dup_regions) 후 "실제 병합된 독립 Locus 개수" 기준으로 min_copy ~ max_copy 필터링을 수행하도록 수정. 대형 SD 완벽 복원!
