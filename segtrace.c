@@ -50,7 +50,7 @@ void print_usage(void) {
          "  -w: window size in bp (default: 1024)\n"
          "  -t: step size in bp (default: 0 [auto: 80%% of window size])\n"
          "  -b: minimum valid bases per window (default: 1000)\n"
-         "  -d: maximum distance to consider as copy (default: 0.15)\n"
+         "  -d: maximum distance to consider as copy (default: 0.10)\n"
          "  -D: sub-cluster distance threshold (default: 0.3)\n"
          "  -f: flanking size in bp for sub-clustering (default: 1000)\n"
          "  -o: output file prefix (default: segtrace)\n"
@@ -78,7 +78,7 @@ int main(int argc, char **argv) {
   size_t window_size = 1024;
   size_t step_size = 0; /* 0 = auto (50% of window_size) */
   size_t min_bases = 1000;
-  double max_dist = 0.15;
+  double max_dist = 0.10;
   const char *out_prefix = "segtrace";
   int n_threads = 8;
   double subcluster_dist = 0.3;
@@ -482,7 +482,8 @@ void discover_compute_worker(void *data, long p, int tid) {
           SegtraceDistResult d =
               calculate_window_dist(w_data->all_hashes, &w_data->coords[wa],
                                     &w_data->coords[wb], w_data->kmer_size);
-          if (d.distance < w_data->max_dist) {
+          if (d.distance < w_data->max_dist &&
+              d.shared_hashes >= MIN_SHARED_HASHES) {
             DA_PUSH(w_data->t_edges[tid], w_data->t_n_edges[tid],
                     w_data->t_cap_edges[tid],
                     ((SegtraceDupEdge){wa, wb, d.distance}));
