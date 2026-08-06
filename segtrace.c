@@ -652,10 +652,19 @@ size_t merge_dup_regions(SegtraceDupRegion *regions, size_t n,
 
   size_t out = 0;
   for (size_t i = 1; i < n; i++) {
+    int same_cluster =
+        (strcmp(regions[i].cluster_id, regions[out].cluster_id) == 0);
+    int overlap_or_adjacent = 0;
+    if (same_cluster) {
+      overlap_or_adjacent = (regions[i].window_idx <= regions[out].window_idx +
+                                                          adjacency_threshold ||
+                             regions[i].start <= regions[out].end);
+    } else {
+      overlap_or_adjacent = (regions[i].start <= regions[out].end);
+    }
+
     if (strcmp(regions[i].chrom, regions[out].chrom) == 0 &&
-        (regions[i].window_idx <=
-             regions[out].window_idx + adjacency_threshold ||
-         regions[i].start <= regions[out].end)) {
+        overlap_or_adjacent) {
       uint32_t c_out = (uint32_t)strtoul(regions[out].cluster_id, NULL, 10);
       uint32_t c_i = (uint32_t)strtoul(regions[i].cluster_id, NULL, 10);
       union_unionfind(&cluster_uf, c_out, c_i);
@@ -675,7 +684,7 @@ size_t merge_dup_regions(SegtraceDupRegion *regions, size_t n,
 
   size_t n_merged = out + 1;
 
-  /* Count remaining merged regions per cluster root (distinct genomic loci) */
+  /* Count remaining merged regions per cluster root */
   uint32_t *cluster_region_count = calloc(max_cid + 1, sizeof(uint32_t));
   for (size_t k = 0; k < n_merged; k++) {
     uint32_t old_cid = (uint32_t)strtoul(regions[k].cluster_id, NULL, 10);
@@ -1213,6 +1222,10 @@ int compare_hash_entry(const void *a, const void *b) {
 int compare_dup_region(const void *a, const void *b) {
   const SegtraceDupRegion *ra = (const SegtraceDupRegion *)a,
                           *rb = (const SegtraceDupRegion *)b;
-  int c2 = strcmp(ra->chrom, rb->chrom);
-  return c2 ? c2 : CMP(ra->start, rb->start);
+  int c_chr = strcmp(ra->chrom, rb->chrom);
+  if (c_chr != 0)
+    return c_chr;
+  if (ra->start != rb->start)
+    return CMP(ra->start, rb->start);
+  return CMP(ra->end, rb->end);
 }
