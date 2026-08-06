@@ -627,9 +627,15 @@ void build_duplicate_regions(UnionFind *uf, size_t num_sketches, int num_files,
       free(hub_label[i]);
   }
   free(hub_label);
-
   *out_regions = dup_regions;
   *out_n_regions = n_dup_regions;
+}
+
+static int compare_dup_region_by_pos(const void *a, const void *b) {
+  const SegtraceDupRegion *ra = (const SegtraceDupRegion *)a,
+                          *rb = (const SegtraceDupRegion *)b;
+  int c_chr = strcmp(ra->chrom, rb->chrom);
+  return c_chr ? c_chr : CMP(ra->start, rb->start);
 }
 
 size_t merge_dup_regions(SegtraceDupRegion *regions, size_t n,
@@ -638,10 +644,36 @@ size_t merge_dup_regions(SegtraceDupRegion *regions, size_t n,
   if (n <= 1)
     return n;
 
+  /* Phase 1: Intra-cluster merging of adjacent/overlapping sliding windows */
   qsort(regions, n, sizeof(SegtraceDupRegion), compare_dup_region);
 
+  size_t out = 0;
+  for (size_t i = 1; i < n; i++) {
+    if (strcmp(regions[i].cluster_id, regions[out].cluster_id) == 0 &&
+        strcmp(regions[i].chrom, regions[out].chrom) == 0 &&
+        (regions[i].window_idx <=
+             regions[out].window_idx + adjacency_threshold ||
+         regions[i].start <= regions[out].end)) {
+      if (regions[i].end > regions[out].end)
+        regions[out].end = regions[i].end;
+      if (regions[i].window_idx > regions[out].window_idx)
+        regions[out].window_idx = regions[i].window_idx;
+      free(regions[i].cluster_id);
+      free(regions[i].chrom);
+    } else {
+      out++;
+      if (out != i)
+        regions[out] = regions[i];
+    }
+  }
+  size_t n_phase1 = out + 1;
+
+  /* Phase 2: Inter-cluster merging of physically overlapping SD blocks */
+  qsort(regions, n_phase1, sizeof(SegtraceDupRegion),
+        compare_dup_region_by_pos);
+
   uint32_t max_cid = 0;
-  for (size_t i = 0; i < n; i++) {
+  for (size_t i = 0; i < n_phase1; i++) {
     uint32_t cid = (uint32_t)strtoul(regions[i].cluster_id, NULL, 10);
     if (cid > max_cid)
       max_cid = cid;
@@ -650,21 +682,20 @@ size_t merge_dup_regions(SegtraceDupRegion *regions, size_t n,
   UnionFind cluster_uf;
   init_unionfind(&cluster_uf, max_cid + 1);
 
-  size_t out = 0;
-  for (size_t i = 1; i < n; i++) {
+  out = 0;
+  for (size_t i = 1; i < n_phase1; i++) {
     int same_cluster =
         (strcmp(regions[i].cluster_id, regions[out].cluster_id) == 0);
-    int overlap_or_adjacent = 0;
+    int should_merge = 0;
     if (same_cluster) {
-      overlap_or_adjacent = (regions[i].window_idx <= regions[out].window_idx +
-                                                          adjacency_threshold ||
-                             regions[i].start <= regions[out].end);
+      should_merge = (regions[i].window_idx <=
+                          regions[out].window_idx + adjacency_threshold ||
+                      regions[i].start <= regions[out].end);
     } else {
-      overlap_or_adjacent = (regions[i].start <= regions[out].end);
+      should_merge = (regions[i].start <= regions[out].end);
     }
 
-    if (strcmp(regions[i].chrom, regions[out].chrom) == 0 &&
-        overlap_or_adjacent) {
+    if (strcmp(regions[i].chrom, regions[out].chrom) == 0 && should_merge) {
       uint32_t c_out = (uint32_t)strtoul(regions[out].cluster_id, NULL, 10);
       uint32_t c_i = (uint32_t)strtoul(regions[i].cluster_id, NULL, 10);
       union_unionfind(&cluster_uf, c_out, c_i);
@@ -684,7 +715,7 @@ size_t merge_dup_regions(SegtraceDupRegion *regions, size_t n,
 
   size_t n_merged = out + 1;
 
-  /* Count remaining merged regions per cluster root */
+  /* Phase 3: Re-labeling & Orphan/Ubiquitous Repeat filtering */
   uint32_t *cluster_region_count = calloc(max_cid + 1, sizeof(uint32_t));
   for (size_t k = 0; k < n_merged; k++) {
     uint32_t old_cid = (uint32_t)strtoul(regions[k].cluster_id, NULL, 10);
@@ -692,8 +723,6 @@ size_t merge_dup_regions(SegtraceDupRegion *regions, size_t n,
     cluster_region_count[root]++;
   }
 
-  /* Filter out orphan clusters (< min_copy) and ubiquitous repeats (> max_copy)
-   */
   size_t valid_merged = 0;
   uint32_t *new_id_map = calloc(max_cid + 1, sizeof(uint32_t));
   uint32_t next_new_id = 1;

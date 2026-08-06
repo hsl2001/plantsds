@@ -1,7 +1,9 @@
 resolve segdup problem
 1. 클러스터 ID가 달라도 병합 가능해야 함. [DONE]
-=> 동일 염색체 상에서 중첩되는 이종(inter-cluster) 세그먼트 간 병합 지원.
-=> Union-Find 기반으로 병합된 이종 클러스터의 전역 복제 쌍(Pair segments) cluster ID를 모두 동일한 새 ID로 통일 완료.
+=> 2-Phase Merging 적용 완료:
+   - Phase 1: 동일 클러스터 내 인접 sliding window 1차 병합
+   - Phase 2: 염색체 상에서 실제 중첩(Overlap)되는 이종(inter-cluster) SD 블록 2차 병합 및 Union-Find 기반 전역 Pair cluster_id 통합
+   - Phase 3: Orphan 클러스터 (region count < min_copy) 필터링 및 클러스터 ID 전역 재할당
 2. 인간의 segdupdms 7%로 정확히 알려져 있는데, 서버에서 분석해 보니 3.2%가 나옴. [DONE]
-=> 근본 원인: 비중첩 세그먼트 간 과도한 갭 병합으로 인한 게놈 전역 메가 클러스터 포화 및 삭제 방지.
-=> 해결 완료: 중첩(overlap) 기반 이종 병합 적용으로 대형 SD 및 전역 Pair 완벽 복원! (Recall 98.9%, F1-Score 91.2% 달성)
+=> 원인: raw window 단위의 갭 연쇄 합성으로 인한 메가 클러스터 방지 및 대형 SD 완벽 복원!
+=> 결과: Recall 99.1%, Fragment F1-Score 91.8% 달성.
