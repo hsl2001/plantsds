@@ -1184,9 +1184,16 @@ uint64_t encode_pair(uint32_t a, uint32_t b) {
   return a < b ? ((uint64_t)a << 32) | b : ((uint64_t)b << 32) | a;
 }
 
+static inline uint64_t splitmix64(uint64_t x) {
+  x = (x ^ (x >> 30)) * UINT64_C(0xbf58476d1ce4e5b9);
+  x = (x ^ (x >> 27)) * UINT64_C(0x94d049bb133111eb);
+  return x ^ (x >> 31);
+}
+
 int bloom_test_and_set(uint8_t *bloom, uint64_t key) {
-  uint32_t h1 = (uint32_t)(key)&BLOOM_MASK;
-  uint32_t h2 = (uint32_t)(key >> 28) & BLOOM_MASK;
+  uint64_t h = splitmix64(key);
+  uint32_t h1 = (uint32_t)h & BLOOM_MASK;
+  uint32_t h2 = (uint32_t)(h >> 32) & BLOOM_MASK;
   int was_set =
       ((bloom[h1 >> 3] >> (h1 & 7)) & 1) & ((bloom[h2 >> 3] >> (h2 & 7)) & 1);
   bloom[h1 >> 3] |= (uint8_t)(1 << (h1 & 7));
