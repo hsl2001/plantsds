@@ -53,7 +53,7 @@ void print_usage(void) {
          "  -d: maximum distance to consider as copy (default: 0.15)\n"
          "  -D: sub-cluster distance threshold (default: 0.3)\n"
          "  -f: flanking size in bp for sub-clustering (default: 1000)\n"
-         "  -a: adjacency threshold for merging regions (default: 2)\n"
+         "  -a: adjacency threshold for merging regions (default: 1)\n"
          "  -o: output file prefix (default: segtrace)\n"
          "  -p: number of threads (default: 8)\n"
          "  -h, --help: show this help message\n"
@@ -82,7 +82,7 @@ int main(int argc, char **argv) {
   double max_dist = 0.15;
   const char *out_prefix = "segtrace";
   int n_threads = 8;
-  uint32_t adjacency_threshold = 2;
+  uint32_t adjacency_threshold = 0;
   double subcluster_dist = 0.3;
   size_t flank_size = 1000;
 
