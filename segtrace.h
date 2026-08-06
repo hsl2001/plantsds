@@ -50,7 +50,6 @@ extern "C" {
 
 #define NUM_PARTITIONS 1024
 #define MAX_RUN_LEN 100
-#define MIN_SHARED_HASHES 5
 
 #define BLOOM_SIZE_BITS (1 << 26)
 #define BLOOM_SIZE_BYTES (BLOOM_SIZE_BITS / 8)

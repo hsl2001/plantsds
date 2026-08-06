@@ -479,14 +479,24 @@ void discover_compute_worker(void *data, long p, int tid) {
           if (bloom_test_and_set(w_data->t_bloom[tid], pk))
             continue;
 
+          size_t min_sz =
+              w_data->coords[wa].sketch_size < w_data->coords[wb].sketch_size
+                  ? w_data->coords[wa].sketch_size
+                  : w_data->coords[wb].sketch_size;
+          /* 10% divergence threshold (90% identity): p_kmer = (1 - 0.10)^k =
+           * (0.90)^k */
+          double p_kmer = pow(0.90, (double)w_data->kmer_size);
+          size_t min_shared = (size_t)floor((double)min_sz * p_kmer) - 1;
+          if (min_shared < 1)
+            min_shared = 1;
+
           SegtraceDistResult d =
               calculate_window_dist(w_data->all_hashes, &w_data->coords[wa],
                                     &w_data->coords[wb], w_data->kmer_size);
-          if (d.distance < w_data->max_dist &&
-              d.shared_hashes >= MIN_SHARED_HASHES) {
+          if (d.shared_hashes >= min_shared) {
             DA_PUSH(w_data->t_edges[tid], w_data->t_n_edges[tid],
                     w_data->t_cap_edges[tid],
-                    ((SegtraceDupEdge){wa, wb, d.distance}));
+                    ((SegtraceDupEdge){wa, wb, (double)d.shared_hashes}));
           }
         }
       }
@@ -791,10 +801,19 @@ void process_subcluster(void *data, long s, int tid) {
         if (w->regions[rb].flank_sketch.sketch_size == 0)
           continue;
 
+        size_t min_sz = w->regions[ra].flank_sketch.sketch_size <
+                                w->regions[rb].flank_sketch.sketch_size
+                            ? w->regions[ra].flank_sketch.sketch_size
+                            : w->regions[rb].flank_sketch.sketch_size;
+        double p_kmer = pow(0.90, (double)w->kmer_size);
+        size_t min_shared = (size_t)ceil((double)min_sz * p_kmer);
+        if (min_shared < 1)
+          min_shared = 1;
+
         SegtraceDistResult d =
             calculate_segtrace_dist(&w->regions[ra].flank_sketch,
                                     &w->regions[rb].flank_sketch, w->kmer_size);
-        if (d.distance < w->max_dist) {
+        if (d.shared_hashes >= min_shared) {
           DA_PUSH(w->t_pairs[tid], w->t_n_pairs[tid], w->t_cap_pairs[tid],
                   ((SubclusterPair){(uint32_t)ra, (uint32_t)rb}));
         }
@@ -860,10 +879,19 @@ void process_subcluster(void *data, long s, int tid) {
 
             size_t ra = start + la;
             size_t rb = start + lb;
+            size_t min_sz = w->regions[ra].flank_sketch.sketch_size <
+                                    w->regions[rb].flank_sketch.sketch_size
+                                ? w->regions[ra].flank_sketch.sketch_size
+                                : w->regions[rb].flank_sketch.sketch_size;
+            double p_kmer = pow(0.90, (double)w->kmer_size);
+            size_t min_shared = (size_t)ceil((double)min_sz * p_kmer);
+            if (min_shared < 1)
+              min_shared = 1;
+
             SegtraceDistResult d = calculate_segtrace_dist(
                 &w->regions[ra].flank_sketch, &w->regions[rb].flank_sketch,
                 w->kmer_size);
-            if (d.distance < w->max_dist) {
+            if (d.shared_hashes >= min_shared) {
               DA_PUSH(w->t_pairs[tid], w->t_n_pairs[tid], w->t_cap_pairs[tid],
                       ((SubclusterPair){(uint32_t)ra, (uint32_t)rb}));
             }
