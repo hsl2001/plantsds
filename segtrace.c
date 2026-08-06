@@ -146,7 +146,7 @@ int main(int argc, char **argv) {
   SegtraceDupRegion *dup_regions = NULL;
   size_t n_dup_regions = 0;
   build_duplicate_regions(&uf, num_sketches, num_files, files, seq_lens, coords,
-                          min_copy, max_copy, &dup_regions, &n_dup_regions);
+                          &dup_regions, &n_dup_regions);
 
   size_t n_merged = merge_dup_regions(dup_regions, n_dup_regions,
                                       adjacency_threshold, min_copy, max_copy);
@@ -533,7 +533,7 @@ SegtraceDistResult calculate_window_dist(const uint64_t *all_hashes,
 
 void build_duplicate_regions(UnionFind *uf, size_t num_sketches, int num_files,
                              char **files, GenomeSeqLen *seq_lens,
-                             WindowCoord *coords, int min_copy, int max_copy,
+                             WindowCoord *coords,
                              SegtraceDupRegion **out_regions,
                              size_t *out_n_regions) {
   /* O(1) genome -> file_id lookup via hash map (replaces O(N*F) loop) */

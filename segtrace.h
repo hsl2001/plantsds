@@ -218,7 +218,7 @@ SegtraceDistResult calculate_window_dist(const uint64_t *all_hashes,
 // 5. REGION CLUSTERING & OUTPUT
 void build_duplicate_regions(UnionFind *uf, size_t num_sketches, int num_files,
                              char **files, GenomeSeqLen *seq_lens,
-                             WindowCoord *coords, int min_copy, int max_copy,
+                             WindowCoord *coords,
                              SegtraceDupRegion **out_regions,
                              size_t *out_n_regions);
 size_t merge_dup_regions(SegtraceDupRegion *regions, size_t n,
