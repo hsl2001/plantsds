@@ -55,6 +55,10 @@ extern "C" {
 #define BLOOM_SIZE_BYTES (BLOOM_SIZE_BITS / 8)
 #define BLOOM_MASK (BLOOM_SIZE_BITS - 1)
 
+#define SUBCLUSTER_BLOOM_SIZE_BITS (BLOOM_SIZE_BITS / 1024)
+#define SUBCLUSTER_BLOOM_SIZE_BYTES (SUBCLUSTER_BLOOM_SIZE_BITS / 8)
+#define SUBCLUSTER_BLOOM_MASK (SUBCLUSTER_BLOOM_SIZE_BITS - 1)
+
 // ==============================================================
 // CORE DATA STRUCTURES
 // ==============================================================
@@ -170,6 +174,7 @@ typedef struct {
   size_t *t_cap_pairs;
   uint32_t kmer_size;
   ClusterSpan *spans;
+  uint8_t **t_bloom;
 } SubclusterData;
 
 typedef struct {
@@ -286,7 +291,7 @@ void get_basename(const char *filename, char *basename, size_t size);
 uint64_t mix_hash(uint64_t hash_value, uint64_t seed);
 size_t lower_bound_u64(const uint64_t *arr, size_t n, uint64_t target);
 uint64_t encode_pair(uint32_t a, uint32_t b);
-int bloom_test_and_set(uint8_t *bloom, uint64_t key);
+int bloom_test_and_set(uint8_t *bloom, uint64_t key, uint32_t mask);
 int compare_uint64(const void *a, const void *b);
 int compare_hash_entry(const void *a, const void *b);
 int compare_dup_region(const void *a, const void *b);

@@ -542,7 +542,7 @@ void discover_compute_worker(void *data, long p, int tid) {
             continue;
 
           uint64_t pk = encode_pair(wa, wb);
-          if (bloom_test_and_set(w_data->t_bloom[tid], pk))
+          if (bloom_test_and_set(w_data->t_bloom[tid], pk, BLOOM_MASK))
             continue;
 
           size_t min_sz =
@@ -710,6 +710,8 @@ size_t merge_dup_regions(SegtraceDupRegion *regions, size_t n) {
 void extract_flankings(char **files, int num_files, const Segtrace *r,
                        uint64_t scale, SegtraceDupRegion *regions,
                        size_t n_regions, int n_threads, size_t flank_size) {
+  qsort(regions, n_regions, sizeof(SegtraceDupRegion),
+        compare_dup_region_by_pos);
   FlankingWorkerData w = {files, r, scale, regions, n_regions, flank_size};
   kt_for(n_threads, extract_flankings_worker, &w, num_files);
 }
@@ -734,36 +736,55 @@ void extract_flankings_worker(void *data, long f, int tid) {
     char chr_name[512];
     snprintf(chr_name, sizeof(chr_name), "%s-%s", bname, ks->name.s);
 
-    for (size_t i = 0; i < w->n_regions; i++) {
-      if (strcmp(w->regions[i].chrom, chr_name) == 0) {
-        size_t start = w->regions[i].start;
-        size_t end = w->regions[i].end;
-        size_t flank_size = w->flank_size;
-        size_t left_start = start > flank_size ? start - flank_size : 0;
-        size_t right_end =
-            end + flank_size > ks->seq.l ? ks->seq.l : end + flank_size;
+    size_t low = 0, high = w->n_regions;
+    while (low < high) {
+      size_t mid = low + (high - low) / 2;
+      if (strcmp(w->regions[mid].chrom, chr_name) < 0)
+        low = mid + 1;
+      else
+        high = mid;
+    }
+    size_t first = low;
 
-        size_t left_len = start - left_start;
-        size_t right_len = right_end - end;
+    low = 0;
+    high = w->n_regions;
+    while (low < high) {
+      size_t mid = low + (high - low) / 2;
+      if (strcmp(w->regions[mid].chrom, chr_name) <= 0)
+        low = mid + 1;
+      else
+        high = mid;
+    }
+    size_t last = low;
 
-        free(w->regions[i].flank_sketch.hashes);
-        w->regions[i].flank_sketch.hashes = NULL;
-        w->regions[i].flank_sketch.sketch_size = 0;
+    for (size_t i = first; i < last; i++) {
+      size_t start = w->regions[i].start;
+      size_t end = w->regions[i].end;
+      size_t flank_size = w->flank_size;
+      size_t left_start = start > flank_size ? start - flank_size : 0;
+      size_t right_end =
+          end + flank_size > ks->seq.l ? ks->seq.l : end + flank_size;
 
-        uint8_t *flank_seq = malloc(left_len + right_len);
-        if (left_len > 0)
-          memcpy(flank_seq, ks->seq.s + left_start, left_len);
-        if (right_len > 0)
-          memcpy(flank_seq + left_len, ks->seq.s + end, right_len);
+      size_t left_len = start - left_start;
+      size_t right_len = right_end - end;
 
-        HashPool pool;
-        init_hash_pool(&pool, UINT64_MAX / w->scale);
-        extract_hash(w->r, &pool, flank_seq, left_len + right_len);
-        finalize_hash_pool(&pool, &w->regions[i].flank_sketch.hashes,
-                           &w->regions[i].flank_sketch.sketch_size);
+      free(w->regions[i].flank_sketch.hashes);
+      w->regions[i].flank_sketch.hashes = NULL;
+      w->regions[i].flank_sketch.sketch_size = 0;
 
-        free(flank_seq);
-      }
+      uint8_t *flank_seq = malloc(left_len + right_len);
+      if (left_len > 0)
+        memcpy(flank_seq, ks->seq.s + left_start, left_len);
+      if (right_len > 0)
+        memcpy(flank_seq + left_len, ks->seq.s + end, right_len);
+
+      HashPool pool;
+      init_hash_pool(&pool, UINT64_MAX / w->scale);
+      extract_hash(w->r, &pool, flank_seq, left_len + right_len);
+      finalize_hash_pool(&pool, &w->regions[i].flank_sketch.hashes,
+                         &w->regions[i].flank_sketch.sketch_size);
+
+      free(flank_seq);
     }
   }
   kseq_destroy(ks);
@@ -816,6 +837,10 @@ void perform_subclustering(SegtraceDupRegion *regions, size_t n_merged,
   w.t_pairs = calloc(n_threads, sizeof(SubclusterPair *));
   w.t_n_pairs = calloc(n_threads, sizeof(size_t));
   w.t_cap_pairs = calloc(n_threads, sizeof(size_t));
+  w.t_bloom = calloc(n_threads, sizeof(uint8_t *));
+  for (int t = 0; t < n_threads; t++) {
+    w.t_bloom[t] = calloc(SUBCLUSTER_BLOOM_SIZE_BYTES, 1);
+  }
 
   kt_for(n_threads, process_subcluster, &w, n_spans);
 
@@ -825,7 +850,9 @@ void perform_subclustering(SegtraceDupRegion *regions, size_t n_merged,
     }
     if (w.t_pairs[t])
       free(w.t_pairs[t]);
+    free(w.t_bloom[t]);
   }
+  free(w.t_bloom);
   free(w.t_pairs);
   free(w.t_n_pairs);
   free(w.t_cap_pairs);
@@ -909,11 +936,8 @@ void process_subcluster(void *data, long s, int tid) {
 
     qsort(entries, n_entries, sizeof(FlankHashEntry), compare_flank_hash_entry);
 
-    uint8_t *bloom = calloc(BLOOM_SIZE_BYTES, 1);
-    if (!bloom) {
-      free(entries);
-      return;
-    }
+    uint8_t *bloom = w->t_bloom[tid];
+    memset(bloom, 0, SUBCLUSTER_BLOOM_SIZE_BYTES);
 
     size_t i = 0;
     while (i < n_entries) {
@@ -930,7 +954,7 @@ void process_subcluster(void *data, long s, int tid) {
               continue;
 
             uint64_t pk = encode_pair(la, lb);
-            if (bloom_test_and_set(bloom, pk))
+            if (bloom_test_and_set(bloom, pk, SUBCLUSTER_BLOOM_MASK))
               continue;
 
             check_and_eval_flank_pair(w, tid, start + la, start + lb, p_kmer);
@@ -939,7 +963,6 @@ void process_subcluster(void *data, long s, int tid) {
       }
       i = j;
     }
-    free(bloom);
     free(entries);
   }
 }
@@ -1255,10 +1278,10 @@ static inline uint64_t splitmix64(uint64_t x) {
   return x ^ (x >> 31);
 }
 
-int bloom_test_and_set(uint8_t *bloom, uint64_t key) {
+int bloom_test_and_set_with_mask(uint8_t *bloom, uint64_t key, uint32_t mask) {
   uint64_t h = splitmix64(key);
-  uint32_t h1 = (uint32_t)h & BLOOM_MASK;
-  uint32_t h2 = (uint32_t)(h >> 32) & BLOOM_MASK;
+  uint32_t h1 = (uint32_t)h & mask;
+  uint32_t h2 = (uint32_t)(h >> 32) & mask;
   int was_set =
       ((bloom[h1 >> 3] >> (h1 & 7)) & 1) & ((bloom[h2 >> 3] >> (h2 & 7)) & 1);
   bloom[h1 >> 3] |= (uint8_t)(1 << (h1 & 7));
