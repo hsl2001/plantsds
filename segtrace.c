@@ -844,9 +844,7 @@ void process_subcluster(void *data, long s, int tid) {
 
     qsort(entries, n_entries, sizeof(FlankHashEntry), compare_flank_hash_entry);
 
-    uint32_t bloom_bits = (1 << 23);
-    uint32_t mask = bloom_bits - 1;
-    uint8_t *bloom = calloc(bloom_bits / 8, 1);
+    uint8_t *bloom = calloc(BLOOM_SIZE_BYTES, 1);
     if (!bloom) {
       free(entries);
       return;
@@ -867,14 +865,7 @@ void process_subcluster(void *data, long s, int tid) {
               continue;
 
             uint64_t pk = encode_pair(la, lb);
-            uint64_t h = splitmix64(pk);
-            uint32_t h1 = (uint32_t)h & mask;
-            uint32_t h2 = (uint32_t)(h >> 32) & mask;
-            int was_set = ((bloom[h1 >> 3] >> (h1 & 7)) & 1) &
-                          ((bloom[h2 >> 3] >> (h2 & 7)) & 1);
-            bloom[h1 >> 3] |= (uint8_t)(1 << (h1 & 7));
-            bloom[h2 >> 3] |= (uint8_t)(1 << (h2 & 7));
-            if (was_set)
+            if (bloom_test_and_set(bloom, pk))
               continue;
 
             size_t ra = start + la;

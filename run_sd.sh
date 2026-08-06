@@ -22,28 +22,36 @@ SKIP_DOWNLOAD=0
 DECOMPRESS=0
 
 # Datasets definition
-declare -A URLS_PRIMARY
-declare -A URLS_SECONDARY
-declare -A FILE_NAMES
-declare -A DESCRIPTIONS
-
-# t2t-chm13 (Human T2T CHM13 v2.0 - RefSeq)
-URLS_PRIMARY["t2t-chm13"]="https://ftp.ncbi.nlm.nih.gov/genomes/all/GCF/009/914/755/GCF_009914755.1_T2T-CHM13v2.0/GCF_009914755.1_T2T-CHM13v2.0_genomic.fna.gz"
-URLS_SECONDARY["t2t-chm13"]="https://ftp.ncbi.nlm.nih.gov/genomes/all/GCA/009/914/755/GCA_009914755.4_T2T-CHM13v2.0/GCA_009914755.4_T2T-CHM13v2.0_genomic.fna.gz"
-FILE_NAMES["t2t-chm13"]="t2t_chm13v2.0.fna.gz"
-DESCRIPTIONS["t2t-chm13"]="Human T2T (CHM13 v2.0 / RefSeq GCF_009914755.1)"
-
-# t2t-nip (Rice T2T Nipponbare AGIS1.0 - RefSeq)
-URLS_PRIMARY["t2t-nip"]="https://ftp.ncbi.nlm.nih.gov/genomes/all/GCF/034/140/825/GCF_034140825.1_ASM3414082v1/GCF_034140825.1_ASM3414082v1_genomic.fna.gz"
-URLS_SECONDARY["t2t-nip"]="https://ftp.ncbi.nlm.nih.gov/genomes/all/GCA/034/140/825/GCA_034140825.1_AGIS1.0/GCA_034140825.1_AGIS1.0_genomic.fna.gz"
-FILE_NAMES["t2t-nip"]="t2t_nip_agis1.0.fna.gz"
-DESCRIPTIONS["t2t-nip"]="Rice T2T (Nipponbare AGIS1.0 / RefSeq GCF_034140825.1)"
-
-# col-cen (Arabidopsis thaliana Col-CEN v1.2 T2T)
-URLS_PRIMARY["col-cen"]="https://github.com/schatzlab/Col-CEN/raw/main/v1.2/Col-CEN_v1.2.fasta.gz"
-URLS_SECONDARY["col-cen"]="https://raw.githubusercontent.com/schatzlab/Col-CEN/main/v1.2/Col-CEN_v1.2.fasta.gz"
-FILE_NAMES["col-cen"]="col_cen_v1.2.fasta.gz"
-DESCRIPTIONS["col-cen"]="Arabidopsis thaliana T2T (Col-CEN v1.2)"
+get_target_info() {
+    local key="$1"
+    local prop="$2"
+    case "$key" in
+        "t2t-chm13")
+            case "$prop" in
+                "primary") echo "https://ftp.ncbi.nlm.nih.gov/genomes/all/GCF/009/914/755/GCF_009914755.1_T2T-CHM13v2.0/GCF_009914755.1_T2T-CHM13v2.0_genomic.fna.gz" ;;
+                "secondary") echo "https://ftp.ncbi.nlm.nih.gov/genomes/all/GCA/009/914/755/GCA_009914755.4_T2T-CHM13v2.0/GCA_009914755.4_T2T-CHM13v2.0_genomic.fna.gz" ;;
+                "file") echo "t2t_chm13v2.0.fna.gz" ;;
+                "desc") echo "Human T2T (CHM13 v2.0 / RefSeq GCF_009914755.1)" ;;
+            esac
+            ;;
+        "t2t-nip")
+            case "$prop" in
+                "primary") echo "https://ftp.ncbi.nlm.nih.gov/genomes/all/GCF/034/140/825/GCF_034140825.1_ASM3414082v1/GCF_034140825.1_ASM3414082v1_genomic.fna.gz" ;;
+                "secondary") echo "https://ftp.ncbi.nlm.nih.gov/genomes/all/GCA/034/140/825/GCA_034140825.1_AGIS1.0/GCA_034140825.1_AGIS1.0_genomic.fna.gz" ;;
+                "file") echo "t2t_nip_agis1.0.fna.gz" ;;
+                "desc") echo "Rice T2T (Nipponbare AGIS1.0 / RefSeq GCF_034140825.1)" ;;
+            esac
+            ;;
+        "col-cen")
+            case "$prop" in
+                "primary") echo "https://github.com/schatzlab/Col-CEN/raw/main/v1.2/Col-CEN_v1.2.fasta.gz" ;;
+                "secondary") echo "https://raw.githubusercontent.com/schatzlab/Col-CEN/main/v1.2/Col-CEN_v1.2.fasta.gz" ;;
+                "file") echo "col_cen_v1.2.fasta.gz" ;;
+                "desc") echo "Arabidopsis thaliana T2T (Col-CEN v1.2)" ;;
+            esac
+            ;;
+    esac
+}
 
 usage() {
     cat << EOF
@@ -62,9 +70,9 @@ Options:
   -h, --help             Display this help message and exit
 
 Available targets:
-  t2t-chm13   ${DESCRIPTIONS["t2t-chm13"]}
-  t2t-nip     ${DESCRIPTIONS["t2t-nip"]}
-  col-cen     ${DESCRIPTIONS["col-cen"]}
+  t2t-chm13   Human T2T (CHM13 v2.0 / RefSeq GCF_009914755.1)
+  t2t-nip     Rice T2T (Nipponbare AGIS1.0 / RefSeq GCF_034140825.1)
+  col-cen     Arabidopsis thaliana T2T (Col-CEN v1.2)
   all         Run all 3 targets sequentially (t2t-chm13, t2t-nip, col-cen)
 EOF
     exit 0
@@ -122,7 +130,7 @@ mkdir -p "${DATA_DIR}" "${RESULTS_DIR}"
 # Helper function to download file
 download_genome() {
     local key="$1"
-    local filename="${FILE_NAMES[$key]}"
+    local filename="$(get_target_info "$key" "file")"
     local dest_gz="${DATA_DIR}/${filename}"
     local dest_fa="${dest_gz%.gz}"
 
@@ -140,9 +148,9 @@ download_genome() {
         return 0
     fi
 
-    echo "[INFO] Downloading ${DESCRIPTIONS[$key]}..."
-    local primary_url="${URLS_PRIMARY[$key]}"
-    local secondary_url="${URLS_SECONDARY[$key]}"
+    echo "[INFO] Downloading $(get_target_info "$key" "desc")..."
+    local primary_url="$(get_target_info "$key" "primary")"
+    local secondary_url="$(get_target_info "$key" "secondary")"
 
     local download_success=0
 
@@ -186,7 +194,7 @@ download_genome() {
 # Helper function to get FASTA path for key
 get_fasta_path() {
     local key="$1"
-    local filename="${FILE_NAMES[$key]}"
+    local filename="$(get_target_info "$key" "file")"
     local dest_gz="${DATA_DIR}/${filename}"
     local dest_fa="${dest_gz%.gz}"
 
@@ -261,7 +269,7 @@ for t in "${TARGET_LIST[@]}"; do
     bed_out="${out_prefix}.dup.bed"
 
     echo ""
-    echo ">>> Running Segtrace for [$t] (${DESCRIPTIONS[$t]})"
+    echo ">>> Running Segtrace for [$t] ($(get_target_info "$t" "desc"))"
     echo "    Input:   $fasta_input"
     echo "    Output:  $bed_out"
     echo "    Threads: $THREADS"

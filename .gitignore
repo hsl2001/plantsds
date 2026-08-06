@@ -1,5 +1,6 @@
 segtrace
 results/
+data/
 benchmark
 sedef*
 *bed*
@@ -7,3 +8,4 @@ sedef*
 *.png
 *.csv
 venv/
+*.gz
