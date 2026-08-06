@@ -628,22 +628,33 @@ void build_duplicate_regions(UnionFind *uf, size_t num_sketches, int num_files,
   *out_n_regions = n_dup_regions;
 }
 
-/* 여기 꼭 고칠 것 현수!!*/
+static int compare_dup_region_by_pos(const void *a, const void *b) {
+  const SegtraceDupRegion *ra = (const SegtraceDupRegion *)a,
+                          *rb = (const SegtraceDupRegion *)b;
+  int c_chr = strcmp(ra->chrom, rb->chrom);
+  if (c_chr != 0)
+    return c_chr;
+  if (ra->start != rb->start)
+    return CMP(ra->start, rb->start);
+  return CMP(ra->end, rb->end);
+}
+
+/* Merge adjacent/overlapping regions in the same SD family.
+ * Returns the new count of merged regions. */
 size_t merge_dup_regions(SegtraceDupRegion *regions, size_t n,
                          uint32_t adjacency_threshold, int min_copy,
                          int max_copy) {
   if (n <= 1)
     return n;
 
-  /* 1. Sort by (cluster_id, chrom, start) */
-  qsort(regions, n, sizeof(SegtraceDupRegion), compare_dup_region);
+  /* 1. Sort by position (chrom, start, end) */
+  qsort(regions, n, sizeof(SegtraceDupRegion), compare_dup_region_by_pos);
 
-  /* 2. Merge adjacent/overlapping windows within the same cluster_id and
-   * chromosome */
+  /* 2. Merge all overlapping/adjacent regions on the same chromosome & keep min
+   * cluster_id */
   size_t out = 0;
   for (size_t i = 1; i < n; i++) {
-    if (strcmp(regions[i].cluster_id, regions[out].cluster_id) == 0 &&
-        strcmp(regions[i].chrom, regions[out].chrom) == 0 &&
+    if (strcmp(regions[i].chrom, regions[out].chrom) == 0 &&
         (regions[i].window_idx <=
              regions[out].window_idx + adjacency_threshold ||
          regions[i].start <= regions[out].end)) {
@@ -651,6 +662,17 @@ size_t merge_dup_regions(SegtraceDupRegion *regions, size_t n,
         regions[out].end = regions[i].end;
       if (regions[i].window_idx > regions[out].window_idx)
         regions[out].window_idx = regions[i].window_idx;
+
+      /* Pick the minimum cluster_id in the overlapping bundle */
+      uint32_t c_out = (uint32_t)strtoul(regions[out].cluster_id, NULL, 10);
+      uint32_t c_i = (uint32_t)strtoul(regions[i].cluster_id, NULL, 10);
+      if (c_i < c_out) {
+        free(regions[out].cluster_id);
+        char buf[64];
+        snprintf(buf, sizeof(buf), "%u", c_i);
+        regions[out].cluster_id = strdup(buf);
+      }
+
       free(regions[i].cluster_id);
       free(regions[i].chrom);
     } else {
