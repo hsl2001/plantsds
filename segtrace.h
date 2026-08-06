@@ -157,6 +157,11 @@ typedef struct {
 } SubclusterPair;
 
 typedef struct {
+  size_t start;
+  size_t count;
+} ClusterSpan;
+
+typedef struct {
   SegtraceDupRegion *regions;
   double max_dist;
   size_t n_merged;
@@ -164,6 +169,7 @@ typedef struct {
   size_t *t_n_pairs;
   size_t *t_cap_pairs;
   uint32_t kmer_size;
+  ClusterSpan *spans;
 } SubclusterData;
 
 typedef struct {

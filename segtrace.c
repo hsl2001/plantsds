@@ -747,8 +747,43 @@ void extract_flankings_worker(void *data, long f, int tid) {
   gzclose(fp);
 }
 
+static int compare_dup_region_by_cluster(const void *a, const void *b);
+static inline uint64_t splitmix64(uint64_t x);
+
+typedef struct {
+  uint64_t hash;
+  uint32_t local_idx;
+} FlankHashEntry;
+
+static int compare_flank_hash_entry(const void *a, const void *b) {
+  const FlankHashEntry *ea = (const FlankHashEntry *)a,
+                       *eb = (const FlankHashEntry *)b;
+  return ea->hash != eb->hash ? CMP(ea->hash, eb->hash)
+                              : CMP(ea->local_idx, eb->local_idx);
+}
+
 void perform_subclustering(SegtraceDupRegion *regions, size_t n_merged,
                            double max_dist, int n_threads, uint32_t kmer_size) {
+  if (n_merged <= 1)
+    return;
+
+  /* Group regions into contiguous spans of the same cluster_id */
+  qsort(regions, n_merged, sizeof(SegtraceDupRegion), compare_dup_region_by_cluster);
+
+  ClusterSpan *spans = NULL;
+  size_t n_spans = 0, cap_spans = 0;
+
+  size_t i = 0;
+  while (i < n_merged) {
+    size_t j = i + 1;
+    while (j < n_merged &&
+           strcmp(regions[i].cluster_id, regions[j].cluster_id) == 0) {
+      j++;
+    }
+    DA_PUSH(spans, n_spans, cap_spans, ((ClusterSpan){i, j - i}));
+    i = j;
+  }
+
   UnionFind sub_uf;
   init_unionfind(&sub_uf, n_merged);
 
@@ -757,11 +792,12 @@ void perform_subclustering(SegtraceDupRegion *regions, size_t n_merged,
   w.max_dist = max_dist;
   w.n_merged = n_merged;
   w.kmer_size = kmer_size;
+  w.spans = spans;
   w.t_pairs = calloc(n_threads, sizeof(SubclusterPair *));
   w.t_n_pairs = calloc(n_threads, sizeof(size_t));
   w.t_cap_pairs = calloc(n_threads, sizeof(size_t));
 
-  kt_for(n_threads, process_subcluster, &w, n_merged);
+  kt_for(n_threads, process_subcluster, &w, n_spans);
 
   for (int t = 0; t < n_threads; t++) {
     for (size_t k = 0; k < w.t_n_pairs[t]; k++) {
@@ -773,38 +809,127 @@ void perform_subclustering(SegtraceDupRegion *regions, size_t n_merged,
   free(w.t_pairs);
   free(w.t_n_pairs);
   free(w.t_cap_pairs);
+  free(spans);
 
-  // Map union-find parents to sub_cluster_id
+  /* Map union-find parents to subcluster_id */
   uint32_t *mapping = calloc(n_merged, sizeof(uint32_t));
   uint32_t current_id = 1;
 
-  for (size_t i = 0; i < n_merged; i++) {
-    uint32_t p = find_unionfind(&sub_uf, i);
+  for (size_t k = 0; k < n_merged; k++) {
+    uint32_t p = find_unionfind(&sub_uf, (uint32_t)k);
     if (mapping[p] == 0) {
       mapping[p] = current_id++;
     }
-    regions[i].subcluster_id = mapping[p];
+    regions[k].subcluster_id = mapping[p];
   }
   free(mapping);
   free_unionfind(&sub_uf);
 }
 
-void process_subcluster(void *data, long i, int tid) {
+void process_subcluster(void *data, long s, int tid) {
   SubclusterData *w = (SubclusterData *)data;
-  if (w->regions[i].flank_sketch.sketch_size == 0)
-    return;
-  for (size_t j = i + 1; j < w->n_merged; j++) {
-    if (strcmp(w->regions[i].cluster_id, w->regions[j].cluster_id) != 0)
-      continue; // must be same cluster
-    if (w->regions[j].flank_sketch.sketch_size == 0)
-      continue;
+  size_t start = w->spans[s].start;
+  size_t count = w->spans[s].count;
 
-    SegtraceDistResult d = calculate_segtrace_dist(
-        &w->regions[i].flank_sketch, &w->regions[j].flank_sketch, w->kmer_size);
-    if (d.distance < w->max_dist) {
-      DA_PUSH(w->t_pairs[tid], w->t_n_pairs[tid], w->t_cap_pairs[tid],
-              ((SubclusterPair){(uint32_t)i, (uint32_t)j}));
+  if (count <= 1)
+    return;
+
+  if (count <= 64) {
+    /* Fast all-pairs direct comparison for small clusters */
+    for (size_t a = 0; a < count; a++) {
+      size_t ra = start + a;
+      if (w->regions[ra].flank_sketch.sketch_size == 0)
+        continue;
+      for (size_t b = a + 1; b < count; b++) {
+        size_t rb = start + b;
+        if (w->regions[rb].flank_sketch.sketch_size == 0)
+          continue;
+
+        SegtraceDistResult d = calculate_segtrace_dist(
+            &w->regions[ra].flank_sketch, &w->regions[rb].flank_sketch,
+            w->kmer_size);
+        if (d.distance < w->max_dist) {
+          DA_PUSH(w->t_pairs[tid], w->t_n_pairs[tid], w->t_cap_pairs[tid],
+                  ((SubclusterPair){(uint32_t)ra, (uint32_t)rb}));
+        }
+      }
     }
+  } else {
+    /* Inverted k-mer index candidate extraction for large clusters */
+    size_t total_flank_hashes = 0;
+    for (size_t a = 0; a < count; a++) {
+      total_flank_hashes += w->regions[start + a].flank_sketch.sketch_size;
+    }
+
+    if (total_flank_hashes == 0)
+      return;
+
+    FlankHashEntry *entries =
+        malloc(total_flank_hashes * sizeof(FlankHashEntry));
+    if (!entries)
+      return;
+
+    size_t n_entries = 0;
+    for (size_t a = 0; a < count; a++) {
+      size_t ra = start + a;
+      const SegtraceSketch *sk = &w->regions[ra].flank_sketch;
+      for (size_t k = 0; k < sk->sketch_size; k++) {
+        entries[n_entries++] = (FlankHashEntry){sk->hashes[k], (uint32_t)a};
+      }
+    }
+
+    qsort(entries, n_entries, sizeof(FlankHashEntry), compare_flank_hash_entry);
+
+    /* Small 1MB Bloom filter to deduplicate candidate pairs within this cluster */
+    uint32_t bloom_bits = (1 << 23);
+    uint32_t mask = bloom_bits - 1;
+    uint8_t *bloom = calloc(bloom_bits / 8, 1);
+    if (!bloom) {
+      free(entries);
+      return;
+    }
+
+    size_t i = 0;
+    while (i < n_entries) {
+      size_t j = i + 1;
+      while (j < n_entries && entries[j].hash == entries[i].hash)
+        j++;
+      size_t run_len = j - i;
+      if (run_len >= 2 && run_len <= 1000) {
+        for (size_t a = i; a < j; a++) {
+          for (size_t b = a + 1; b < j; b++) {
+            uint32_t la = entries[a].local_idx;
+            uint32_t lb = entries[b].local_idx;
+            if (la == lb)
+              continue;
+
+            uint64_t pk = encode_pair(la, lb);
+            uint64_t h = splitmix64(pk);
+            uint32_t h1 = (uint32_t)h & mask;
+            uint32_t h2 = (uint32_t)(h >> 32) & mask;
+            int was_set = ((bloom[h1 >> 3] >> (h1 & 7)) & 1) &
+                          ((bloom[h2 >> 3] >> (h2 & 7)) & 1);
+            bloom[h1 >> 3] |= (uint8_t)(1 << (h1 & 7));
+            bloom[h2 >> 3] |= (uint8_t)(1 << (h2 & 7));
+            if (was_set)
+              continue;
+
+            size_t ra = start + la;
+            size_t rb = start + lb;
+            SegtraceDistResult d = calculate_segtrace_dist(
+                &w->regions[ra].flank_sketch, &w->regions[rb].flank_sketch,
+                w->kmer_size);
+            if (d.distance < w->max_dist) {
+              DA_PUSH(w->t_pairs[tid], w->t_n_pairs[tid], w->t_cap_pairs[tid],
+                      ((SubclusterPair){(uint32_t)ra, (uint32_t)rb}));
+            }
+          }
+        }
+      }
+      i = j;
+    }
+    free(bloom);
+    free(entries);
   }
 }
 
