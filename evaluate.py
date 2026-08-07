@@ -325,6 +325,10 @@ def evaluate(true_pairs, fasta_path, chrom_offsets):
             for j in range(i + 1, len(regions)):
                 ra_c, ra_s, ra_e, ra_sub = regions[i]
                 rb_c, rb_s, rb_e, rb_sub = regions[j]
+                if ra_sub == rb_sub:
+                    continue
+                if ra_c == rb_c and max(ra_s, rb_s) < min(ra_e, rb_e):
+                    continue
                 predicted_pairs.append(((ra_c, ra_s, ra_e), (rb_c, rb_s, rb_e)))
 
     global_true = to_global_pairs(true_pairs, chrom_offsets)

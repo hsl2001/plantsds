@@ -952,52 +952,34 @@ void write_dup_bedpe(const char *out_prefix, SegtraceDupRegion *dup_regions,
                      size_t n_merged) {
   if (n_merged == 0)
     return;
-  SegtraceDupRegion *regions_copy =
-      malloc(n_merged * sizeof(SegtraceDupRegion));
-  if (!regions_copy)
-    return;
-  memcpy(regions_copy, dup_regions, n_merged * sizeof(SegtraceDupRegion));
-  qsort(regions_copy, n_merged, sizeof(SegtraceDupRegion),
-        compare_dup_region_by_cluster);
-
   char path_buf[PATH_MAX];
   snprintf(path_buf, sizeof(path_buf), "%s.dup.bedpe", out_prefix);
   FILE *out_bedpe = fopen(path_buf, "w");
-  if (!out_bedpe) {
-    free(regions_copy);
+  if (!out_bedpe)
     return;
-  }
 
-  size_t i = 0;
-  while (i < n_merged) {
-    size_t j = i + 1;
-    while (j < n_merged &&
-           strcmp(regions_copy[i].cluster_id, regions_copy[j].cluster_id) == 0)
-      j++;
-
-    size_t cluster_size = j - i;
-    if (cluster_size > 1) {
-      for (size_t a = i; a < j; a++) {
-        for (size_t b = a + 1; b < j; b++) {
-          const char *c1 = regions_copy[a].chrom, *c2 = regions_copy[b].chrom;
-          size_t s1 = regions_copy[a].start, e1 = regions_copy[a].end;
-          size_t s2 = regions_copy[b].start, e2 = regions_copy[b].end;
-          int cmp = strcmp(c1, c2);
-          int swap =
-              (cmp > 0) || (cmp == 0 && (s1 > s2 || (s1 == s2 && e1 > e2)));
-          if (swap)
-            fprintf(out_bedpe, "%s\t%zu\t%zu\t%s\t%zu\t%zu\n", c2, s2, e2, c1,
-                    s1, e1);
-          else
-            fprintf(out_bedpe, "%s\t%zu\t%zu\t%s\t%zu\t%zu\n", c1, s1, e1, c2,
-                    s2, e2);
-        }
-      }
+  for (size_t i = 0; i < n_merged; i++) {
+    for (size_t j = i + 1; j < n_merged; j++) {
+      if (strcmp(dup_regions[i].cluster_id, dup_regions[j].cluster_id) != 0)
+        continue;
+      if (dup_regions[i].subcluster_id == dup_regions[j].subcluster_id)
+        continue;
+      const char *c1 = dup_regions[i].chrom, *c2 = dup_regions[j].chrom;
+      size_t s1 = dup_regions[i].start, e1 = dup_regions[i].end;
+      size_t s2 = dup_regions[j].start, e2 = dup_regions[j].end;
+      if (strcmp(c1, c2) == 0 && s1 < e2 && s2 < e1)
+        continue;
+      int swap = (strcmp(c1, c2) > 0) ||
+                 (strcmp(c1, c2) == 0 && (s1 > s2 || (s1 == s2 && e1 > e2)));
+      if (swap)
+        fprintf(out_bedpe, "%s\t%zu\t%zu\t%s\t%zu\t%zu\n", c2, s2, e2, c1, s1,
+                e1);
+      else
+        fprintf(out_bedpe, "%s\t%zu\t%zu\t%s\t%zu\t%zu\n", c1, s1, e1, c2, s2,
+                e2);
     }
-    i = j;
   }
   fclose(out_bedpe);
-  free(regions_copy);
 }
 
 // ==============================================================
