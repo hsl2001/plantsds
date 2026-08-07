@@ -986,37 +986,62 @@ void write_dup_bed(const char *out_prefix, SegtraceDupRegion *dup_regions,
 // SECTION 6: CORE ALGORITHMS & UTILITIES
 // ==============================================================
 
+static inline uint64_t rol64(uint64_t v, unsigned int n) {
+  n &= 63;
+  return (v << n) | (v >> ((64 - n) & 63));
+}
+
+static inline uint64_t ror64(uint64_t v, unsigned int n) {
+  n &= 63;
+  return (v >> n) | (v << ((64 - n) & 63));
+}
+
+static const uint64_t NTHASH_H[4] = {
+    0x3c8bf4f53c8bf4f5ULL, // A
+    0x04c903a704c903a7ULL, // C
+    0x2b8104c92b8104c9ULL, // G
+    0x2e0600d3fd09e083ULL  // T
+};
+
 void init_segtrace(Segtrace *r, size_t hash_window, int filter_masked) {
-  size_t k = hash_window < 32 ? hash_window : 32;
-  uint32_t kmer_bits = 2 * (uint32_t)k;
-  r->hash_window = k;
-  r->remover_mask =
-      (kmer_bits > 2) ? (((uint64_t)1 << (kmer_bits - 2)) - 1) : 0;
-  r->kmer_bits = kmer_bits;
-  r->rc_shift = (kmer_bits > 0) ? (kmer_bits - 2) : 0;
+  r->hash_window = (uint32_t)hash_window;
   r->filter_masked = filter_masked;
   r->base_lookup = filter_masked ? BASE_LOOKUP : BASE_LOOKUP_NO_MASK;
 }
 
 __attribute__((hot)) void extract_hash(const Segtrace *r, HashPool *pool,
                                        const uint8_t *seq, size_t len) {
-  if (len < r->hash_window)
+  uint32_t k = r->hash_window;
+  if (len < k)
     return;
-  uint64_t kmer = 0, kmer_rc = 0;
-  size_t l = 0;
+
+  uint64_t f_hash = 0, r_hash = 0;
+  size_t valid_len = 0;
+
   for (size_t i = 0; i < len; i++) {
-    int8_t c = r->base_lookup[seq[i]];
-    if (c < 0) {
-      l = 0;
-      kmer = 0;
-      kmer_rc = 0;
+    int8_t b = r->base_lookup[seq[i]];
+    if (b < 0) {
+      valid_len = 0;
+      f_hash = 0;
+      r_hash = 0;
       continue;
     }
-    kmer = ((kmer & r->remover_mask) << 2) | (uint64_t)c;
-    kmer_rc = (kmer_rc >> 2) | (((uint64_t)(c ^ 3)) << r->rc_shift);
-    l++;
-    if (l >= r->hash_window) {
-      uint64_t canonical = (kmer < kmer_rc) ? kmer : kmer_rc;
+
+    if (valid_len < k) {
+      int8_t b_rc = b ^ 3;
+      f_hash ^= rol64(NTHASH_H[b], k - 1 - (uint32_t)valid_len);
+      r_hash ^= rol64(NTHASH_H[b_rc], (uint32_t)valid_len);
+      valid_len++;
+    } else {
+      int8_t b_out = r->base_lookup[seq[i - k]];
+      int8_t b_in = b;
+      f_hash = rol64(f_hash, 1) ^ rol64(NTHASH_H[b_out], k) ^ NTHASH_H[b_in];
+      r_hash = ror64(r_hash, 1) ^ ror64(NTHASH_H[b_out ^ 3], 1) ^
+               rol64(NTHASH_H[b_in ^ 3], k - 1);
+    }
+
+    if (valid_len >= k) {
+      uint64_t canonical = (f_hash < r_hash) ? f_hash : r_hash;
       insert_hash_pool(pool, mix_hash(canonical, r->hash_seed));
     }
   }

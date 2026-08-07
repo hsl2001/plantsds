@@ -58,9 +58,6 @@ extern "C" {
 // ==============================================================
 typedef struct {
   uint32_t hash_window;
-  uint64_t remover_mask;
-  uint32_t kmer_bits;
-  uint32_t rc_shift;
   uint64_t hash_seed;
   int filter_masked;
   const int8_t *base_lookup;
