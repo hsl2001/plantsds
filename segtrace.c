@@ -42,7 +42,8 @@ void print_usage(void) {
          "  -e: hash seed (default: 42)\n"
          "  -w: window size in bp (default: 1024)\n"
          "  -t: step size in bp (default: 0 [auto: 50%% of window size])\n"
-         "  -b: minimum valid bases per window (default: 600)\n"
+         "  -b: minimum valid bases per window (default: 0 [auto: 60%% of "
+         "window size])\n"
          "  -d: maximum distance to consider as copy (default: 0.10)\n"
          "  -D: sub-cluster distance threshold (default: 0.3)\n"
          "  -f: flanking size in bp for sub-clustering (default: 1000)\n"
@@ -65,7 +66,7 @@ int main(int argc, char **argv) {
 
   uint32_t def_kmer_size = 25;
   uint64_t def_scale = 16, def_hash_seed = 42;
-  size_t window_size = 1024, step_size = 0, min_bases = 600, flank_size = 1000;
+  size_t window_size = 1024, step_size = 0, min_bases = 0, flank_size = 1000;
   const char *out_prefix = "segtrace";
   int n_threads = 8;
 
@@ -99,6 +100,8 @@ int main(int argc, char **argv) {
 
   if (step_size == 0)
     step_size = window_size / 3;
+  if (min_bases == 0)
+    min_bases = (size_t)(window_size * 0.60);
   if (opt.ind == argc) {
     fprintf(stderr, "[ERROR] Input FASTA files are required.\n");
     return 1;
