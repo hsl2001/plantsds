@@ -62,7 +62,7 @@ typedef struct {
   uint32_t kmer_bits;
   uint32_t rc_shift;
   uint64_t hash_seed;
-  int ignore_masking;
+  int filter_masked;
   const int8_t *base_lookup;
 } Segtrace;
 
@@ -254,7 +254,7 @@ void write_dup_bed(const char *out_prefix, SegtraceDupRegion *dup_regions,
                    size_t n_merged);
 
 // 6. CORE ALGORITHMS
-void init_segtrace(Segtrace *r, size_t hash_window, int ignore_masking);
+void init_segtrace(Segtrace *r, size_t hash_window, int filter_masked);
 void extract_hash(const Segtrace *r, HashPool *pool, const uint8_t *seq,
                   size_t len);
 void init_hash_pool(HashPool *pool, uint64_t threshold);

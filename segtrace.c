@@ -60,9 +60,7 @@ void print_usage(void) {
          "  -t: step size in bp (default: 0 [auto: 33%% of window size])\n"
          "  -b: minimum valid bases per window (default: 0 [auto: 50%% of "
          "window size])\n"
-         "  -f: flanking sequence length in bp for sub-clustering (default: "
-         "1000)\n"
-         "  -n: ignore soft-masking (treat lowercase a/c/g/t as valid bases)\n"
+         "  -m: filter soft-masked bases (treat lowercase a/c/g/t as invalid)\n"
          "  -o: output file prefix (default: segtrace)\n"
          "  -p: number of threads (default: 8)\n"
          "  -h, --help: show this help message\n\n");
@@ -84,11 +82,11 @@ int main(int argc, char **argv) {
   uint64_t def_scale = 16, def_hash_seed = 42;
   size_t window_size = 1024, step_size = 0, min_bases = 0, flank_size = 1000;
   const char *out_prefix = "segtrace";
-  int n_threads = 8, ignore_masking = 0;
+  int n_threads = 8, filter_masked = 0;
 
   ketopt_t opt = KETOPT_INIT;
   int c;
-  while ((c = ketopt(&opt, argc, argv, 1, "k:s:e:w:t:b:d:o:p:D:f:nh", 0)) >=
+  while ((c = ketopt(&opt, argc, argv, 1, "k:s:e:w:t:b:d:o:p:D:f:mh", 0)) >=
          0) {
     if (c == 'h') {
       print_usage();
@@ -111,8 +109,8 @@ int main(int argc, char **argv) {
       n_threads = atoi(opt.arg) < 1 ? 1 : atoi(opt.arg);
     else if (c == 'f')
       flank_size = (size_t)strtoull(opt.arg, NULL, 10);
-    else if (c == 'n')
-      ignore_masking = 1;
+    else if (c == 'm')
+      filter_masked = 1;
     else
       return 1;
   }
@@ -130,7 +128,7 @@ int main(int argc, char **argv) {
   char **files = &argv[opt.ind];
 
   Segtrace r;
-  init_segtrace(&r, def_kmer_size, ignore_masking);
+  init_segtrace(&r, def_kmer_size, filter_masked);
   r.hash_seed = def_hash_seed;
 
   uint64_t *all_hashes = NULL;
@@ -988,7 +986,7 @@ void write_dup_bed(const char *out_prefix, SegtraceDupRegion *dup_regions,
 // SECTION 6: CORE ALGORITHMS & UTILITIES
 // ==============================================================
 
-void init_segtrace(Segtrace *r, size_t hash_window, int ignore_masking) {
+void init_segtrace(Segtrace *r, size_t hash_window, int filter_masked) {
   size_t k = hash_window < 32 ? hash_window : 32;
   uint32_t kmer_bits = 2 * (uint32_t)k;
   r->hash_window = k;
@@ -996,8 +994,8 @@ void init_segtrace(Segtrace *r, size_t hash_window, int ignore_masking) {
       (kmer_bits > 2) ? (((uint64_t)1 << (kmer_bits - 2)) - 1) : 0;
   r->kmer_bits = kmer_bits;
   r->rc_shift = (kmer_bits > 0) ? (kmer_bits - 2) : 0;
-  r->ignore_masking = ignore_masking;
-  r->base_lookup = ignore_masking ? BASE_LOOKUP_NO_MASK : BASE_LOOKUP;
+  r->filter_masked = filter_masked;
+  r->base_lookup = filter_masked ? BASE_LOOKUP : BASE_LOOKUP_NO_MASK;
 }
 
 __attribute__((hot)) void extract_hash(const Segtrace *r, HashPool *pool,
