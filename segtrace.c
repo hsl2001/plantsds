@@ -573,6 +573,17 @@ SegtraceDistResult calculate_window_dist(const uint64_t *all_hashes,
 // SECTION 4: CLUSTERING, LOCUS MERGING & FLANKING SUBCLUSTERING
 // ==============================================================
 
+typedef struct {
+  uint32_t seq_a;
+  size_t start_a;
+  size_t end_a;
+  uint32_t seq_b;
+  size_t start_b;
+  size_t end_b;
+  uint32_t window_idx_a;
+  uint32_t window_idx_b;
+} Segtrace2DBlock;
+
 void build_duplicate_regions(const SegtraceDupEdge *all_edges, size_t n_edges,
                              size_t window_size, GenomeSeqLen *seq_lens,
                              WindowCoord *coords,
@@ -584,87 +595,88 @@ void build_duplicate_regions(const SegtraceDupEdge *all_edges, size_t n_edges,
     return;
   }
 
-  UnionFind uf;
-  init_unionfind(&uf, n_edges);
+  /* In-place 2D block merging on sorted all_edges (O(N) single pass) */
+  Segtrace2DBlock *blocks = malloc(n_edges * sizeof(Segtrace2DBlock));
+  size_t n_blocks = 0;
 
-  g_edge_coords = coords;
-
-  /* 2D Block Clustering: union edges if they belong to the same (chrA, chrB)
-   * pair and overlap in 2D space */
   for (size_t i = 0; i < n_edges; i++) {
-    uint32_t wa1 = all_edges[i].win_a, wb1 = all_edges[i].win_b;
-    uint32_t sa1 = coords[wa1].seq_id, sb1 = coords[wb1].seq_id;
+    uint32_t wa = all_edges[i].win_a;
+    uint32_t wb = all_edges[i].win_b;
+    uint32_t sa = coords[wa].seq_id, sb = coords[wb].seq_id;
+    size_t sta = coords[wa].start, eda = coords[wa].end;
+    size_t stb = coords[wb].start, edb = coords[wb].end;
 
-    for (size_t j = i + 1; j < n_edges; j++) {
-      uint32_t wa2 = all_edges[j].win_a, wb2 = all_edges[j].win_b;
-      uint32_t sa2 = coords[wa2].seq_id, sb2 = coords[wb2].seq_id;
+    if (n_blocks > 0) {
+      Segtrace2DBlock *prev = &blocks[n_blocks - 1];
+      size_t b_span = prev->end_b > prev->start_b ? prev->end_b - prev->start_b
+                                                  : window_size;
+      size_t diff_b =
+          stb >= prev->start_b ? stb - prev->start_b : prev->start_b - stb;
 
-      if (sa2 != sa1 || sb2 != sb1)
-        break; /* Different chromosome pair! */
-      if (coords[wa2].start > coords[wa1].start + window_size)
-        break; /* Query start gap > window_size */
-
-      if (ABS_DIFF(coords[wb2].start, coords[wb1].start) <= window_size) {
-        union_unionfind(&uf, (uint32_t)i, (uint32_t)j);
+      if (prev->seq_a == sa && prev->seq_b == sb &&
+          sta <= prev->end_a + window_size && diff_b <= b_span + window_size) {
+        if (eda > prev->end_a)
+          prev->end_a = eda;
+        if (stb < prev->start_b)
+          prev->start_b = stb;
+        if (edb > prev->end_b)
+          prev->end_b = edb;
+        if (coords[wa].window_idx > prev->window_idx_a)
+          prev->window_idx_a = coords[wa].window_idx;
+        if (coords[wb].window_idx > prev->window_idx_b)
+          prev->window_idx_b = coords[wb].window_idx;
+        continue;
       }
     }
+
+    blocks[n_blocks++] = (Segtrace2DBlock){
+        .seq_a = sa,
+        .start_a = sta,
+        .end_a = eda,
+        .seq_b = sb,
+        .start_b = stb,
+        .end_b = edb,
+        .window_idx_a = coords[wa].window_idx,
+        .window_idx_b = coords[wb].window_idx,
+    };
   }
 
-  uint32_t *edge_cluster = calloc(n_edges, sizeof(uint32_t));
-  uint32_t next_cluster_id = 1;
-
-  for (size_t i = 0; i < n_edges; i++) {
-    uint32_t root = find_unionfind(&uf, (uint32_t)i);
-    if (edge_cluster[root] == 0) {
-      edge_cluster[root] = next_cluster_id++;
-    }
-    edge_cluster[i] = edge_cluster[root];
-  }
-
+  /* Allocate SegtraceDupRegion ONLY for the merged SD blocks */
   size_t n_dup_regions = 0, cap_dup_regions = 0;
   SegtraceDupRegion *dup_regions = NULL;
 
-  for (size_t i = 0; i < n_edges; i++) {
-    uint32_t cid = edge_cluster[i];
+  for (size_t i = 0; i < n_blocks; i++) {
     char label[32];
-    snprintf(label, sizeof(label), "%u", cid);
-
-    uint32_t wa = all_edges[i].win_a;
-    uint32_t wb = all_edges[i].win_b;
+    snprintf(label, sizeof(label), "%zu", i + 1);
 
     char chrom_a[512], chrom_b[512];
     snprintf(chrom_a, sizeof(chrom_a), "%s-%s",
-             seq_lens[coords[wa].seq_id].genome,
-             seq_lens[coords[wa].seq_id].seq);
+             seq_lens[blocks[i].seq_a].genome, seq_lens[blocks[i].seq_a].seq);
     snprintf(chrom_b, sizeof(chrom_b), "%s-%s",
-             seq_lens[coords[wb].seq_id].genome,
-             seq_lens[coords[wb].seq_id].seq);
+             seq_lens[blocks[i].seq_b].genome, seq_lens[blocks[i].seq_b].seq);
 
     DA_PUSH(dup_regions, n_dup_regions, cap_dup_regions,
             ((SegtraceDupRegion){.chrom = strdup(chrom_a),
-                                 .start = coords[wa].start,
-                                 .end = coords[wa].end,
+                                 .start = blocks[i].start_a,
+                                 .end = blocks[i].end_a,
                                  .cluster_id = strdup(label),
                                  .copy_count = 2,
                                  .subcluster_id = 0,
                                  .flank_sketch = {0},
-                                 .window_idx = coords[wa].window_idx}));
+                                 .window_idx = blocks[i].window_idx_a}));
 
     DA_PUSH(dup_regions, n_dup_regions, cap_dup_regions,
             ((SegtraceDupRegion){.chrom = strdup(chrom_b),
-                                 .start = coords[wb].start,
-                                 .end = coords[wb].end,
+                                 .start = blocks[i].start_b,
+                                 .end = blocks[i].end_b,
                                  .cluster_id = strdup(label),
                                  .copy_count = 2,
                                  .subcluster_id = 0,
                                  .flank_sketch = {0},
-                                 .window_idx = coords[wb].window_idx}));
+                                 .window_idx = blocks[i].window_idx_b}));
   }
 
-  free(edge_cluster);
-  free_unionfind(&uf);
-  g_edge_coords = NULL;
-
+  free(blocks);
   *out_regions = dup_regions;
   *out_n_regions = n_dup_regions;
 }
