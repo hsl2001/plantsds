@@ -621,35 +621,52 @@ void build_duplicate_regions(const SegtraceDupEdge *all_edges, size_t n_edges,
   size_t n_dup_regions = 0, cap_dup_regions = 0;
   SegtraceDupRegion *dup_regions = NULL;
 
-  for (size_t i = 0; i < n_edges; i++) {
-    char label[32];
-    snprintf(label, sizeof(label), "%u", edge_cluster[i]);
+  size_t i = 0;
+  while (i < n_edges) {
+    uint32_t cid = edge_cluster[i];
+    uint32_t wa0 = all_edges[i].win_a, wb0 = all_edges[i].win_b;
+    uint32_t sa = coords[wa0].seq_id, sb = coords[wb0].seq_id;
+    size_t min_sta = coords[wa0].start, max_eda = coords[wa0].end;
+    size_t min_stb = coords[wb0].start, max_edb = coords[wb0].end;
+    uint32_t win_idx_a = coords[wa0].window_idx;
+    uint32_t win_idx_b = coords[wb0].window_idx;
 
-    uint32_t wa = all_edges[i].win_a, wb = all_edges[i].win_b;
+    size_t j = i + 1;
+    while (j < n_edges && edge_cluster[j] == cid) {
+      uint32_t wa = all_edges[j].win_a, wb = all_edges[j].win_b;
+      if (coords[wa].start < min_sta) min_sta = coords[wa].start;
+      if (coords[wa].end > max_eda)   max_eda = coords[wa].end;
+      if (coords[wb].start < min_stb) min_stb = coords[wb].start;
+      if (coords[wb].end > max_edb)   max_edb = coords[wb].end;
+      j++;
+    }
+
+    char label[32];
+    snprintf(label, sizeof(label), "%u", cid);
+
     char chr_a[512], chr_b[512];
-    snprintf(chr_a, sizeof(chr_a), "%s-%s", seq_lens[coords[wa].seq_id].genome,
-             seq_lens[coords[wa].seq_id].seq);
-    snprintf(chr_b, sizeof(chr_b), "%s-%s", seq_lens[coords[wb].seq_id].genome,
-             seq_lens[coords[wb].seq_id].seq);
+    snprintf(chr_a, sizeof(chr_a), "%s-%s", seq_lens[sa].genome, seq_lens[sa].seq);
+    snprintf(chr_b, sizeof(chr_b), "%s-%s", seq_lens[sb].genome, seq_lens[sb].seq);
 
     DA_PUSH(dup_regions, n_dup_regions, cap_dup_regions,
             ((SegtraceDupRegion){.chrom = strdup(chr_a),
-                                 .start = coords[wa].start,
-                                 .end = coords[wa].end,
+                                 .start = min_sta,
+                                 .end = max_eda,
                                  .cluster_id = strdup(label),
                                  .copy_count = 2,
                                  .subcluster_id = 0,
                                  .flank_sketch = {0},
-                                 .window_idx = coords[wa].window_idx}));
+                                 .window_idx = win_idx_a}));
     DA_PUSH(dup_regions, n_dup_regions, cap_dup_regions,
             ((SegtraceDupRegion){.chrom = strdup(chr_b),
-                                 .start = coords[wb].start,
-                                 .end = coords[wb].end,
+                                 .start = min_stb,
+                                 .end = max_edb,
                                  .cluster_id = strdup(label),
                                  .copy_count = 2,
                                  .subcluster_id = 0,
                                  .flank_sketch = {0},
-                                 .window_idx = coords[wb].window_idx}));
+                                 .window_idx = win_idx_b}));
+    i = j;
   }
   free(edge_cluster);
 
