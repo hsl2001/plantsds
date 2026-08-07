@@ -592,8 +592,8 @@ void build_duplicate_regions(UnionFind *uf, size_t num_sketches,
       if (cluster_map[root_j] != 0) {
         if (coords[j].end > max_end)
           max_end = coords[j].end;
-        if (cluster_map[root_j] < min_cid)
-          min_cid = cluster_map[root_j];
+        // if (cluster_map[root_j] < min_cid)
+        //    min_cid = cluster_map[root_j];
       }
       j++;
     }
