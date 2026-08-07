@@ -62,7 +62,7 @@ int main(int argc, char **argv) {
     }
   }
 
-  uint32_t def_kmer_size = 21;
+  uint32_t def_kmer_size = 25;
   uint64_t def_scale = 16, def_hash_seed = 42;
   size_t window_size = 1024, step_size = 0, min_bases = 1000, flank_size = 1000;
   const char *out_prefix = "segtrace";
@@ -592,8 +592,8 @@ void build_duplicate_regions(UnionFind *uf, size_t num_sketches,
       if (cluster_map[root_j] != 0) {
         if (coords[j].end > max_end)
           max_end = coords[j].end;
-        // if (cluster_map[root_j] < min_cid)
-        //    min_cid = cluster_map[root_j];
+        if (cluster_map[root_j] < min_cid)
+          min_cid = cluster_map[root_j];
       }
       j++;
     }
