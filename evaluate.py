@@ -376,7 +376,7 @@ if __name__ == "__main__":
         print(f"======================================")
             
         chrom_sizes = {"chr1": g_size}
-        num_dups = num_dups = g_size // 1_000_000
+        num_dups = num_dups = g_size // 500_000
         
         true_pairs, fasta_path, chrom_offsets = generate_simulated_genome(chrom_sizes, num_dups=num_dups)
         
