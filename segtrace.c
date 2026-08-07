@@ -360,6 +360,7 @@ void merge_global_data(StreamWorkerData *workers, int num_files,
                        const char *out_prefix, uint64_t **out_all_hashes,
                        WindowCoord **out_coords, size_t *out_num_sketches,
                        GenomeSeqLen **out_seq_lens, size_t *out_num_seqs) {
+  (void)out_prefix;
   size_t total_hashes = 0, total_sketches = 0, total_seqs = 0;
   for (int i = 0; i < num_files; i++) {
     total_hashes += workers[i].num_all_hashes;
@@ -375,10 +376,6 @@ void merge_global_data(StreamWorkerData *workers, int num_files,
       total_seqs ? malloc(total_seqs * sizeof(GenomeSeqLen)) : NULL;
   size_t g_hash_offset = 0, g_sketch_offset = 0, g_seq_offset = 0;
 
-  char path_buf[PATH_MAX];
-  snprintf(path_buf, sizeof(path_buf), "%s.window.bed", out_prefix);
-  FILE *bed_fp = fopen(path_buf, "w");
-
   for (int i = 0; i < num_files; i++) {
     StreamWorkerData *w = &workers[i];
     if (w->num_all_hashes > 0)
@@ -393,14 +390,6 @@ void merge_global_data(StreamWorkerData *workers, int num_files,
       c.sketch_offset += g_hash_offset;
       c.seq_id += g_seq_offset;
       coords[g_sketch_offset + j] = c;
-
-      if (bed_fp) {
-        char chr_name[512];
-        snprintf(chr_name, sizeof(chr_name), "%s-%s", seq_lens[c.seq_id].genome,
-                 seq_lens[c.seq_id].seq);
-        fprintf(bed_fp, "%s\t%zu\t%zu\t%s_%zu_%zu\n", chr_name, c.start, c.end,
-                chr_name, c.start, c.end);
-      }
     }
 
     g_hash_offset += w->num_all_hashes;
@@ -410,8 +399,6 @@ void merge_global_data(StreamWorkerData *workers, int num_files,
     free(w->coords);
     free(w->seq_lens);
   }
-  if (bed_fp)
-    fclose(bed_fp);
 
   *out_all_hashes = all_hashes;
   *out_coords = coords;
@@ -518,7 +505,7 @@ void discover_compute_worker(void *data, long p, int tid) {
   qsort(b->entries, b->size, sizeof(HashWindowEntry), compare_hash_entry);
   memset(w_data->t_bloom[tid], 0, BLOOM_SIZE_BYTES);
 
-  double p_kmer = pow(0.90, (double)w_data->kmer_size);
+  double p_kmer = pow(0.85, (double)w_data->kmer_size);
   size_t i = 0;
   while (i < b->size) {
     size_t j = i + 1;
@@ -885,7 +872,7 @@ void process_subcluster(void *data, long s, int tid) {
   if (count <= 1)
     return;
 
-  double p_kmer = pow(0.90, (double)w->kmer_size);
+  double p_kmer = pow(0.85, (double)w->kmer_size);
 
   if (count <= 64) {
     for (size_t a = 0; a < count; a++) {

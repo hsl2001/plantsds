@@ -52,7 +52,7 @@ def generate_simulated_genome(chrom_sizes, num_dups=100, min_dup_len=1000, max_d
         
         genomes[c2][s2:s2 + dup_len] = genomes[c1][s1:s1 + dup_len]
 
-        div = random.uniform(0.0, 0.05)
+        div = random.uniform(0.0, 0.1)
         num_muts = np.random.binomial(dup_len, div)
         if num_muts > 0:
             mut_offsets = np.random.choice(dup_len, size=num_muts, replace=False)
@@ -299,11 +299,11 @@ def evaluate_frag(true_pairs, predicted_pairs, threshold=0.5):
     return Sn, Pr, f1
 
 def evaluate(true_pairs, fasta_path, chrom_offsets):
-    start_time = time.time()
+    start_time = time.perf_counter()
     segtrace_out = "sim_out"
-    subprocess.run(["./segtrace", "-p", "8", fasta_path, "-o", segtrace_out], 
+    subprocess.run(["./segtrace", "-k", "15", "-p", "8", fasta_path, "-o", segtrace_out], 
                    check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    exec_time = time.time() - start_time
+    exec_time = time.perf_counter() - start_time
     
     clusters = {}
     if os.path.exists(f"{segtrace_out}.dup.bed"):
@@ -404,9 +404,9 @@ if __name__ == "__main__":
                 sedef_dir = os.path.abspath("sedef")
                 env['PATH'] = f"{sedef_dir}:{env.get('PATH', '')}"
                 sedef_out_dir = "sedef_out"
-                t0 = time.time()
+                t0 = time.perf_counter()
                 subprocess.run([os.path.join(sedef_dir, "sedef.sh"), "-o", sedef_out_dir, "-f", "-j", "8", fasta_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env)
-                sedef_exec_time = time.time() - t0
+                sedef_exec_time = time.perf_counter() - t0
                 if os.path.exists(f"{sedef_out_dir}/final.bed"):
                     sedef_sn_bp, sedef_pr_bp, sedef_f1_bp, sedef_sn_frag, sedef_pr_frag, sedef_f1_frag = evaluate_bedpe(true_pairs, f"{sedef_out_dir}/final.bed", chrom_offsets)
                     all_results.append({
@@ -428,9 +428,9 @@ if __name__ == "__main__":
                 env = os.environ.copy()
                 env['PATH'] = f"{os.path.expanduser('~/.local/bin')}:{env.get('PATH', '')}"
                 biser_out_file = "biser_out.bedpe"
-                t0 = time.time()
+                t0 = time.perf_counter()
                 subprocess.run(["biser", "-o", biser_out_file, fasta_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env)
-                biser_exec_time = time.time() - t0
+                biser_exec_time = time.perf_counter() - t0
                 if os.path.exists(biser_out_file):
                     biser_sn_bp, biser_pr_bp, biser_f1_bp, biser_sn_frag, biser_pr_frag, biser_f1_frag = evaluate_bedpe(true_pairs, biser_out_file, chrom_offsets)
                     all_results.append({
