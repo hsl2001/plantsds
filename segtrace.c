@@ -29,6 +29,22 @@ const int8_t BASE_LOOKUP[256] = {
     -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
     -1, -1, -1, -1, -1, -1, -1, -1, -1};
 
+const int8_t BASE_LOOKUP_NO_MASK[256] = {
+    -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+    -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+    -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+    -1, -1, -1, -1, -1, -1, -1, -1, 0,  -1, 1,  -1, -1, -1, 2,  -1, -1, -1, -1,
+    -1, -1, -1, -1, -1, -1, -1, -1, 3,  -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+    -1, 0,  -1, 1,  -1, -1, -1, 2,  -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+    -1, 3,  -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+    -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+    -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+    -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+    -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+    -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+    -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+    -1, -1, -1, -1, -1, -1, -1, -1, -1};
+
 // ==============================================================
 // SECTION 1: ENTRY POINT & CLI PARSING
 // ==============================================================
@@ -46,6 +62,7 @@ void print_usage(void) {
          "window size])\n"
          "  -f: flanking sequence length in bp for sub-clustering (default: "
          "1000)\n"
+         "  -n: ignore soft-masking (treat lowercase a/c/g/t as valid bases)\n"
          "  -o: output file prefix (default: segtrace)\n"
          "  -p: number of threads (default: 8)\n"
          "  -h, --help: show this help message\n\n");
@@ -67,11 +84,12 @@ int main(int argc, char **argv) {
   uint64_t def_scale = 16, def_hash_seed = 42;
   size_t window_size = 1024, step_size = 0, min_bases = 0, flank_size = 1000;
   const char *out_prefix = "segtrace";
-  int n_threads = 8;
+  int n_threads = 8, ignore_masking = 0;
 
   ketopt_t opt = KETOPT_INIT;
   int c;
-  while ((c = ketopt(&opt, argc, argv, 1, "k:s:e:w:t:b:d:o:p:D:f:h", 0)) >= 0) {
+  while ((c = ketopt(&opt, argc, argv, 1, "k:s:e:w:t:b:d:o:p:D:f:n:h", 0)) >=
+         0) {
     if (c == 'h') {
       print_usage();
       return 0;
@@ -93,6 +111,8 @@ int main(int argc, char **argv) {
       n_threads = atoi(opt.arg) < 1 ? 1 : atoi(opt.arg);
     else if (c == 'f')
       flank_size = (size_t)strtoull(opt.arg, NULL, 10);
+    else if (c == 'n')
+      ignore_masking = 1;
     else
       return 1;
   }
@@ -110,7 +130,7 @@ int main(int argc, char **argv) {
   char **files = &argv[opt.ind];
 
   Segtrace r;
-  init_segtrace(&r, def_kmer_size);
+  init_segtrace(&r, def_kmer_size, ignore_masking);
   r.hash_seed = def_hash_seed;
 
   uint64_t *all_hashes = NULL;
@@ -185,7 +205,7 @@ static void seq_chunk_worker(void *data, long i, int tid) {
        idx += job->step_size, current_window_idx++) {
     size_t valid_bases = 0;
     for (size_t j = 0; j < job->window_size; j++) {
-      if (BASE_LOOKUP[job->seq_ptr[idx + j]] >= 0)
+      if (job->base_lookup[job->seq_ptr[idx + j]] >= 0)
         valid_bases++;
     }
     if (valid_bases < job->min_bases)
@@ -273,6 +293,7 @@ StreamWorkerData *extract_all_windows(char **files, int num_files,
 
         DA_RESERVE(jobs, cap_jobs, num_jobs + 1);
         jobs[num_jobs++] = (SeqChunkJob){.r = r,
+                                         .base_lookup = r->base_lookup,
                                          .scale = scale,
                                          .window_size = window_size,
                                          .step_size = step_size,
@@ -525,9 +546,9 @@ void discover_compute_worker(void *data, long p, int tid) {
               w_data->coords[wa].sketch_size < w_data->coords[wb].sketch_size
                   ? w_data->coords[wa].sketch_size
                   : w_data->coords[wb].sketch_size;
-          size_t min_shared = (size_t)ceil((double)min_sz * p_kmer);
-          if (min_shared < 1)
-            min_shared = 1;
+          size_t min_shared = (size_t)ceil((double)min_sz * p_kmer) + 1;
+          if (min_shared < 2)
+            min_shared = 2;
 
           SegtraceDistResult d =
               calculate_window_dist(w_data->all_hashes, &w_data->coords[wa],
@@ -848,9 +869,9 @@ static inline void check_and_eval_flank_pair(SubclusterData *w, int tid,
                           w->regions[rb].flank_sketch.sketch_size
                       ? w->regions[ra].flank_sketch.sketch_size
                       : w->regions[rb].flank_sketch.sketch_size;
-  size_t min_shared = (size_t)ceil((double)min_sz * p_kmer);
-  if (min_shared < 1)
-    min_shared = 1;
+  size_t min_shared = (size_t)ceil((double)min_sz * p_kmer) + 1;
+  if (min_shared < 2)
+    min_shared = 2;
 
   SegtraceDistResult d = calculate_segtrace_dist(
       &w->regions[ra].flank_sketch, &w->regions[rb].flank_sketch, w->kmer_size);
@@ -967,7 +988,7 @@ void write_dup_bed(const char *out_prefix, SegtraceDupRegion *dup_regions,
 // SECTION 6: CORE ALGORITHMS & UTILITIES
 // ==============================================================
 
-void init_segtrace(Segtrace *r, size_t hash_window) {
+void init_segtrace(Segtrace *r, size_t hash_window, int ignore_masking) {
   size_t k = hash_window < 32 ? hash_window : 32;
   uint32_t kmer_bits = 2 * (uint32_t)k;
   r->hash_window = k;
@@ -975,6 +996,8 @@ void init_segtrace(Segtrace *r, size_t hash_window) {
       (kmer_bits > 2) ? (((uint64_t)1 << (kmer_bits - 2)) - 1) : 0;
   r->kmer_bits = kmer_bits;
   r->rc_shift = (kmer_bits > 0) ? (kmer_bits - 2) : 0;
+  r->ignore_masking = ignore_masking;
+  r->base_lookup = ignore_masking ? BASE_LOOKUP_NO_MASK : BASE_LOOKUP;
 }
 
 __attribute__((hot)) void extract_hash(const Segtrace *r, HashPool *pool,
@@ -984,7 +1007,7 @@ __attribute__((hot)) void extract_hash(const Segtrace *r, HashPool *pool,
   uint64_t kmer = 0, kmer_rc = 0;
   size_t l = 0;
   for (size_t i = 0; i < len; i++) {
-    int8_t c = BASE_LOOKUP[seq[i]];
+    int8_t c = r->base_lookup[seq[i]];
     if (c < 0) {
       l = 0;
       kmer = 0;
