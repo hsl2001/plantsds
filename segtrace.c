@@ -446,6 +446,48 @@ void discover_and_compute(const uint64_t *all_hashes, WindowCoord *coords,
   free(w.t_bloom);
 }
 
+SegtraceDistResult calculate_window_dist(const uint64_t *all_hashes,
+                                         const WindowCoord *wa,
+                                         const WindowCoord *wb,
+                                         uint32_t kmer_size) {
+  SegtraceSketch sa = {.sketch_size = wa->sketch_size,
+                       .hashes = (uint64_t *)(all_hashes + wa->sketch_offset)};
+  SegtraceSketch sb = {.sketch_size = wb->sketch_size,
+                       .hashes = (uint64_t *)(all_hashes + wb->sketch_offset)};
+  return calculate_segtrace_dist(&sa, &sb, kmer_size);
+}
+
+static inline int check_collinear_neighbor(DiscoverComputeData *w, uint32_t wa,
+                                           uint32_t wb, size_t min_shared) {
+  // 1. Forward collinear neighbor: (wa + 1, wb + 1)
+  if (wa + 1 < w->n_windows && wb + 1 < w->n_windows &&
+      w->coords[wa + 1].seq_id == w->coords[wa].seq_id &&
+      w->coords[wb + 1].seq_id == w->coords[wb].seq_id) {
+    if (calculate_window_dist(w->all_hashes, &w->coords[wa + 1],
+                              &w->coords[wb + 1], w->kmer_size)
+            .shared_hashes >= min_shared)
+      return 1;
+  }
+  // 2. Inverted collinear neighbor: (wa + 1, wb - 1)
+  if (wa + 1 < w->n_windows && wb > 0 &&
+      w->coords[wa + 1].seq_id == w->coords[wa].seq_id &&
+      w->coords[wb - 1].seq_id == w->coords[wb].seq_id) {
+    if (calculate_window_dist(w->all_hashes, &w->coords[wa + 1],
+                              &w->coords[wb - 1], w->kmer_size)
+            .shared_hashes >= min_shared)
+      return 1;
+  }
+  // 3. Backward collinear neighbor: (wa - 1, wb - 1)
+  if (wa > 0 && wb > 0 && w->coords[wa - 1].seq_id == w->coords[wa].seq_id &&
+      w->coords[wb - 1].seq_id == w->coords[wb].seq_id) {
+    if (calculate_window_dist(w->all_hashes, &w->coords[wa - 1],
+                              &w->coords[wb - 1], w->kmer_size)
+            .shared_hashes >= min_shared)
+      return 1;
+  }
+  return 0;
+}
+
 void discover_compute_worker(void *data, long p, int tid) {
   DiscoverComputeData *w_data = (DiscoverComputeData *)data;
   PartitionBucket *b = &w_data->buckets[p];
@@ -489,24 +531,15 @@ void discover_compute_worker(void *data, long p, int tid) {
               calculate_window_dist(w_data->all_hashes, &w_data->coords[wa],
                                     &w_data->coords[wb], w_data->kmer_size);
           if (d.shared_hashes >= min_shared) {
-            union_unionfind(w_data->uf, wa, wb);
+            if (check_collinear_neighbor(w_data, wa, wb, min_shared)) {
+              union_unionfind(w_data->uf, wa, wb);
+            }
           }
         }
       }
     }
     i = j;
   }
-}
-
-SegtraceDistResult calculate_window_dist(const uint64_t *all_hashes,
-                                         const WindowCoord *wa,
-                                         const WindowCoord *wb,
-                                         uint32_t kmer_size) {
-  SegtraceSketch sa = {.sketch_size = wa->sketch_size,
-                       .hashes = (uint64_t *)(all_hashes + wa->sketch_offset)};
-  SegtraceSketch sb = {.sketch_size = wb->sketch_size,
-                       .hashes = (uint64_t *)(all_hashes + wb->sketch_offset)};
-  return calculate_segtrace_dist(&sa, &sb, kmer_size);
 }
 
 // ==============================================================
