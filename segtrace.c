@@ -88,7 +88,7 @@ int main(int argc, char **argv) {
 
   ketopt_t opt = KETOPT_INIT;
   int c;
-  while ((c = ketopt(&opt, argc, argv, 1, "k:s:e:w:t:b:d:o:p:D:f:n:h", 0)) >=
+  while ((c = ketopt(&opt, argc, argv, 1, "k:s:e:w:t:b:d:o:p:D:f:nh", 0)) >=
          0) {
     if (c == 'h') {
       print_usage();
