@@ -39,16 +39,10 @@ extern "C" {
   } while (0)
 
 #define CMP(a, b) (((a) > (b)) - ((a) < (b)))
-#define SWAP(type, a, b)                                                       \
-  do {                                                                         \
-    type _t = (a);                                                             \
-    (a) = (b);                                                                 \
-    (b) = _t;                                                                  \
-  } while (0)
 
 #define ABS_DIFF(a, b) ((a) > (b) ? (a) - (b) : (b) - (a))
 
-#define NUM_PARTITIONS 1024
+#define NUM_PARTITIONS 512
 #define MAX_RUN_LEN 100
 
 #define BLOOM_SIZE_BITS (1 << 22)
@@ -80,12 +74,6 @@ typedef struct {
   double distance;
   size_t shared_hashes;
 } SegtraceDistResult;
-
-typedef struct {
-  uint32_t win_a;
-  uint32_t win_b;
-  double distance;
-} SegtraceDupEdge;
 
 typedef struct {
   uint32_t *parent;
@@ -167,7 +155,6 @@ typedef struct {
 
 typedef struct {
   SegtraceDupRegion *regions;
-  double max_dist;
   size_t n_merged;
   SubclusterPair **t_pairs;
   size_t *t_n_pairs;
@@ -233,7 +220,6 @@ StreamWorkerData *extract_all_windows(char **files, int num_files,
                                       const Segtrace *r, uint64_t scale,
                                       size_t window_size, size_t step_size,
                                       size_t min_bases, int n_threads);
-void stream_pangenome_worker(void *data, long i, int tid);
 void merge_global_data(StreamWorkerData *workers, int num_files,
                        const char *out_prefix, uint64_t **out_all_hashes,
                        WindowCoord **out_coords, size_t *out_num_sketches,
@@ -250,9 +236,9 @@ SegtraceDistResult calculate_window_dist(const uint64_t *all_hashes,
                                          uint32_t kmer_size);
 
 // 5. REGION CLUSTERING & OUTPUT
-void build_duplicate_regions(UnionFind *uf, size_t num_sketches, size_t window_size,
-                             int num_files, char **files, GenomeSeqLen *seq_lens,
-                             WindowCoord *coords,
+void build_duplicate_regions(UnionFind *uf, size_t num_sketches,
+                             size_t window_size, int num_files, char **files,
+                             GenomeSeqLen *seq_lens, WindowCoord *coords,
                              SegtraceDupRegion **out_regions,
                              size_t *out_n_regions);
 size_t merge_dup_regions(SegtraceDupRegion *regions, size_t n);
@@ -287,7 +273,6 @@ void free_unionfind(UnionFind *uf);
 // 7. UTILITIES
 void get_basename(const char *filename, char *basename, size_t size);
 uint64_t mix_hash(uint64_t hash_value, uint64_t seed);
-size_t lower_bound_u64(const uint64_t *arr, size_t n, uint64_t target);
 uint64_t encode_pair(uint32_t a, uint32_t b);
 int bloom_test_and_set(uint8_t *bloom, uint64_t key, uint32_t mask);
 int compare_uint64(const void *a, const void *b);

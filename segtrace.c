@@ -37,16 +37,15 @@ void print_usage(void) {
   printf("Segtrace: Segmental Duplication Tracer\n\n"
          "Usage: segtrace [options] fasta1 [fasta2 ...]\n\n"
          "Options:\n"
-         "  -k: kmer size (default: 21)\n"
+         "  -k: kmer size (default: 25)\n"
          "  -s: scale factor (default: 16)\n"
          "  -e: hash seed (default: 42)\n"
          "  -w: window size in bp (default: 1024)\n"
-         "  -t: step size in bp (default: 0 [auto: 50%% of window size])\n"
-         "  -b: minimum valid bases per window (default: 0 [auto: 65%% of "
+         "  -t: step size in bp (default: 0 [auto: 33%% of window size])\n"
+         "  -b: minimum valid bases per window (default: 0 [auto: 66%% of "
          "window size])\n"
-         "  -d: maximum distance to consider as copy (default: 0.10)\n"
-         "  -D: sub-cluster distance threshold (default: 0.3)\n"
-         "  -f: flanking size in bp for sub-clustering (default: 1000)\n"
+         "  -f: flanking sequence length in bp for sub-clustering (default: "
+         "1000)\n"
          "  -o: output file prefix (default: segtrace)\n"
          "  -p: number of threads (default: 8)\n"
          "  -h, --help: show this help message\n\n");
@@ -101,7 +100,7 @@ int main(int argc, char **argv) {
   if (step_size == 0)
     step_size = window_size / 3;
   if (min_bases == 0)
-    min_bases = (size_t)(window_size * 0.65);
+    min_bases = (size_t)(window_size * 2 / 3);
   if (opt.ind == argc) {
     fprintf(stderr, "[ERROR] Input FASTA files are required.\n");
     return 1;
@@ -977,7 +976,7 @@ void write_dup_bedpe(const char *out_prefix, SegtraceDupRegion *dup_regions,
       j++;
 
     size_t cluster_size = j - i;
-    if (cluster_size > 1 && cluster_size <= 100) {
+    if (cluster_size > 1) {
       for (size_t a = i; a < j; a++) {
         for (size_t b = a + 1; b < j; b++) {
           const char *c1 = regions_copy[a].chrom, *c2 = regions_copy[b].chrom;
@@ -1160,18 +1159,6 @@ inline uint64_t mix_hash(uint64_t hash_value, uint64_t seed) {
   hash_value *= MIX_CONST2;
   hash_value ^= hash_value >> 33;
   return hash_value;
-}
-
-size_t lower_bound_u64(const uint64_t *arr, size_t n, uint64_t target) {
-  size_t lo = 0, hi = n;
-  while (lo < hi) {
-    size_t mid = lo + (hi - lo) / 2;
-    if (arr[mid] < target)
-      lo = mid + 1;
-    else
-      hi = mid;
-  }
-  return lo;
 }
 
 uint64_t encode_pair(uint32_t a, uint32_t b) {
