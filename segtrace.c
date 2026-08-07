@@ -930,6 +930,11 @@ void process_subcluster(void *data, long s, int tid) {
 
 void write_dup_bed(const char *out_prefix, SegtraceDupRegion *dup_regions,
                    size_t n_merged) {
+  if (n_merged == 0)
+    return;
+  qsort(dup_regions, n_merged, sizeof(SegtraceDupRegion),
+        compare_dup_region_by_cluster);
+
   char path_buf[PATH_MAX];
   snprintf(path_buf, sizeof(path_buf), "%s.dup.bed", out_prefix);
   FILE *out_bed = fopen(path_buf, "w");
@@ -939,10 +944,21 @@ void write_dup_bed(const char *out_prefix, SegtraceDupRegion *dup_regions,
   }
 
   fprintf(out_bed, "#chrom\tstart\tend\tcluster_id\tsubcluster_id\n");
-  for (size_t i = 0; i < n_merged; i++) {
-    fprintf(out_bed, "%s\t%zu\t%zu\t%s\t%u\n", dup_regions[i].chrom,
-            dup_regions[i].start, dup_regions[i].end, dup_regions[i].cluster_id,
-            dup_regions[i].subcluster_id);
+  size_t i = 0;
+  while (i < n_merged) {
+    size_t j = i + 1;
+    while (j < n_merged &&
+           strcmp(dup_regions[i].cluster_id, dup_regions[j].cluster_id) == 0)
+      j++;
+    size_t cluster_size = j - i;
+    if (cluster_size >= 2) {
+      for (size_t k = i; k < j; k++) {
+        fprintf(out_bed, "%s\t%zu\t%zu\t%s\t%u\n", dup_regions[k].chrom,
+                dup_regions[k].start, dup_regions[k].end,
+                dup_regions[k].cluster_id, dup_regions[k].subcluster_id);
+      }
+    }
+    i = j;
   }
   fclose(out_bed);
 }
