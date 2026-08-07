@@ -42,7 +42,7 @@ void print_usage(void) {
          "  -e: hash seed (default: 42)\n"
          "  -w: window size in bp (default: 1024)\n"
          "  -t: step size in bp (default: 0 [auto: 50%% of window size])\n"
-         "  -b: minimum valid bases per window (default: 512)\n"
+         "  -b: minimum valid bases per window (default: 768)\n"
          "  -d: maximum distance to consider as copy (default: 0.10)\n"
          "  -D: sub-cluster distance threshold (default: 0.3)\n"
          "  -f: flanking size in bp for sub-clustering (default: 1000)\n"
@@ -65,7 +65,7 @@ int main(int argc, char **argv) {
 
   uint32_t def_kmer_size = 25;
   uint64_t def_scale = 16, def_hash_seed = 42;
-  size_t window_size = 1024, step_size = 0, min_bases = 512, flank_size = 1000;
+  size_t window_size = 1024, step_size = 0, min_bases = 768, flank_size = 1000;
   const char *out_prefix = "segtrace";
   int n_threads = 8;
 
