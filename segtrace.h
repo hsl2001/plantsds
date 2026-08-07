@@ -213,10 +213,8 @@ typedef struct {
   size_t n_windows;
   size_t window_size;
   uint32_t kmer_size;
+  UnionFind *uf;
   PartitionBucket *buckets;
-  SegtraceDupEdge **t_edges;
-  size_t *t_n_edges;
-  size_t *t_cap_edges;
   uint8_t **t_bloom;
 } DiscoverComputeData;
 
@@ -244,8 +242,7 @@ void merge_global_data(StreamWorkerData *workers, int num_files,
 // 4. DISCOVERY & DISTANCE CALCULATION
 void discover_and_compute(const uint64_t *all_hashes, WindowCoord *coords,
                           size_t n_windows, size_t window_size, int n_threads,
-                          uint32_t kmer_size, SegtraceDupEdge **out_edges,
-                          size_t *out_n_edges);
+                          uint32_t kmer_size, UnionFind *uf);
 void discover_compute_worker(void *data, long p, int tid);
 SegtraceDistResult calculate_window_dist(const uint64_t *all_hashes,
                                          const WindowCoord *wa,
@@ -253,8 +250,9 @@ SegtraceDistResult calculate_window_dist(const uint64_t *all_hashes,
                                          uint32_t kmer_size);
 
 // 5. REGION CLUSTERING & OUTPUT
-void build_duplicate_regions(const SegtraceDupEdge *all_edges, size_t n_edges,
-                             GenomeSeqLen *seq_lens, WindowCoord *coords,
+void build_duplicate_regions(UnionFind *uf, size_t num_sketches, size_t window_size,
+                             int num_files, char **files, GenomeSeqLen *seq_lens,
+                             WindowCoord *coords,
                              SegtraceDupRegion **out_regions,
                              size_t *out_n_regions);
 size_t merge_dup_regions(SegtraceDupRegion *regions, size_t n);
