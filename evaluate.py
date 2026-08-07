@@ -9,7 +9,6 @@ import seaborn as sns
 import time
 import sys
 import argparse
-import glob
 
 def generate_simulated_genome(chrom_sizes, num_dups=100, min_dup_len=1000, max_dup_len=10_000):
     bases_bytes = np.frombuffer(b'ACGT', dtype=np.uint8)
@@ -53,7 +52,7 @@ def generate_simulated_genome(chrom_sizes, num_dups=100, min_dup_len=1000, max_d
         
         genomes[c2][s2:s2 + dup_len] = genomes[c1][s1:s1 + dup_len]
 
-        div = random.uniform(0.0, 0.1)
+        div = random.uniform(0.0, 0.05)
         num_muts = np.random.binomial(dup_len, div)
         if num_muts > 0:
             mut_offsets = np.random.choice(dup_len, size=num_muts, replace=False)
@@ -371,8 +370,8 @@ if __name__ == "__main__":
 
     all_results = []
 
-    genome_sizes_to_test = [100_000_00, 200_000_00, 500_000_00] * 5
-    # genome_sizes_to_test = [100_000_000]
+    N = 5
+    genome_sizes_to_test = [100_000_00] * N + [200_000_00] * N + [500_000_00] * N
 
     for g_size in genome_sizes_to_test:
         print(f"\n======================================")
@@ -380,7 +379,7 @@ if __name__ == "__main__":
         print(f"======================================")
             
         chrom_sizes = {"chr1": g_size}
-        num_dups = num_dups = g_size // 500_000
+        num_dups = g_size // 1_000_000
         
         true_pairs, fasta_path, chrom_offsets = generate_simulated_genome(chrom_sizes, num_dups=num_dups)
         
@@ -447,11 +446,6 @@ if __name__ == "__main__":
                     })
             except Exception as e:
                 print(f"BISER Failed: {e}")
-        
-        # Clean up fasta for this iteration
-        #for ext in ["", ".fai", ".sdx"]:
-        #    if os.path.exists(fasta_path + ext):
-        #        os.remove(fasta_path + ext)
 
     df_all = pd.DataFrame(all_results)
     if not df_all.empty:
