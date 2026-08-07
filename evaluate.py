@@ -367,8 +367,8 @@ if __name__ == "__main__":
 
     all_results = []
 
-    # genome_sizes_to_test = [100_000_00, 200_000_00, 500_000_00, 1_000_000_00, 1_500_000_00, 2_500_000_00]
-    genome_sizes_to_test = [100_000_000]
+    genome_sizes_to_test = [100_000_00, 200_000_00, 500_000_00]
+    # genome_sizes_to_test = [100_000_000]
 
     for g_size in genome_sizes_to_test:
         print(f"\n======================================")
@@ -486,16 +486,16 @@ if __name__ == "__main__":
     palette = {'Segtrace': 'blue', 'SEDEF': 'red', 'BISER': 'green'}
     markers = {'Segtrace': 'o', 'SEDEF': '*', 'BISER': 's'}
     
-    sns.scatterplot(data=df_all, x='Time(s)', y='F1-Score_bp', hue='Tool', style='Tool', 
+    sns.scatterplot(data=df_all, x='Time(s)', y='F1-Score_frag', hue='Tool', style='Tool', 
                     palette=palette, markers=markers, s=150, alpha=0.8, ax=ax3)
     
     # Draw lines connecting the points for each tool to show scaling trend
     for tool in df_all['Tool'].unique():
         tool_data = df_all[df_all['Tool'] == tool].sort_values(by='GenomeSize')
-        ax3.plot(tool_data['Time(s)'], tool_data['F1-Score_bp'], color=palette[tool], alpha=0.4)
+        ax3.plot(tool_data['Time(s)'], tool_data['F1-Score_frag'], color=palette[tool], alpha=0.4)
 
     ax3.set_xlabel('Time (s)')
-    ax3.set_ylabel('F1-Score (BP)')
+    ax3.set_ylabel('F1-Score (Frag)')
     ax3.set_title('F1-Score vs Execution Time')
     ax3.set_ylim(0, 1.1)
     ax3.legend()

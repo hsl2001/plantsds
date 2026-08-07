@@ -813,7 +813,7 @@ static inline void check_and_eval_flank_pair(SubclusterData *w, int tid,
                           w->regions[rb].flank_sketch.sketch_size
                       ? w->regions[ra].flank_sketch.sketch_size
                       : w->regions[rb].flank_sketch.sketch_size;
-  size_t min_shared = (size_t)ceil((double)min_sz * p_kmer);
+  size_t min_shared = (size_t)floor((double)min_sz * p_kmer);
   if (min_shared < 1)
     min_shared = 1;
 
