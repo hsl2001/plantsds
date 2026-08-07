@@ -922,63 +922,27 @@ void process_subcluster(void *data, long s, int tid) {
   }
 }
 
-static int compare_dup_region_by_subcluster(const void *a, const void *b) {
-  const SegtraceDupRegion *ra = (const SegtraceDupRegion *)a,
-                          *rb = (const SegtraceDupRegion *)b;
-  if (ra->subcluster_id != rb->subcluster_id)
-    return CMP(ra->subcluster_id, rb->subcluster_id);
-  int c_chr = strcmp(ra->chrom, rb->chrom);
-  if (c_chr != 0)
-    return c_chr;
-  if (ra->start != rb->start)
-    return CMP(ra->start, rb->start);
-  return CMP(ra->end, rb->end);
-}
-
 // ==============================================================
 // SECTION 5: REPORTING & FILE OUTPUT WRITERS
 // ==============================================================
 
 void write_dup_bed(const char *out_prefix, SegtraceDupRegion *dup_regions,
                    size_t n_merged) {
-  if (n_merged == 0)
-    return;
-
-  uint32_t max_subcid = 0;
-  for (size_t i = 0; i < n_merged; i++) {
-    if (dup_regions[i].subcluster_id > max_subcid)
-      max_subcid = dup_regions[i].subcluster_id;
-  }
-
-  uint32_t *counts = calloc(max_subcid + 1, sizeof(uint32_t));
-  if (counts) {
-    for (size_t i = 0; i < n_merged; i++) {
-      counts[dup_regions[i].subcluster_id]++;
-    }
-  }
-
   char path_buf[PATH_MAX];
   snprintf(path_buf, sizeof(path_buf), "%s.dup.bed", out_prefix);
   FILE *out_bed = fopen(path_buf, "w");
   if (!out_bed) {
-    if (counts)
-      free(counts);
     fprintf(stderr, "[ERROR] Cannot open output file: %s\n", path_buf);
     return;
   }
 
   fprintf(out_bed, "#chrom\tstart\tend\tcluster_id\tsubcluster_id\n");
   for (size_t i = 0; i < n_merged; i++) {
-    uint32_t scid = dup_regions[i].subcluster_id;
-    if (counts && counts[scid] < 2)
-      continue;
     fprintf(out_bed, "%s\t%zu\t%zu\t%s\t%u\n", dup_regions[i].chrom,
             dup_regions[i].start, dup_regions[i].end, dup_regions[i].cluster_id,
-            scid);
+            dup_regions[i].subcluster_id);
   }
   fclose(out_bed);
-  if (counts)
-    free(counts);
 }
 
 void write_dup_bedpe(const char *out_prefix, SegtraceDupRegion *dup_regions,
@@ -991,7 +955,7 @@ void write_dup_bedpe(const char *out_prefix, SegtraceDupRegion *dup_regions,
     return;
   memcpy(regions_copy, dup_regions, n_merged * sizeof(SegtraceDupRegion));
   qsort(regions_copy, n_merged, sizeof(SegtraceDupRegion),
-        compare_dup_region_by_subcluster);
+        compare_dup_region_by_cluster);
 
   char path_buf[PATH_MAX];
   snprintf(path_buf, sizeof(path_buf), "%s.dup.bedpe", out_prefix);
@@ -1005,7 +969,7 @@ void write_dup_bedpe(const char *out_prefix, SegtraceDupRegion *dup_regions,
   while (i < n_merged) {
     size_t j = i + 1;
     while (j < n_merged &&
-           regions_copy[i].subcluster_id == regions_copy[j].subcluster_id)
+           strcmp(regions_copy[i].cluster_id, regions_copy[j].cluster_id) == 0)
       j++;
 
     size_t cluster_size = j - i;
