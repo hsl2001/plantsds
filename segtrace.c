@@ -885,7 +885,7 @@ void process_subcluster(void *data, long s, int tid) {
   if (count <= 1)
     return;
 
-  double p_kmer = pow(0.80, (double)w->kmer_size);
+  double p_kmer = pow(0.90, (double)w->kmer_size);
 
   if (count <= 64) {
     for (size_t a = 0; a < count; a++) {
