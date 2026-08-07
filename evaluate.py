@@ -367,7 +367,7 @@ if __name__ == "__main__":
 
     all_results = []
 
-    genome_sizes_to_test = [100_000_00, 200_000_00, 500_000_00]
+    genome_sizes_to_test = [100_000_00, 200_000_00, 500_000_00] * 5
     # genome_sizes_to_test = [100_000_000]
 
     for g_size in genome_sizes_to_test:
