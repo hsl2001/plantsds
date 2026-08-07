@@ -117,8 +117,6 @@ typedef struct {
 } GenomeSeqLen;
 
 typedef struct {
-  const char *filename;
-  char bname[256];
   const Segtrace *r;
   uint64_t scale;
   size_t window_size;
@@ -251,8 +249,6 @@ void perform_subclustering(SegtraceDupRegion *regions, size_t n_merged,
 void process_subcluster(void *data, long i, int tid);
 void write_dup_bed(const char *out_prefix, SegtraceDupRegion *dup_regions,
                    size_t n_merged);
-void write_dup_bedpe(const char *out_prefix, SegtraceDupRegion *dup_regions,
-                     size_t n_merged);
 
 // 6. CORE ALGORITHMS
 void init_segtrace(Segtrace *r, size_t hash_window);

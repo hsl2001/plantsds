@@ -155,7 +155,6 @@ int main(int argc, char **argv) {
   perform_subclustering(dup_regions, n_merged, n_threads, r.hash_window);
 
   write_dup_bed(out_prefix, dup_regions, n_merged);
-  write_dup_bedpe(out_prefix, dup_regions, n_merged);
 
   for (size_t i = 0; i < n_merged; i++) {
     free(dup_regions[i].chrom);
@@ -946,40 +945,6 @@ void write_dup_bed(const char *out_prefix, SegtraceDupRegion *dup_regions,
             dup_regions[i].subcluster_id);
   }
   fclose(out_bed);
-}
-
-void write_dup_bedpe(const char *out_prefix, SegtraceDupRegion *dup_regions,
-                     size_t n_merged) {
-  if (n_merged == 0)
-    return;
-  char path_buf[PATH_MAX];
-  snprintf(path_buf, sizeof(path_buf), "%s.dup.bedpe", out_prefix);
-  FILE *out_bedpe = fopen(path_buf, "w");
-  if (!out_bedpe)
-    return;
-
-  for (size_t i = 0; i < n_merged; i++) {
-    for (size_t j = i + 1; j < n_merged; j++) {
-      if (strcmp(dup_regions[i].cluster_id, dup_regions[j].cluster_id) != 0)
-        continue;
-      if (dup_regions[i].subcluster_id == dup_regions[j].subcluster_id)
-        continue;
-      const char *c1 = dup_regions[i].chrom, *c2 = dup_regions[j].chrom;
-      size_t s1 = dup_regions[i].start, e1 = dup_regions[i].end;
-      size_t s2 = dup_regions[j].start, e2 = dup_regions[j].end;
-      if (strcmp(c1, c2) == 0 && s1 < e2 && s2 < e1)
-        continue;
-      int swap = (strcmp(c1, c2) > 0) ||
-                 (strcmp(c1, c2) == 0 && (s1 > s2 || (s1 == s2 && e1 > e2)));
-      if (swap)
-        fprintf(out_bedpe, "%s\t%zu\t%zu\t%s\t%zu\t%zu\n", c2, s2, e2, c1, s1,
-                e1);
-      else
-        fprintf(out_bedpe, "%s\t%zu\t%zu\t%s\t%zu\t%zu\n", c1, s1, e1, c2, s2,
-                e2);
-    }
-  }
-  fclose(out_bedpe);
 }
 
 // ==============================================================
