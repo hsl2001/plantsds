@@ -244,7 +244,8 @@ void merge_global_data(StreamWorkerData *workers, int num_files,
 // 4. DISCOVERY & DISTANCE CALCULATION
 void discover_and_compute(const uint64_t *all_hashes, WindowCoord *coords,
                           size_t n_windows, size_t window_size, int n_threads,
-                          uint32_t kmer_size, UnionFind *uf);
+                          uint32_t kmer_size, SegtraceDupEdge **out_edges,
+                          size_t *out_n_edges);
 void discover_compute_worker(void *data, long p, int tid);
 SegtraceDistResult calculate_window_dist(const uint64_t *all_hashes,
                                          const WindowCoord *wa,
@@ -252,8 +253,8 @@ SegtraceDistResult calculate_window_dist(const uint64_t *all_hashes,
                                          uint32_t kmer_size);
 
 // 5. REGION CLUSTERING & OUTPUT
-void build_duplicate_regions(UnionFind *uf, size_t num_sketches, int num_files,
-                             char **files, GenomeSeqLen *seq_lens,
+void build_duplicate_regions(const SegtraceDupEdge *all_edges, size_t n_edges,
+                             size_t window_size, GenomeSeqLen *seq_lens,
                              WindowCoord *coords,
                              SegtraceDupRegion **out_regions,
                              size_t *out_n_regions);

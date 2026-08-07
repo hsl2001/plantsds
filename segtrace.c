@@ -122,20 +122,20 @@ int main(int argc, char **argv) {
                     &num_sketches, &seq_lens, &num_seqs);
   free(workers);
 
-  UnionFind uf;
-  init_unionfind(&uf, num_sketches);
+  SegtraceDupEdge *all_edges = NULL;
+  size_t n_all_edges = 0;
 
   fprintf(stderr,
           "[segtrace] Discovering candidates and computing distances...\n");
   discover_and_compute(all_hashes, coords, num_sketches, window_size, n_threads,
-                       r.hash_window, &uf);
+                       r.hash_window, &all_edges, &n_all_edges);
 
   SegtraceDupRegion *dup_regions = NULL;
   size_t n_dup_regions = 0;
-  build_duplicate_regions(&uf, num_sketches, num_files, files, seq_lens, coords,
+  build_duplicate_regions(all_edges, n_all_edges, window_size, seq_lens, coords,
                           &dup_regions, &n_dup_regions);
 
-  free_unionfind(&uf);
+  free(all_edges);
   free(all_hashes);
   all_hashes = NULL;
   free(coords);
@@ -428,7 +428,8 @@ static int compare_dup_edge(const void *a, const void *b) {
 
 void discover_and_compute(const uint64_t *all_hashes, WindowCoord *coords,
                           size_t n_windows, size_t window_size, int n_threads,
-                          uint32_t kmer_size, UnionFind *uf) {
+                          uint32_t kmer_size, SegtraceDupEdge **out_edges,
+                          size_t *out_n_edges) {
   DiscoverComputeData w = {
       .all_hashes = all_hashes,
       .coords = coords,
@@ -493,31 +494,13 @@ void discover_and_compute(const uint64_t *all_hashes, WindowCoord *coords,
 
   g_edge_coords = coords;
   qsort(all_edges, n_all, sizeof(SegtraceDupEdge), compare_dup_edge);
-
-  /* Pairwise overlap clustering: union windows that belong to the same aligned
-   * SD block */
-  for (size_t i = 0; i < n_all; i++) {
-    uint32_t wa1 = all_edges[i].win_a, wb1 = all_edges[i].win_b;
-    for (size_t j = i + 1; j < n_all; j++) {
-      uint32_t wa2 = all_edges[j].win_a, wb2 = all_edges[j].win_b;
-      if (coords[wa2].seq_id != coords[wa1].seq_id)
-        break;
-      if (coords[wa2].start > coords[wa1].start + window_size)
-        break;
-
-      if (coords[wb2].seq_id == coords[wb1].seq_id &&
-          ABS_DIFF(coords[wb2].start, coords[wb1].start) <= window_size) {
-        union_unionfind(uf, wa1, wa2);
-        union_unionfind(uf, wb1, wb2);
-        union_unionfind(uf, wa1, wb1);
-      }
-    }
-  }
-  free(all_edges);
   g_edge_coords = NULL;
 
   fprintf(stderr, "[segtrace] Total edges after distance filter: %zu\n",
           total_edges);
+
+  *out_edges = all_edges;
+  *out_n_edges = n_all;
 }
 
 void discover_compute_worker(void *data, long p, int tid) {
@@ -590,54 +573,97 @@ SegtraceDistResult calculate_window_dist(const uint64_t *all_hashes,
 // SECTION 4: CLUSTERING, LOCUS MERGING & FLANKING SUBCLUSTERING
 // ==============================================================
 
-void build_duplicate_regions(UnionFind *uf, size_t num_sketches, int num_files,
-                             char **files, GenomeSeqLen *seq_lens,
+void build_duplicate_regions(const SegtraceDupEdge *all_edges, size_t n_edges,
+                             size_t window_size, GenomeSeqLen *seq_lens,
                              WindowCoord *coords,
                              SegtraceDupRegion **out_regions,
                              size_t *out_n_regions) {
-  (void)num_files;
-  (void)files;
-
-  uint32_t *comp_size = calloc(num_sketches, sizeof(uint32_t));
-  for (size_t i = 0; i < num_sketches; i++) {
-    comp_size[find_unionfind(uf, (uint32_t)i)]++;
+  if (n_edges == 0) {
+    *out_regions = NULL;
+    *out_n_regions = 0;
+    return;
   }
 
-  uint32_t *cluster_map = calloc(num_sketches, sizeof(uint32_t));
-  uint32_t next_cluster_id = 1;
-  for (size_t i = 0; i < num_sketches; i++) {
-    uint32_t root = find_unionfind(uf, (uint32_t)i);
-    if (comp_size[root] >= 2 && cluster_map[root] == 0) {
-      cluster_map[root] = next_cluster_id++;
+  UnionFind uf;
+  init_unionfind(&uf, n_edges);
+
+  g_edge_coords = coords;
+
+  /* 2D Block Clustering: union edges if they belong to the same (chrA, chrB)
+   * pair and overlap in 2D space */
+  for (size_t i = 0; i < n_edges; i++) {
+    uint32_t wa1 = all_edges[i].win_a, wb1 = all_edges[i].win_b;
+    uint32_t sa1 = coords[wa1].seq_id, sb1 = coords[wb1].seq_id;
+
+    for (size_t j = i + 1; j < n_edges; j++) {
+      uint32_t wa2 = all_edges[j].win_a, wb2 = all_edges[j].win_b;
+      uint32_t sa2 = coords[wa2].seq_id, sb2 = coords[wb2].seq_id;
+
+      if (sa2 != sa1 || sb2 != sb1)
+        break; /* Different chromosome pair! */
+      if (coords[wa2].start > coords[wa1].start + window_size)
+        break; /* Query start gap > window_size */
+
+      if (ABS_DIFF(coords[wb2].start, coords[wb1].start) <= window_size) {
+        union_unionfind(&uf, (uint32_t)i, (uint32_t)j);
+      }
     }
+  }
+
+  uint32_t *edge_cluster = calloc(n_edges, sizeof(uint32_t));
+  uint32_t next_cluster_id = 1;
+
+  for (size_t i = 0; i < n_edges; i++) {
+    uint32_t root = find_unionfind(&uf, (uint32_t)i);
+    if (edge_cluster[root] == 0) {
+      edge_cluster[root] = next_cluster_id++;
+    }
+    edge_cluster[i] = edge_cluster[root];
   }
 
   size_t n_dup_regions = 0, cap_dup_regions = 0;
   SegtraceDupRegion *dup_regions = NULL;
-  for (size_t i = 0; i < num_sketches; i++) {
-    uint32_t root = find_unionfind(uf, (uint32_t)i);
-    if (cluster_map[root] == 0)
-      continue;
 
+  for (size_t i = 0; i < n_edges; i++) {
+    uint32_t cid = edge_cluster[i];
     char label[32];
-    snprintf(label, sizeof(label), "%u", cluster_map[root]);
+    snprintf(label, sizeof(label), "%u", cid);
 
-    char chrom_name[512];
-    snprintf(chrom_name, sizeof(chrom_name), "%s-%s",
-             seq_lens[coords[i].seq_id].genome, seq_lens[coords[i].seq_id].seq);
+    uint32_t wa = all_edges[i].win_a;
+    uint32_t wb = all_edges[i].win_b;
+
+    char chrom_a[512], chrom_b[512];
+    snprintf(chrom_a, sizeof(chrom_a), "%s-%s",
+             seq_lens[coords[wa].seq_id].genome,
+             seq_lens[coords[wa].seq_id].seq);
+    snprintf(chrom_b, sizeof(chrom_b), "%s-%s",
+             seq_lens[coords[wb].seq_id].genome,
+             seq_lens[coords[wb].seq_id].seq);
 
     DA_PUSH(dup_regions, n_dup_regions, cap_dup_regions,
-            ((SegtraceDupRegion){.chrom = strdup(chrom_name),
-                                 .start = coords[i].start,
-                                 .end = coords[i].end,
+            ((SegtraceDupRegion){.chrom = strdup(chrom_a),
+                                 .start = coords[wa].start,
+                                 .end = coords[wa].end,
                                  .cluster_id = strdup(label),
-                                 .copy_count = comp_size[root],
+                                 .copy_count = 2,
                                  .subcluster_id = 0,
                                  .flank_sketch = {0},
-                                 .window_idx = coords[i].window_idx}));
+                                 .window_idx = coords[wa].window_idx}));
+
+    DA_PUSH(dup_regions, n_dup_regions, cap_dup_regions,
+            ((SegtraceDupRegion){.chrom = strdup(chrom_b),
+                                 .start = coords[wb].start,
+                                 .end = coords[wb].end,
+                                 .cluster_id = strdup(label),
+                                 .copy_count = 2,
+                                 .subcluster_id = 0,
+                                 .flank_sketch = {0},
+                                 .window_idx = coords[wb].window_idx}));
   }
-  free(comp_size);
-  free(cluster_map);
+
+  free(edge_cluster);
+  free_unionfind(&uf);
+  g_edge_coords = NULL;
 
   *out_regions = dup_regions;
   *out_n_regions = n_dup_regions;
