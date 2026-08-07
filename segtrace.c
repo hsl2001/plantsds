@@ -479,7 +479,6 @@ void discover_and_compute(const uint64_t *all_hashes, WindowCoord *coords,
         SWAP(uint32_t, wa, wb);
       }
       all_edges[n_all++] = (SegtraceDupEdge){wa, wb, w.t_edges[t][k].distance};
-      union_unionfind(uf, wa, wb);
     }
     free(w.t_edges[t]);
     free(w.t_bloom[t]);
@@ -510,6 +509,7 @@ void discover_and_compute(const uint64_t *all_hashes, WindowCoord *coords,
           ABS_DIFF(coords[wb2].start, coords[wb1].start) <= window_size) {
         union_unionfind(uf, wa1, wa2);
         union_unionfind(uf, wb1, wb2);
+        union_unionfind(uf, wa1, wb1);
       }
     }
   }
