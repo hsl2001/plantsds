@@ -11,39 +11,19 @@
 KSEQ_INIT(gzFile, gzread)
 KHASH_MAP_INIT_STR(genome_map, uint32_t)
 
-/* 2-bit nucleotide encoding: A = 00, C = 01, G = 10, T = 11. Soft-masked
- * (lowercase) = -1 */
+/* 2-bit nucleotide encoding: A = 00, C = 01, G = 10, T = 11. Soft-masked = -1
+ */
 const int8_t BASE_LOOKUP[256] = {
-    -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
-    -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
-    -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
-    -1, -1, -1, -1, -1, -1, -1, -1, 0,  -1, 1,  -1, -1, -1, 2,  -1, -1, -1, -1,
-    -1, -1, -1, -1, -1, -1, -1, -1, 3,  -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
-    -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
-    -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
-    -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
-    -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
-    -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
-    -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
-    -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
-    -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
-    -1, -1, -1, -1, -1, -1, -1, -1, -1};
+    [0 ... 64] = -1,  ['A'] = 0,        [66] = -1,
+    ['C'] = 1,        [68 ... 70] = -1, ['G'] = 2,
+    [72 ... 83] = -1, ['T'] = 3,        [85 ... 255] = -1};
 
 const int8_t BASE_LOOKUP_NO_MASK[256] = {
-    -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
-    -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
-    -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
-    -1, -1, -1, -1, -1, -1, -1, -1, 0,  -1, 1,  -1, -1, -1, 2,  -1, -1, -1, -1,
-    -1, -1, -1, -1, -1, -1, -1, -1, 3,  -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
-    -1, 0,  -1, 1,  -1, -1, -1, 2,  -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
-    -1, 3,  -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
-    -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
-    -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
-    -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
-    -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
-    -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
-    -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
-    -1, -1, -1, -1, -1, -1, -1, -1, -1};
+    [0 ... 64] = -1,    ['A'] = 0, [66] = -1,          ['C'] = 1,
+    [68 ... 70] = -1,   ['G'] = 2, [72 ... 83] = -1,   ['T'] = 3,
+    [85 ... 96] = -1,   ['a'] = 0, [98] = -1,          ['c'] = 1,
+    [100 ... 102] = -1, ['g'] = 2, [104 ... 115] = -1, ['t'] = 3,
+    [117 ... 255] = -1};
 
 // ==============================================================
 // SECTION 1: ENTRY POINT & CLI PARSING
@@ -250,6 +230,8 @@ StreamWorkerData *extract_all_windows(char **files, int num_files,
 
   size_t cap_jobs = 16, num_jobs = 0;
   SeqChunkJob *jobs = malloc(cap_jobs * sizeof(SeqChunkJob));
+  uint8_t **all_seq_copies = NULL;
+  size_t n_seq_copies = 0, cap_seq_copies = 0;
 
   for (int f = 0; f < num_files; f++) {
     char bname[256];
@@ -277,6 +259,7 @@ StreamWorkerData *extract_all_windows(char **files, int num_files,
 
       uint8_t *seq_copy = malloc(len + 1);
       memcpy(seq_copy, ks->seq.s, len + 1);
+      DA_PUSH(all_seq_copies, n_seq_copies, cap_seq_copies, seq_copy);
 
       size_t chunk_size = len / (n_threads * 4);
       if (chunk_size < 100000)
@@ -334,24 +317,9 @@ StreamWorkerData *extract_all_windows(char **files, int num_files,
     free(job->coords);
   }
 
-  uint8_t **freed_seqs = NULL;
-  size_t n_freed = 0, cap_freed = 0;
-  for (size_t j = 0; j < num_jobs; j++) {
-    uint8_t *p = (uint8_t *)jobs[j].seq_ptr;
-    int already = 0;
-    for (size_t k = 0; k < n_freed; k++) {
-      if (freed_seqs[k] == p) {
-        already = 1;
-        break;
-      }
-    }
-    if (!already) {
-      DA_RESERVE(freed_seqs, cap_freed, n_freed + 1);
-      freed_seqs[n_freed++] = p;
-      free(p);
-    }
-  }
-  free(freed_seqs);
+  for (size_t i = 0; i < n_seq_copies; i++)
+    free(all_seq_copies[i]);
+  free(all_seq_copies);
   free(jobs);
   return workers;
 }
@@ -480,33 +448,34 @@ SegtraceDistResult calculate_window_dist(const uint64_t *all_hashes,
 
 static inline int check_collinear_neighbor(DiscoverComputeData *w, uint32_t wa,
                                            uint32_t wb, size_t min_shared) {
-  // 1. Forward collinear neighbor: (wa + 1, wb + 1)
-  if (wa + 1 < w->n_windows && wb + 1 < w->n_windows &&
-      w->coords[wa + 1].seq_id == w->coords[wa].seq_id &&
-      w->coords[wb + 1].seq_id == w->coords[wb].seq_id) {
-    if (calculate_window_dist(w->all_hashes, &w->coords[wa + 1],
-                              &w->coords[wb + 1], w->kmer_size)
-            .shared_hashes >= min_shared)
-      return 1;
-  }
-  // 2. Inverted collinear neighbor: (wa + 1, wb - 1)
-  if (wa + 1 < w->n_windows && wb > 0 &&
-      w->coords[wa + 1].seq_id == w->coords[wa].seq_id &&
-      w->coords[wb - 1].seq_id == w->coords[wb].seq_id) {
-    if (calculate_window_dist(w->all_hashes, &w->coords[wa + 1],
-                              &w->coords[wb - 1], w->kmer_size)
-            .shared_hashes >= min_shared)
-      return 1;
-  }
-  // 3. Backward collinear neighbor: (wa - 1, wb - 1)
-  if (wa > 0 && wb > 0 && w->coords[wa - 1].seq_id == w->coords[wa].seq_id &&
-      w->coords[wb - 1].seq_id == w->coords[wb].seq_id) {
-    if (calculate_window_dist(w->all_hashes, &w->coords[wa - 1],
-                              &w->coords[wb - 1], w->kmer_size)
-            .shared_hashes >= min_shared)
-      return 1;
-  }
-  return 0;
+  int fwd_r = (wa + 1 < w->n_windows && wb + 1 < w->n_windows &&
+               w->coords[wa + 1].seq_id == w->coords[wa].seq_id &&
+               w->coords[wb + 1].seq_id == w->coords[wb].seq_id &&
+               calculate_window_dist(w->all_hashes, &w->coords[wa + 1],
+                                     &w->coords[wb + 1], w->kmer_size)
+                       .shared_hashes >= min_shared);
+  int fwd_l =
+      (wa > 0 && wb > 0 && w->coords[wa - 1].seq_id == w->coords[wa].seq_id &&
+       w->coords[wb - 1].seq_id == w->coords[wb].seq_id &&
+       calculate_window_dist(w->all_hashes, &w->coords[wa - 1],
+                             &w->coords[wb - 1], w->kmer_size)
+               .shared_hashes >= min_shared);
+  if (fwd_r && fwd_l)
+    return 1;
+
+  int inv_r = (wa + 1 < w->n_windows && wb > 0 &&
+               w->coords[wa + 1].seq_id == w->coords[wa].seq_id &&
+               w->coords[wb - 1].seq_id == w->coords[wb].seq_id &&
+               calculate_window_dist(w->all_hashes, &w->coords[wa + 1],
+                                     &w->coords[wb - 1], w->kmer_size)
+                       .shared_hashes >= min_shared);
+  int inv_l = (wa > 0 && wb + 1 < w->n_windows &&
+               w->coords[wa - 1].seq_id == w->coords[wa].seq_id &&
+               w->coords[wb + 1].seq_id == w->coords[wb].seq_id &&
+               calculate_window_dist(w->all_hashes, &w->coords[wa - 1],
+                                     &w->coords[wb + 1], w->kmer_size)
+                       .shared_hashes >= min_shared);
+  return (inv_r && inv_l);
 }
 
 void discover_compute_worker(void *data, long p, int tid) {
@@ -1145,19 +1114,14 @@ void free_unionfind(UnionFind *uf) {
 }
 
 void get_basename(const char *filename, char *basename, size_t size) {
-  const char *last_slash = strrchr(filename, '/');
-  const char *name = last_slash ? last_slash + 1 : filename;
+  const char *slash = strrchr(filename, '/');
+  const char *name = slash ? slash + 1 : filename;
   const char *dot = strrchr(name, '.');
-  if (dot && dot != name) {
-    size_t len = dot - name;
-    if (len >= size)
-      len = size - 1;
-    strncpy(basename, name, len);
-    basename[len] = '\0';
-  } else {
-    strncpy(basename, name, size - 1);
-    basename[size - 1] = '\0';
-  }
+  size_t len = (dot && dot != name) ? (size_t)(dot - name) : strlen(name);
+  if (len >= size)
+    len = size - 1;
+  memcpy(basename, name, len);
+  basename[len] = '\0';
 }
 
 inline uint64_t mix_hash(uint64_t hash_value, uint64_t seed) {
