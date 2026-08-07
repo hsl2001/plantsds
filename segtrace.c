@@ -42,7 +42,7 @@ void print_usage(void) {
          "  -e: hash seed (default: 42)\n"
          "  -w: window size in bp (default: 1024)\n"
          "  -t: step size in bp (default: 0 [auto: 33%% of window size])\n"
-         "  -b: minimum valid bases per window (default: 0 [auto: 66%% of "
+         "  -b: minimum valid bases per window (default: 0 [auto: 50%% of "
          "window size])\n"
          "  -f: flanking sequence length in bp for sub-clustering (default: "
          "1000)\n"
@@ -100,7 +100,7 @@ int main(int argc, char **argv) {
   if (step_size == 0)
     step_size = window_size / 3;
   if (min_bases == 0)
-    min_bases = (size_t)(window_size * 2 / 3);
+    min_bases = (size_t)(window_size / 2);
   if (opt.ind == argc) {
     fprintf(stderr, "[ERROR] Input FASTA files are required.\n");
     return 1;
@@ -526,7 +526,7 @@ void discover_compute_worker(void *data, long p, int tid) {
               w_data->coords[wa].sketch_size < w_data->coords[wb].sketch_size
                   ? w_data->coords[wa].sketch_size
                   : w_data->coords[wb].sketch_size;
-          size_t min_shared = (size_t)floor((double)min_sz * p_kmer);
+          size_t min_shared = (size_t)ceil((double)min_sz * p_kmer);
           if (min_shared < 1)
             min_shared = 1;
 
@@ -849,7 +849,7 @@ static inline void check_and_eval_flank_pair(SubclusterData *w, int tid,
                           w->regions[rb].flank_sketch.sketch_size
                       ? w->regions[ra].flank_sketch.sketch_size
                       : w->regions[rb].flank_sketch.sketch_size;
-  size_t min_shared = (size_t)floor((double)min_sz * p_kmer);
+  size_t min_shared = (size_t)ceil((double)min_sz * p_kmer);
   if (min_shared < 1)
     min_shared = 1;
 
