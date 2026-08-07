@@ -505,7 +505,7 @@ void discover_compute_worker(void *data, long p, int tid) {
   qsort(b->entries, b->size, sizeof(HashWindowEntry), compare_hash_entry);
   memset(w_data->t_bloom[tid], 0, BLOOM_SIZE_BYTES);
 
-  double p_kmer = pow(0.85, (double)w_data->kmer_size);
+  double p_kmer = pow(0.9, (double)w_data->kmer_size);
   size_t i = 0;
   while (i < b->size) {
     size_t j = i + 1;
@@ -872,7 +872,7 @@ void process_subcluster(void *data, long s, int tid) {
   if (count <= 1)
     return;
 
-  double p_kmer = pow(0.85, (double)w->kmer_size);
+  double p_kmer = pow(0.9, (double)w->kmer_size);
 
   if (count <= 64) {
     for (size_t a = 0; a < count; a++) {
