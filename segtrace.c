@@ -608,7 +608,7 @@ void build_duplicate_regions(UnionFind *uf, size_t num_sketches,
 
     size_t j = i + 1;
     while (j < num_sketches && coords[j].seq_id == seq_i &&
-           coords[j].start <= max_end + window_size) {
+           coords[j].start <= max_end + 2 * window_size) {
       uint32_t root_j = find_unionfind(uf, (uint32_t)j);
       if (cluster_map[root_j] != 0) {
         if (coords[j].end > max_end)
