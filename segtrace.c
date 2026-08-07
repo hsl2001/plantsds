@@ -463,7 +463,7 @@ void discover_compute_worker(void *data, long p, int tid) {
       j++;
     size_t run_len = j - i;
 
-    if (run_len >= 2 && run_len <= 10) {
+    if (run_len >= 2 && run_len <= MAX_RUN_LEN) {
       for (size_t a = i; a < j; a++) {
         for (size_t b_idx = a + 1; b_idx < j; b_idx++) {
           uint32_t wa = b->entries[a].window_id,
@@ -870,7 +870,7 @@ void process_subcluster(void *data, long s, int tid) {
       while (j < n_entries && entries[j].hash == entries[i].hash)
         j++;
       size_t run_len = j - i;
-      if (run_len >= 2 && run_len <= 1000) {
+      if (run_len >= 2 && run_len <= MAX_RUN_LEN) {
         for (size_t a = i; a < j; a++) {
           for (size_t b = a + 1; b < j; b++) {
             uint32_t la = entries[a].local_idx, lb = entries[b].local_idx;
