@@ -122,20 +122,20 @@ int main(int argc, char **argv) {
                     &num_sketches, &seq_lens, &num_seqs);
   free(workers);
 
-  SegtraceDupEdge *all_edges = NULL;
-  size_t n_all_edges = 0;
+  UnionFind uf;
+  init_unionfind(&uf, num_sketches);
 
   fprintf(stderr,
           "[segtrace] Discovering candidates and computing distances...\n");
   discover_and_compute(all_hashes, coords, num_sketches, window_size, n_threads,
-                       r.hash_window, &all_edges, &n_all_edges);
+                       r.hash_window, &uf);
 
   SegtraceDupRegion *dup_regions = NULL;
   size_t n_dup_regions = 0;
-  build_duplicate_regions(all_edges, n_all_edges, window_size, seq_lens, coords,
+  build_duplicate_regions(&uf, num_sketches, num_files, files, seq_lens, coords,
                           &dup_regions, &n_dup_regions);
 
-  free(all_edges);
+  free_unionfind(&uf);
   free(all_hashes);
   all_hashes = NULL;
   free(coords);
@@ -428,8 +428,7 @@ static int compare_dup_edge(const void *a, const void *b) {
 
 void discover_and_compute(const uint64_t *all_hashes, WindowCoord *coords,
                           size_t n_windows, size_t window_size, int n_threads,
-                          uint32_t kmer_size, SegtraceDupEdge **out_edges,
-                          size_t *out_n_edges) {
+                          uint32_t kmer_size, UnionFind *uf) {
   DiscoverComputeData w = {
       .all_hashes = all_hashes,
       .coords = coords,
@@ -494,13 +493,42 @@ void discover_and_compute(const uint64_t *all_hashes, WindowCoord *coords,
 
   g_edge_coords = coords;
   qsort(all_edges, n_all, sizeof(SegtraceDupEdge), compare_dup_edge);
+
+  /* Positional Window UnionFind: Only union adjacent windows on the SAME
+   * sequence */
+  uint8_t *valid_edge = calloc(n_all, sizeof(uint8_t));
+  for (size_t i = 0; i < n_all; i++) {
+    uint32_t wa1 = all_edges[i].win_a, wb1 = all_edges[i].win_b;
+    for (size_t j = i + 1; j < n_all; j++) {
+      uint32_t wa2 = all_edges[j].win_a, wb2 = all_edges[j].win_b;
+      if (coords[wa2].seq_id != coords[wa1].seq_id)
+        break;
+      if (coords[wa2].start > coords[wa1].start + window_size)
+        break;
+
+      if (coords[wb2].seq_id == coords[wb1].seq_id &&
+          ABS_DIFF(coords[wb2].start, coords[wb1].start) <= window_size) {
+        union_unionfind(uf, wa1, wa2);
+        union_unionfind(uf, wb1, wb2);
+        union_unionfind(uf, wa1, wb1);
+        valid_edge[i] = 1;
+        valid_edge[j] = 1;
+      }
+    }
+  }
+
+  /* Collect unique valid edges */
+  size_t n_valid = 0;
+  for (size_t i = 0; i < n_all; i++) {
+    if (valid_edge[i])
+      all_edges[n_valid++] = all_edges[i];
+  }
+  free(valid_edge);
   g_edge_coords = NULL;
 
-  fprintf(stderr, "[segtrace] Total edges after distance filter: %zu\n",
-          total_edges);
-
-  *out_edges = all_edges;
-  *out_n_edges = n_all;
+  fprintf(stderr,
+          "[segtrace] Total edges after distance filter: %zu (valid: %zu)\n",
+          total_edges, n_valid);
 }
 
 void discover_compute_worker(void *data, long p, int tid) {
@@ -539,7 +567,6 @@ void discover_compute_worker(void *data, long p, int tid) {
                   ? w_data->coords[wa].sketch_size
                   : w_data->coords[wb].sketch_size;
           size_t min_shared = (size_t)floor((double)min_sz * p_kmer);
-          // printf("[DEBUG] min_shared: %zu\n", min_shared);
           if (min_shared < 1)
             min_shared = 1;
 
@@ -573,110 +600,55 @@ SegtraceDistResult calculate_window_dist(const uint64_t *all_hashes,
 // SECTION 4: CLUSTERING, LOCUS MERGING & FLANKING SUBCLUSTERING
 // ==============================================================
 
-typedef struct {
-  uint32_t seq_a;
-  size_t start_a;
-  size_t end_a;
-  uint32_t seq_b;
-  size_t start_b;
-  size_t end_b;
-  uint32_t window_idx_a;
-  uint32_t window_idx_b;
-} Segtrace2DBlock;
-
-void build_duplicate_regions(const SegtraceDupEdge *all_edges, size_t n_edges,
-                             size_t window_size, GenomeSeqLen *seq_lens,
+void build_duplicate_regions(UnionFind *uf, size_t num_sketches, int num_files,
+                             char **files, GenomeSeqLen *seq_lens,
                              WindowCoord *coords,
                              SegtraceDupRegion **out_regions,
                              size_t *out_n_regions) {
-  if (n_edges == 0) {
-    *out_regions = NULL;
-    *out_n_regions = 0;
-    return;
+  (void)num_files;
+  (void)files;
+
+  uint32_t *comp_size = calloc(num_sketches, sizeof(uint32_t));
+  for (size_t i = 0; i < num_sketches; i++) {
+    comp_size[find_unionfind(uf, (uint32_t)i)]++;
   }
 
-  /* In-place 2D block merging on sorted all_edges (O(N) single pass) */
-  Segtrace2DBlock *blocks = malloc(n_edges * sizeof(Segtrace2DBlock));
-  size_t n_blocks = 0;
-
-  for (size_t i = 0; i < n_edges; i++) {
-    uint32_t wa = all_edges[i].win_a;
-    uint32_t wb = all_edges[i].win_b;
-    uint32_t sa = coords[wa].seq_id, sb = coords[wb].seq_id;
-    size_t sta = coords[wa].start, eda = coords[wa].end;
-    size_t stb = coords[wb].start, edb = coords[wb].end;
-
-    if (n_blocks > 0) {
-      Segtrace2DBlock *prev = &blocks[n_blocks - 1];
-      size_t b_span = prev->end_b > prev->start_b ? prev->end_b - prev->start_b
-                                                  : window_size;
-      size_t diff_b =
-          stb >= prev->start_b ? stb - prev->start_b : prev->start_b - stb;
-
-      if (prev->seq_a == sa && prev->seq_b == sb &&
-          sta <= prev->end_a + window_size && diff_b <= b_span + window_size) {
-        if (eda > prev->end_a)
-          prev->end_a = eda;
-        if (stb < prev->start_b)
-          prev->start_b = stb;
-        if (edb > prev->end_b)
-          prev->end_b = edb;
-        if (coords[wa].window_idx > prev->window_idx_a)
-          prev->window_idx_a = coords[wa].window_idx;
-        if (coords[wb].window_idx > prev->window_idx_b)
-          prev->window_idx_b = coords[wb].window_idx;
-        continue;
-      }
+  uint32_t *cluster_map = calloc(num_sketches, sizeof(uint32_t));
+  uint32_t next_cluster_id = 1;
+  for (size_t i = 0; i < num_sketches; i++) {
+    uint32_t root = find_unionfind(uf, (uint32_t)i);
+    if (comp_size[root] >= 2 && cluster_map[root] == 0) {
+      cluster_map[root] = next_cluster_id++;
     }
-
-    blocks[n_blocks++] = (Segtrace2DBlock){
-        .seq_a = sa,
-        .start_a = sta,
-        .end_a = eda,
-        .seq_b = sb,
-        .start_b = stb,
-        .end_b = edb,
-        .window_idx_a = coords[wa].window_idx,
-        .window_idx_b = coords[wb].window_idx,
-    };
   }
 
-  /* Allocate SegtraceDupRegion ONLY for the merged SD blocks */
   size_t n_dup_regions = 0, cap_dup_regions = 0;
   SegtraceDupRegion *dup_regions = NULL;
+  for (size_t i = 0; i < num_sketches; i++) {
+    uint32_t root = find_unionfind(uf, (uint32_t)i);
+    if (cluster_map[root] == 0)
+      continue;
 
-  for (size_t i = 0; i < n_blocks; i++) {
     char label[32];
-    snprintf(label, sizeof(label), "%zu", i + 1);
+    snprintf(label, sizeof(label), "%u", cluster_map[root]);
 
-    char chrom_a[512], chrom_b[512];
-    snprintf(chrom_a, sizeof(chrom_a), "%s-%s",
-             seq_lens[blocks[i].seq_a].genome, seq_lens[blocks[i].seq_a].seq);
-    snprintf(chrom_b, sizeof(chrom_b), "%s-%s",
-             seq_lens[blocks[i].seq_b].genome, seq_lens[blocks[i].seq_b].seq);
+    char chrom_name[512];
+    snprintf(chrom_name, sizeof(chrom_name), "%s-%s",
+             seq_lens[coords[i].seq_id].genome, seq_lens[coords[i].seq_id].seq);
 
     DA_PUSH(dup_regions, n_dup_regions, cap_dup_regions,
-            ((SegtraceDupRegion){.chrom = strdup(chrom_a),
-                                 .start = blocks[i].start_a,
-                                 .end = blocks[i].end_a,
+            ((SegtraceDupRegion){.chrom = strdup(chrom_name),
+                                 .start = coords[i].start,
+                                 .end = coords[i].end,
                                  .cluster_id = strdup(label),
-                                 .copy_count = 2,
+                                 .copy_count = comp_size[root],
                                  .subcluster_id = 0,
                                  .flank_sketch = {0},
-                                 .window_idx = blocks[i].window_idx_a}));
-
-    DA_PUSH(dup_regions, n_dup_regions, cap_dup_regions,
-            ((SegtraceDupRegion){.chrom = strdup(chrom_b),
-                                 .start = blocks[i].start_b,
-                                 .end = blocks[i].end_b,
-                                 .cluster_id = strdup(label),
-                                 .copy_count = 2,
-                                 .subcluster_id = 0,
-                                 .flank_sketch = {0},
-                                 .window_idx = blocks[i].window_idx_b}));
+                                 .window_idx = coords[i].window_idx}));
   }
+  free(comp_size);
+  free(cluster_map);
 
-  free(blocks);
   *out_regions = dup_regions;
   *out_n_regions = n_dup_regions;
 }
