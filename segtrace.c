@@ -29,15 +29,7 @@ const int8_t BASE_LOOKUP[256] = {
     -1, -1, -1, -1, -1, -1, -1, -1, -1};
 
 // ==============================================================
-// SECTION 1: FORWARD DECLARATIONS & COMPARATORS
-// ==============================================================
-
-static int compare_dup_region_by_pos(const void *a, const void *b);
-static int compare_dup_region_by_cluster(const void *a, const void *b);
-static inline uint64_t splitmix64(uint64_t x);
-
-// ==============================================================
-// SECTION 2: ENTRY POINT & CLI PARSING
+// SECTION 1: ENTRY POINT & CLI PARSING
 // ==============================================================
 
 void print_usage(void) {
@@ -48,15 +40,14 @@ void print_usage(void) {
          "  -s: scale factor (default: 16)\n"
          "  -e: hash seed (default: 42)\n"
          "  -w: window size in bp (default: 1024)\n"
-         "  -t: step size in bp (default: 0 [auto: 80%% of window size])\n"
+         "  -t: step size in bp (default: 0 [auto: 50%% of window size])\n"
          "  -b: minimum valid bases per window (default: 1000)\n"
          "  -d: maximum distance to consider as copy (default: 0.10)\n"
          "  -D: sub-cluster distance threshold (default: 0.3)\n"
          "  -f: flanking size in bp for sub-clustering (default: 1000)\n"
          "  -o: output file prefix (default: segtrace)\n"
          "  -p: number of threads (default: 8)\n"
-         "  -h, --help: show this help message\n"
-         "\n");
+         "  -h, --help: show this help message\n\n");
 }
 
 int main(int argc, char **argv) {
@@ -64,7 +55,6 @@ int main(int argc, char **argv) {
     print_usage();
     return 1;
   }
-
   for (int i = 1; i < argc; i++) {
     if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
       print_usage();
@@ -73,15 +63,10 @@ int main(int argc, char **argv) {
   }
 
   uint32_t def_kmer_size = 21;
-  uint64_t def_scale = 16;
-  uint64_t def_hash_seed = 42;
-  size_t window_size = 1024;
-  size_t step_size = 0; /* 0 = auto (50% of window_size) */
-  size_t min_bases = 1000;
+  uint64_t def_scale = 16, def_hash_seed = 42;
+  size_t window_size = 1024, step_size = 0, min_bases = 1000, flank_size = 1000;
   const char *out_prefix = "segtrace";
   int n_threads = 8;
-  double subcluster_dist = 0.3;
-  size_t flank_size = 1000;
 
   ketopt_t opt = KETOPT_INIT;
   int c;
@@ -105,8 +90,6 @@ int main(int argc, char **argv) {
       out_prefix = opt.arg;
     else if (c == 'p')
       n_threads = atoi(opt.arg) < 1 ? 1 : atoi(opt.arg);
-    else if (c == 'D')
-      subcluster_dist = atof(opt.arg);
     else if (c == 'f')
       flank_size = (size_t)strtoull(opt.arg, NULL, 10);
     else
@@ -114,8 +97,7 @@ int main(int argc, char **argv) {
   }
 
   if (step_size == 0)
-    step_size = window_size / 2;
-
+    step_size = window_size / 3;
   if (opt.ind == argc) {
     fprintf(stderr, "[ERROR] Input FASTA files are required.\n");
     return 1;
@@ -130,9 +112,8 @@ int main(int argc, char **argv) {
 
   uint64_t *all_hashes = NULL;
   WindowCoord *coords = NULL;
-  size_t num_sketches = 0;
+  size_t num_sketches = 0, num_seqs = 0;
   GenomeSeqLen *seq_lens = NULL;
-  size_t num_seqs = 0;
 
   StreamWorkerData *workers =
       extract_all_windows(files, num_files, &r, def_scale, window_size,
@@ -154,7 +135,6 @@ int main(int argc, char **argv) {
   build_duplicate_regions(&uf, num_sketches, num_files, files, seq_lens, coords,
                           &dup_regions, &n_dup_regions);
 
-  /* Free discovery data immediately to release 5GB~10GB RAM */
   free_unionfind(&uf);
   free(all_hashes);
   all_hashes = NULL;
@@ -169,8 +149,7 @@ int main(int argc, char **argv) {
                     n_threads, flank_size);
 
   fprintf(stderr, "[INFO] Sub-clustering based on flanking similarities...\n");
-  perform_subclustering(dup_regions, n_merged, subcluster_dist, n_threads,
-                        r.hash_window);
+  perform_subclustering(dup_regions, n_merged, n_threads, r.hash_window);
 
   write_dup_bed(out_prefix, dup_regions, n_merged);
   write_dup_bedpe(out_prefix, dup_regions, n_merged);
@@ -190,19 +169,18 @@ int main(int argc, char **argv) {
 }
 
 // ==============================================================
-// SECTION 3: WINDOW EXTRACTION & FASTA STREAMING
+// SECTION 2: WINDOW EXTRACTION & FASTA STREAMING
 // ==============================================================
 
 static void seq_chunk_worker(void *data, long i, int tid) {
   (void)tid;
   SeqChunkJob *job = &((SeqChunkJob *)data)[i];
-
   uint32_t current_window_idx =
       (uint32_t)(job->chunk_start_idx / job->step_size);
+
   for (size_t idx = job->chunk_start_idx;
        idx + job->window_size <= job->chunk_end_idx;
        idx += job->step_size, current_window_idx++) {
-
     size_t valid_bases = 0;
     for (size_t j = 0; j < job->window_size; j++) {
       if (BASE_LOOKUP[job->seq_ptr[idx + j]] >= 0)
@@ -243,10 +221,10 @@ StreamWorkerData *extract_all_windows(char **files, int num_files,
                                       const Segtrace *r, uint64_t scale,
                                       size_t window_size, size_t step_size,
                                       size_t min_bases, int n_threads) {
-  fprintf(stderr, "[segtrace] Extracting windows across pangenome...\n");
+  fprintf(stderr, "[segtrace] Extracting windows across genomes...\n");
   StreamWorkerData *workers = calloc(1, sizeof(StreamWorkerData));
   if (!workers) {
-    fprintf(stderr, "[ERROR] Failed to allocate memory for workers\n");
+    fprintf(stderr, "[ERROR] Memory allocation failed\n");
     exit(1);
   }
 
@@ -292,24 +270,16 @@ StreamWorkerData *extract_all_windows(char **files, int num_files,
           break;
 
         DA_RESERVE(jobs, cap_jobs, num_jobs + 1);
-        jobs[num_jobs++] = (SeqChunkJob){
-            .r = r,
-            .scale = scale,
-            .window_size = window_size,
-            .step_size = step_size,
-            .min_bases = min_bases,
-            .seq_id = seq_id,
-            .seq_ptr = seq_copy,
-            .seq_len = len,
-            .chunk_start_idx = c_start,
-            .chunk_end_idx = c_end,
-            .hashes = NULL,
-            .num_hashes = 0,
-            .cap_hashes = 0,
-            .coords = NULL,
-            .num_coords = 0,
-            .cap_coords = 0,
-        };
+        jobs[num_jobs++] = (SeqChunkJob){.r = r,
+                                         .scale = scale,
+                                         .window_size = window_size,
+                                         .step_size = step_size,
+                                         .min_bases = min_bases,
+                                         .seq_id = seq_id,
+                                         .seq_ptr = seq_copy,
+                                         .seq_len = len,
+                                         .chunk_start_idx = c_start,
+                                         .chunk_end_idx = c_end};
       }
     }
     kseq_destroy(ks);
@@ -318,7 +288,6 @@ StreamWorkerData *extract_all_windows(char **files, int num_files,
 
   kt_for(n_threads, seq_chunk_worker, jobs, num_jobs);
 
-  /* Merge parallel chunk outputs into workers[0] */
   for (size_t j = 0; j < num_jobs; j++) {
     SeqChunkJob *job = &jobs[j];
     if (job->num_coords > 0) {
@@ -340,12 +309,10 @@ StreamWorkerData *extract_all_windows(char **files, int num_files,
       }
       workers[0].num_sketches += job->num_coords;
     }
-
     free(job->hashes);
     free(job->coords);
   }
 
-  /* Free sequence copies */
   uint8_t **freed_seqs = NULL;
   size_t n_freed = 0, cap_freed = 0;
   for (size_t j = 0; j < num_jobs; j++) {
@@ -365,7 +332,6 @@ StreamWorkerData *extract_all_windows(char **files, int num_files,
   }
   free(freed_seqs);
   free(jobs);
-
   return workers;
 }
 
@@ -386,28 +352,20 @@ void merge_global_data(StreamWorkerData *workers, int num_files,
       total_sketches ? malloc(total_sketches * sizeof(WindowCoord)) : NULL;
   GenomeSeqLen *seq_lens =
       total_seqs ? malloc(total_seqs * sizeof(GenomeSeqLen)) : NULL;
-
-  size_t g_hash_offset = 0;
-  size_t g_sketch_offset = 0;
-  size_t g_seq_offset = 0;
+  size_t g_hash_offset = 0, g_sketch_offset = 0, g_seq_offset = 0;
 
   char path_buf[PATH_MAX];
-  FILE *bed_fp;
   snprintf(path_buf, sizeof(path_buf), "%s.window.bed", out_prefix);
-  bed_fp = fopen(path_buf, "w");
+  FILE *bed_fp = fopen(path_buf, "w");
 
   for (int i = 0; i < num_files; i++) {
     StreamWorkerData *w = &workers[i];
-
-    if (w->num_all_hashes > 0) {
+    if (w->num_all_hashes > 0)
       memcpy(all_hashes + g_hash_offset, w->all_hashes,
              w->num_all_hashes * sizeof(uint64_t));
-    }
-
-    if (w->num_seqs > 0) {
+    if (w->num_seqs > 0)
       memcpy(seq_lens + g_seq_offset, w->seq_lens,
              w->num_seqs * sizeof(GenomeSeqLen));
-    }
 
     for (size_t j = 0; j < w->num_sketches; j++) {
       WindowCoord c = w->coords[j];
@@ -427,12 +385,10 @@ void merge_global_data(StreamWorkerData *workers, int num_files,
     g_hash_offset += w->num_all_hashes;
     g_sketch_offset += w->num_sketches;
     g_seq_offset += w->num_seqs;
-
     free(w->all_hashes);
     free(w->coords);
     free(w->seq_lens);
   }
-
   if (bed_fp)
     fclose(bed_fp);
 
@@ -444,35 +400,55 @@ void merge_global_data(StreamWorkerData *workers, int num_files,
 }
 
 // ==============================================================
-// SECTION 4: CANDIDATE DISCOVERY & DISTANCE COMPUTATION
+// SECTION 3: CANDIDATE DISCOVERY & DISTANCE COMPUTATION
 // ==============================================================
+
+static WindowCoord *g_edge_coords = NULL;
+
+static int compare_dup_edge(const void *a, const void *b) {
+  const SegtraceDupEdge *ea = (const SegtraceDupEdge *)a,
+                        *eb = (const SegtraceDupEdge *)b;
+  uint32_t sa_a = g_edge_coords[ea->win_a].seq_id,
+           sa_b = g_edge_coords[eb->win_a].seq_id;
+  if (sa_a != sa_b)
+    return CMP(sa_a, sa_b);
+  size_t st_a = g_edge_coords[ea->win_a].start,
+         st_b = g_edge_coords[eb->win_a].start;
+  if (st_a != st_b)
+    return CMP(st_a, st_b);
+
+  uint32_t sb_a = g_edge_coords[ea->win_b].seq_id,
+           sb_b = g_edge_coords[eb->win_b].seq_id;
+  if (sb_a != sb_b)
+    return CMP(sb_a, sb_b);
+  size_t st_b_a = g_edge_coords[ea->win_b].start,
+         st_b_b = g_edge_coords[eb->win_b].start;
+  return CMP(st_b_a, st_b_b);
+}
 
 void discover_and_compute(const uint64_t *all_hashes, WindowCoord *coords,
                           size_t n_windows, size_t window_size, int n_threads,
                           uint32_t kmer_size, UnionFind *uf) {
-  DiscoverComputeData w;
-  w.all_hashes = all_hashes;
-  w.coords = coords;
-  w.n_windows = n_windows;
-  w.window_size = window_size;
-  w.kmer_size = kmer_size;
-  w.buckets = calloc(NUM_PARTITIONS, sizeof(PartitionBucket));
-  w.t_edges = calloc(n_threads, sizeof(SegtraceDupEdge *));
-  w.t_n_edges = calloc(n_threads, sizeof(size_t));
-  w.t_cap_edges = calloc(n_threads, sizeof(size_t));
-  w.t_bloom = malloc(n_threads * sizeof(uint8_t *));
+  DiscoverComputeData w = {
+      .all_hashes = all_hashes,
+      .coords = coords,
+      .n_windows = n_windows,
+      .window_size = window_size,
+      .kmer_size = kmer_size,
+      .buckets = calloc(NUM_PARTITIONS, sizeof(PartitionBucket)),
+      .t_edges = calloc(n_threads, sizeof(SegtraceDupEdge *)),
+      .t_n_edges = calloc(n_threads, sizeof(size_t)),
+      .t_cap_edges = calloc(n_threads, sizeof(size_t)),
+      .t_bloom = malloc(n_threads * sizeof(uint8_t *))};
   if (!w.buckets || !w.t_edges || !w.t_n_edges || !w.t_cap_edges ||
       !w.t_bloom) {
-    fprintf(stderr, "[ERROR] Failed to allocate memory for discovery data\n");
+    fprintf(stderr, "[ERROR] Memory allocation failed\n");
     exit(1);
   }
   for (int t = 0; t < n_threads; t++)
     w.t_bloom[t] = calloc(BLOOM_SIZE_BYTES, 1);
 
   uint64_t part_size = UINT64_MAX / NUM_PARTITIONS;
-
-  /* Single O(N) pass to distribute window hashes directly into partition
-   * buckets */
   for (size_t win = 0; win < n_windows; win++) {
     const uint64_t *h = all_hashes + coords[win].sketch_offset;
     size_t sz = coords[win].sketch_size;
@@ -488,24 +464,57 @@ void discover_and_compute(const uint64_t *all_hashes, WindowCoord *coords,
 
   kt_for(n_threads, discover_compute_worker, &w, NUM_PARTITIONS);
 
-  /* Union all discovered edges into UnionFind */
   size_t total_edges = 0;
+  for (int t = 0; t < n_threads; t++)
+    total_edges += w.t_n_edges[t];
+
+  SegtraceDupEdge *all_edges = malloc(total_edges * sizeof(SegtraceDupEdge));
+  size_t n_all = 0;
   for (int t = 0; t < n_threads; t++) {
     for (size_t k = 0; k < w.t_n_edges[t]; k++) {
-      union_unionfind(uf, w.t_edges[t][k].win_a, w.t_edges[t][k].win_b);
+      uint32_t wa = w.t_edges[t][k].win_a, wb = w.t_edges[t][k].win_b;
+      uint32_t sa = coords[wa].seq_id, sb = coords[wb].seq_id;
+      size_t sta = coords[wa].start, stb = coords[wb].start;
+      if (sa > sb || (sa == sb && sta > stb)) {
+        SWAP(uint32_t, wa, wb);
+      }
+      all_edges[n_all++] = (SegtraceDupEdge){wa, wb, w.t_edges[t][k].distance};
+      union_unionfind(uf, wa, wb);
     }
-    total_edges += w.t_n_edges[t];
     free(w.t_edges[t]);
     free(w.t_bloom[t]);
   }
-  for (size_t p = 0; p < NUM_PARTITIONS; p++) {
+  for (size_t p = 0; p < NUM_PARTITIONS; p++)
     free(w.buckets[p].entries);
-  }
   free(w.buckets);
   free(w.t_edges);
   free(w.t_n_edges);
   free(w.t_cap_edges);
   free(w.t_bloom);
+
+  g_edge_coords = coords;
+  qsort(all_edges, n_all, sizeof(SegtraceDupEdge), compare_dup_edge);
+
+  /* Pairwise overlap clustering: union windows that belong to the same aligned
+   * SD block */
+  for (size_t i = 0; i < n_all; i++) {
+    uint32_t wa1 = all_edges[i].win_a, wb1 = all_edges[i].win_b;
+    for (size_t j = i + 1; j < n_all; j++) {
+      uint32_t wa2 = all_edges[j].win_a, wb2 = all_edges[j].win_b;
+      if (coords[wa2].seq_id != coords[wa1].seq_id)
+        break;
+      if (coords[wa2].start > coords[wa1].start + window_size)
+        break;
+
+      if (coords[wb2].seq_id == coords[wb1].seq_id &&
+          ABS_DIFF(coords[wb2].start, coords[wb1].start) <= window_size) {
+        union_unionfind(uf, wa1, wa2);
+        union_unionfind(uf, wb1, wb2);
+      }
+    }
+  }
+  free(all_edges);
+  g_edge_coords = NULL;
 
   fprintf(stderr, "[segtrace] Total edges after distance filter: %zu\n",
           total_edges);
@@ -514,7 +523,6 @@ void discover_and_compute(const uint64_t *all_hashes, WindowCoord *coords,
 void discover_compute_worker(void *data, long p, int tid) {
   DiscoverComputeData *w_data = (DiscoverComputeData *)data;
   PartitionBucket *b = &w_data->buckets[p];
-
   if (b->size == 0)
     return;
 
@@ -522,7 +530,6 @@ void discover_compute_worker(void *data, long p, int tid) {
   memset(w_data->t_bloom[tid], 0, BLOOM_SIZE_BYTES);
 
   double p_kmer = pow(0.90, (double)w_data->kmer_size);
-
   size_t i = 0;
   while (i < b->size) {
     size_t j = i + 1;
@@ -533,9 +540,8 @@ void discover_compute_worker(void *data, long p, int tid) {
     if (run_len >= 2 && run_len <= MAX_RUN_LEN) {
       for (size_t a = i; a < j; a++) {
         for (size_t b_idx = a + 1; b_idx < j; b_idx++) {
-          uint32_t wa = b->entries[a].window_id;
-          uint32_t wb = b->entries[b_idx].window_id;
-
+          uint32_t wa = b->entries[a].window_id,
+                   wb = b->entries[b_idx].window_id;
           if (w_data->coords[wa].seq_id == w_data->coords[wb].seq_id &&
               ABS_DIFF(w_data->coords[wa].start, w_data->coords[wb].start) <
                   w_data->window_size)
@@ -549,7 +555,8 @@ void discover_compute_worker(void *data, long p, int tid) {
               w_data->coords[wa].sketch_size < w_data->coords[wb].sketch_size
                   ? w_data->coords[wa].sketch_size
                   : w_data->coords[wb].sketch_size;
-          size_t min_shared = (size_t)floor((double)min_sz * p_kmer) - 1;
+          size_t min_shared = (size_t)floor((double)min_sz * p_kmer);
+          // printf("[DEBUG] min_shared: %zu\n", min_shared);
           if (min_shared < 1)
             min_shared = 1;
 
@@ -580,7 +587,7 @@ SegtraceDistResult calculate_window_dist(const uint64_t *all_hashes,
 }
 
 // ==============================================================
-// SECTION 5: CLUSTERING, LOCUS MERGING & FLANKING SUBCLUSTERING
+// SECTION 4: CLUSTERING, LOCUS MERGING & FLANKING SUBCLUSTERING
 // ==============================================================
 
 void build_duplicate_regions(UnionFind *uf, size_t num_sketches, int num_files,
@@ -591,47 +598,29 @@ void build_duplicate_regions(UnionFind *uf, size_t num_sketches, int num_files,
   (void)num_files;
   (void)files;
 
-  uint32_t *fam_id = calloc(num_sketches, sizeof(uint32_t));
-  uint32_t n_families = 0;
+  uint32_t *comp_size = calloc(num_sketches, sizeof(uint32_t));
   for (size_t i = 0; i < num_sketches; i++) {
-    uint32_t fam = find_unionfind(uf, (uint32_t)i);
-    if (fam_id[fam] == 0)
-      fam_id[fam] = ++n_families;
+    comp_size[find_unionfind(uf, (uint32_t)i)]++;
   }
 
-  uint8_t *final_is_sd = calloc(n_families + 1, sizeof(uint8_t));
-  char **hub_label = calloc(n_families + 1, sizeof(char *));
+  uint32_t *cluster_map = calloc(num_sketches, sizeof(uint32_t));
   uint32_t next_cluster_id = 1;
-  uint32_t *comp_size = calloc(n_families + 1, sizeof(uint32_t));
-
   for (size_t i = 0; i < num_sketches; i++) {
-    uint32_t fam = find_unionfind(uf, (uint32_t)i);
-    uint32_t fid = fam_id[fam];
-    comp_size[fid]++;
-  }
-
-  for (size_t i = 0; i < num_sketches; i++) {
-    uint32_t fam = find_unionfind(uf, (uint32_t)i);
-    uint32_t fid = fam_id[fam];
-    if (comp_size[fid] >= 2) {
-      final_is_sd[fid] = 1;
-      if (!hub_label[fid]) {
-        char buf[64];
-        snprintf(buf, sizeof(buf), "%u", next_cluster_id++);
-        hub_label[fid] = strdup(buf);
-      }
+    uint32_t root = find_unionfind(uf, (uint32_t)i);
+    if (comp_size[root] >= 2 && cluster_map[root] == 0) {
+      cluster_map[root] = next_cluster_id++;
     }
   }
 
   size_t n_dup_regions = 0, cap_dup_regions = 0;
   SegtraceDupRegion *dup_regions = NULL;
   for (size_t i = 0; i < num_sketches; i++) {
-    uint32_t fam = find_unionfind(uf, (uint32_t)i);
-    uint32_t fid = fam_id[fam];
-    if (!final_is_sd[fid])
+    uint32_t root = find_unionfind(uf, (uint32_t)i);
+    if (cluster_map[root] == 0)
       continue;
 
-    const char *label = hub_label[fid] ? hub_label[fid] : "unknown";
+    char label[32];
+    snprintf(label, sizeof(label), "%u", cluster_map[root]);
 
     char chrom_name[512];
     snprintf(chrom_name, sizeof(chrom_name), "%s-%s",
@@ -642,20 +631,13 @@ void build_duplicate_regions(UnionFind *uf, size_t num_sketches, int num_files,
                                  .start = coords[i].start,
                                  .end = coords[i].end,
                                  .cluster_id = strdup(label),
-                                 .copy_count = comp_size[fid],
+                                 .copy_count = comp_size[root],
                                  .subcluster_id = 0,
                                  .flank_sketch = {0},
                                  .window_idx = coords[i].window_idx}));
   }
-  free(final_is_sd);
   free(comp_size);
-  free(fam_id);
-
-  for (uint32_t i = 0; i <= n_families; i++) {
-    if (hub_label[i])
-      free(hub_label[i]);
-  }
-  free(hub_label);
+  free(cluster_map);
 
   *out_regions = dup_regions;
   *out_n_regions = n_dup_regions;
@@ -672,30 +654,35 @@ static int compare_dup_region_by_pos(const void *a, const void *b) {
   return CMP(ra->end, rb->end);
 }
 
+static int compare_dup_region_by_cluster(const void *a, const void *b) {
+  const SegtraceDupRegion *ra = (const SegtraceDupRegion *)a,
+                          *rb = (const SegtraceDupRegion *)b;
+  uint32_t ca = (uint32_t)strtoul(ra->cluster_id, NULL, 10);
+  uint32_t cb = (uint32_t)strtoul(rb->cluster_id, NULL, 10);
+  if (ca != cb)
+    return CMP(ca, cb);
+  int c_chr = strcmp(ra->chrom, rb->chrom);
+  if (c_chr != 0)
+    return c_chr;
+  if (ra->start != rb->start)
+    return CMP(ra->start, rb->start);
+  return CMP(ra->end, rb->end);
+}
+
 size_t merge_dup_regions(SegtraceDupRegion *regions, size_t n) {
   if (n <= 1)
     return n;
-
-  qsort(regions, n, sizeof(SegtraceDupRegion), compare_dup_region_by_pos);
+  qsort(regions, n, sizeof(SegtraceDupRegion), compare_dup_region_by_cluster);
 
   size_t out = 0;
   for (size_t i = 1; i < n; i++) {
-    if (strcmp(regions[i].chrom, regions[out].chrom) == 0 &&
+    if (strcmp(regions[i].cluster_id, regions[out].cluster_id) == 0 &&
+        strcmp(regions[i].chrom, regions[out].chrom) == 0 &&
         regions[i].start <= regions[out].end) {
       if (regions[i].end > regions[out].end)
         regions[out].end = regions[i].end;
       if (regions[i].window_idx > regions[out].window_idx)
         regions[out].window_idx = regions[i].window_idx;
-
-      uint32_t c_out = (uint32_t)strtoul(regions[out].cluster_id, NULL, 10);
-      uint32_t c_i = (uint32_t)strtoul(regions[i].cluster_id, NULL, 10);
-      if (c_i < c_out) {
-        free(regions[out].cluster_id);
-        char buf[64];
-        snprintf(buf, sizeof(buf), "%u", c_i);
-        regions[out].cluster_id = strdup(buf);
-      }
-
       free(regions[i].cluster_id);
       free(regions[i].chrom);
     } else {
@@ -716,13 +703,35 @@ void extract_flankings(char **files, int num_files, const Segtrace *r,
   kt_for(n_threads, extract_flankings_worker, &w, num_files);
 }
 
+static void find_chrom_range(const SegtraceDupRegion *regions, size_t n,
+                             const char *chr_name, size_t *first,
+                             size_t *last) {
+  size_t low = 0, high = n;
+  while (low < high) {
+    size_t mid = low + (high - low) / 2;
+    if (strcmp(regions[mid].chrom, chr_name) < 0)
+      low = mid + 1;
+    else
+      high = mid;
+  }
+  *first = low;
+  high = n;
+  while (low < high) {
+    size_t mid = low + (high - low) / 2;
+    if (strcmp(regions[mid].chrom, chr_name) <= 0)
+      low = mid + 1;
+    else
+      high = mid;
+  }
+  *last = low;
+}
+
 void extract_flankings_worker(void *data, long f, int tid) {
   (void)tid;
   FlankingWorkerData *w = (FlankingWorkerData *)data;
 
   char bname[256];
   get_basename(w->files[f], bname, sizeof(bname));
-
   gzFile fp = gzopen(w->files[f], "r");
   if (!fp)
     return;
@@ -736,37 +745,16 @@ void extract_flankings_worker(void *data, long f, int tid) {
     char chr_name[512];
     snprintf(chr_name, sizeof(chr_name), "%s-%s", bname, ks->name.s);
 
-    size_t low = 0, high = w->n_regions;
-    while (low < high) {
-      size_t mid = low + (high - low) / 2;
-      if (strcmp(w->regions[mid].chrom, chr_name) < 0)
-        low = mid + 1;
-      else
-        high = mid;
-    }
-    size_t first = low;
-
-    low = 0;
-    high = w->n_regions;
-    while (low < high) {
-      size_t mid = low + (high - low) / 2;
-      if (strcmp(w->regions[mid].chrom, chr_name) <= 0)
-        low = mid + 1;
-      else
-        high = mid;
-    }
-    size_t last = low;
+    size_t first, last;
+    find_chrom_range(w->regions, w->n_regions, chr_name, &first, &last);
 
     for (size_t i = first; i < last; i++) {
-      size_t start = w->regions[i].start;
-      size_t end = w->regions[i].end;
-      size_t flank_size = w->flank_size;
+      size_t start = w->regions[i].start, end = w->regions[i].end,
+             flank_size = w->flank_size;
       size_t left_start = start > flank_size ? start - flank_size : 0;
       size_t right_end =
           end + flank_size > ks->seq.l ? ks->seq.l : end + flank_size;
-
-      size_t left_len = start - left_start;
-      size_t right_len = right_end - end;
+      size_t left_len = start - left_start, right_len = right_end - end;
 
       free(w->regions[i].flank_sketch.hashes);
       w->regions[i].flank_sketch.hashes = NULL;
@@ -783,7 +771,6 @@ void extract_flankings_worker(void *data, long f, int tid) {
       extract_hash(w->r, &pool, flank_seq, left_len + right_len);
       finalize_hash_pool(&pool, &w->regions[i].flank_sketch.hashes,
                          &w->regions[i].flank_sketch.sketch_size);
-
       free(flank_seq);
     }
   }
@@ -804,7 +791,7 @@ static int compare_flank_hash_entry(const void *a, const void *b) {
 }
 
 void perform_subclustering(SegtraceDupRegion *regions, size_t n_merged,
-                           double max_dist, int n_threads, uint32_t kmer_size) {
+                           int n_threads, uint32_t kmer_size) {
   if (n_merged <= 1)
     return;
 
@@ -818,9 +805,8 @@ void perform_subclustering(SegtraceDupRegion *regions, size_t n_merged,
   while (i < n_merged) {
     size_t j = i + 1;
     while (j < n_merged &&
-           strcmp(regions[i].cluster_id, regions[j].cluster_id) == 0) {
+           strcmp(regions[i].cluster_id, regions[j].cluster_id) == 0)
       j++;
-    }
     DA_PUSH(spans, n_spans, cap_spans, ((ClusterSpan){i, j - i}));
     i = j;
   }
@@ -828,19 +814,16 @@ void perform_subclustering(SegtraceDupRegion *regions, size_t n_merged,
   UnionFind sub_uf;
   init_unionfind(&sub_uf, n_merged);
 
-  SubclusterData w;
-  w.regions = regions;
-  w.max_dist = max_dist;
-  w.n_merged = n_merged;
-  w.kmer_size = kmer_size;
-  w.spans = spans;
-  w.t_pairs = calloc(n_threads, sizeof(SubclusterPair *));
-  w.t_n_pairs = calloc(n_threads, sizeof(size_t));
-  w.t_cap_pairs = calloc(n_threads, sizeof(size_t));
-  w.t_bloom = calloc(n_threads, sizeof(uint8_t *));
-  for (int t = 0; t < n_threads; t++) {
+  SubclusterData w = {.regions = regions,
+                      .n_merged = n_merged,
+                      .kmer_size = kmer_size,
+                      .spans = spans,
+                      .t_pairs = calloc(n_threads, sizeof(SubclusterPair *)),
+                      .t_n_pairs = calloc(n_threads, sizeof(size_t)),
+                      .t_cap_pairs = calloc(n_threads, sizeof(size_t)),
+                      .t_bloom = calloc(n_threads, sizeof(uint8_t *))};
+  for (int t = 0; t < n_threads; t++)
     w.t_bloom[t] = calloc(SUBCLUSTER_BLOOM_SIZE_BYTES, 1);
-  }
 
   kt_for(n_threads, process_subcluster, &w, n_spans);
 
@@ -863,9 +846,8 @@ void perform_subclustering(SegtraceDupRegion *regions, size_t n_merged,
 
   for (size_t k = 0; k < n_merged; k++) {
     uint32_t p = find_unionfind(&sub_uf, (uint32_t)k);
-    if (mapping[p] == 0) {
+    if (mapping[p] == 0)
       mapping[p] = current_id++;
-    }
     regions[k].subcluster_id = mapping[p];
   }
   free(mapping);
@@ -897,13 +879,11 @@ static inline void check_and_eval_flank_pair(SubclusterData *w, int tid,
 
 void process_subcluster(void *data, long s, int tid) {
   SubclusterData *w = (SubclusterData *)data;
-  size_t start = w->spans[s].start;
-  size_t count = w->spans[s].count;
-
+  size_t start = w->spans[s].start, count = w->spans[s].count;
   if (count <= 1)
     return;
 
-  double p_kmer = pow(0.90, (double)w->kmer_size);
+  double p_kmer = pow(0.80, (double)w->kmer_size);
 
   if (count <= 64) {
     for (size_t a = 0; a < count; a++) {
@@ -913,10 +893,8 @@ void process_subcluster(void *data, long s, int tid) {
     }
   } else {
     size_t total_flank_hashes = 0;
-    for (size_t a = 0; a < count; a++) {
+    for (size_t a = 0; a < count; a++)
       total_flank_hashes += w->regions[start + a].flank_sketch.sketch_size;
-    }
-
     if (total_flank_hashes == 0)
       return;
 
@@ -935,7 +913,6 @@ void process_subcluster(void *data, long s, int tid) {
     }
 
     qsort(entries, n_entries, sizeof(FlankHashEntry), compare_flank_hash_entry);
-
     uint8_t *bloom = w->t_bloom[tid];
     memset(bloom, 0, SUBCLUSTER_BLOOM_SIZE_BYTES);
 
@@ -948,15 +925,12 @@ void process_subcluster(void *data, long s, int tid) {
       if (run_len >= 2 && run_len <= 1000) {
         for (size_t a = i; a < j; a++) {
           for (size_t b = a + 1; b < j; b++) {
-            uint32_t la = entries[a].local_idx;
-            uint32_t lb = entries[b].local_idx;
+            uint32_t la = entries[a].local_idx, lb = entries[b].local_idx;
             if (la == lb)
               continue;
-
             uint64_t pk = encode_pair(la, lb);
             if (bloom_test_and_set(bloom, pk, SUBCLUSTER_BLOOM_MASK))
               continue;
-
             check_and_eval_flank_pair(w, tid, start + la, start + lb, p_kmer);
           }
         }
@@ -968,7 +942,7 @@ void process_subcluster(void *data, long s, int tid) {
 }
 
 // ==============================================================
-// SECTION 6: REPORTING & FILE OUTPUT WRITERS
+// SECTION 5: REPORTING & FILE OUTPUT WRITERS
 // ==============================================================
 
 void write_dup_bed(const char *out_prefix, SegtraceDupRegion *dup_regions,
@@ -982,38 +956,18 @@ void write_dup_bed(const char *out_prefix, SegtraceDupRegion *dup_regions,
   }
 
   fprintf(out_bed, "#chrom\tstart\tend\tcluster_id\tsubcluster_id\n");
-
-  uint32_t max_subcluster = 0;
   for (size_t i = 0; i < n_merged; i++) {
     fprintf(out_bed, "%s\t%zu\t%zu\t%s\t%u\n", dup_regions[i].chrom,
             dup_regions[i].start, dup_regions[i].end, dup_regions[i].cluster_id,
             dup_regions[i].subcluster_id);
-
-    if (dup_regions[i].subcluster_id > max_subcluster)
-      max_subcluster = dup_regions[i].subcluster_id;
   }
   fclose(out_bed);
-}
-
-static int compare_dup_region_by_cluster(const void *a, const void *b) {
-  const SegtraceDupRegion *ra = (const SegtraceDupRegion *)a,
-                          *rb = (const SegtraceDupRegion *)b;
-  int c_id = strcmp(ra->cluster_id, rb->cluster_id);
-  if (c_id != 0)
-    return c_id;
-  int c_chr = strcmp(ra->chrom, rb->chrom);
-  if (c_chr != 0)
-    return c_chr;
-  if (ra->start != rb->start)
-    return CMP(ra->start, rb->start);
-  return CMP(ra->end, rb->end);
 }
 
 void write_dup_bedpe(const char *out_prefix, SegtraceDupRegion *dup_regions,
                      size_t n_merged) {
   if (n_merged == 0)
     return;
-
   SegtraceDupRegion *regions_copy =
       malloc(n_merged * sizeof(SegtraceDupRegion));
   if (!regions_copy)
@@ -1033,41 +987,26 @@ void write_dup_bedpe(const char *out_prefix, SegtraceDupRegion *dup_regions,
   size_t i = 0;
   while (i < n_merged) {
     size_t j = i + 1;
-    while (j < n_merged && strcmp(regions_copy[i].cluster_id,
-                                  regions_copy[j].cluster_id) == 0) {
+    while (j < n_merged &&
+           strcmp(regions_copy[i].cluster_id, regions_copy[j].cluster_id) == 0)
       j++;
-    }
 
     size_t cluster_size = j - i;
-    if (cluster_size > 1 && cluster_size <= 500) {
+    if (cluster_size > 1 && cluster_size <= 100) {
       for (size_t a = i; a < j; a++) {
         for (size_t b = a + 1; b < j; b++) {
-          const char *c1 = regions_copy[a].chrom;
-          size_t s1 = regions_copy[a].start;
-          size_t e1 = regions_copy[a].end;
-
-          const char *c2 = regions_copy[b].chrom;
-          size_t s2 = regions_copy[b].start;
-          size_t e2 = regions_copy[b].end;
-
-          int swap = 0;
-          int cmp_chrom = strcmp(c1, c2);
-          if (cmp_chrom > 0)
-            swap = 1;
-          else if (cmp_chrom == 0) {
-            if (s1 > s2)
-              swap = 1;
-            else if (s1 == s2 && e1 > e2)
-              swap = 1;
-          }
-
-          if (swap) {
+          const char *c1 = regions_copy[a].chrom, *c2 = regions_copy[b].chrom;
+          size_t s1 = regions_copy[a].start, e1 = regions_copy[a].end;
+          size_t s2 = regions_copy[b].start, e2 = regions_copy[b].end;
+          int cmp = strcmp(c1, c2);
+          int swap =
+              (cmp > 0) || (cmp == 0 && (s1 > s2 || (s1 == s2 && e1 > e2)));
+          if (swap)
             fprintf(out_bedpe, "%s\t%zu\t%zu\t%s\t%zu\t%zu\n", c2, s2, e2, c1,
                     s1, e1);
-          } else {
+          else
             fprintf(out_bedpe, "%s\t%zu\t%zu\t%s\t%zu\t%zu\n", c1, s1, e1, c2,
                     s2, e2);
-          }
         }
       }
     }
@@ -1078,18 +1017,15 @@ void write_dup_bedpe(const char *out_prefix, SegtraceDupRegion *dup_regions,
 }
 
 // ==============================================================
-// SECTION 7: CORE ALGORITHMS & SKETCH ENGINE
+// SECTION 6: CORE ALGORITHMS & UTILITIES
 // ==============================================================
 
 void init_segtrace(Segtrace *r, size_t hash_window) {
   size_t k = hash_window < 32 ? hash_window : 32;
   uint32_t kmer_bits = 2 * (uint32_t)k;
-
-  uint64_t remover_mask =
-      (kmer_bits > 2) ? (((uint64_t)1 << (kmer_bits - 2)) - 1) : 0;
-
   r->hash_window = k;
-  r->remover_mask = remover_mask;
+  r->remover_mask =
+      (kmer_bits > 2) ? (((uint64_t)1 << (kmer_bits - 2)) - 1) : 0;
   r->kmer_bits = kmer_bits;
   r->rc_shift = (kmer_bits > 0) ? (kmer_bits - 2) : 0;
 }
@@ -1098,11 +1034,8 @@ __attribute__((hot)) void extract_hash(const Segtrace *r, HashPool *pool,
                                        const uint8_t *seq, size_t len) {
   if (len < r->hash_window)
     return;
-
-  uint64_t kmer = 0;
-  uint64_t kmer_rc = 0;
+  uint64_t kmer = 0, kmer_rc = 0;
   size_t l = 0;
-
   for (size_t i = 0; i < len; i++) {
     int8_t c = BASE_LOOKUP[seq[i]];
     if (c < 0) {
@@ -1111,15 +1044,12 @@ __attribute__((hot)) void extract_hash(const Segtrace *r, HashPool *pool,
       kmer_rc = 0;
       continue;
     }
-
     kmer = ((kmer & r->remover_mask) << 2) | (uint64_t)c;
     kmer_rc = (kmer_rc >> 2) | (((uint64_t)(c ^ 3)) << r->rc_shift);
     l++;
-
     if (l >= r->hash_window) {
       uint64_t canonical = (kmer < kmer_rc) ? kmer : kmer_rc;
-      uint64_t h = mix_hash(canonical, r->hash_seed);
-      insert_hash_pool(pool, h);
+      insert_hash_pool(pool, mix_hash(canonical, r->hash_seed));
     }
   }
 }
@@ -1147,14 +1077,11 @@ void finalize_hash_pool(HashPool *pool, uint64_t **out_hashes,
     return;
   }
   qsort(pool->hashes, pool->size, sizeof(uint64_t), compare_uint64);
-
   size_t unique_count = 0;
   for (size_t i = 0; i < pool->size; i++) {
-    if (i == 0 || pool->hashes[i] != pool->hashes[i - 1]) {
+    if (i == 0 || pool->hashes[i] != pool->hashes[i - 1])
       pool->hashes[unique_count++] = pool->hashes[i];
-    }
   }
-
   *out_hashes = realloc(pool->hashes, unique_count * sizeof(uint64_t));
   *out_size = unique_count;
 }
@@ -1178,7 +1105,6 @@ SegtraceDistResult calculate_segtrace_dist(const SegtraceSketch *ref,
       j++;
     }
   }
-
   res.shared_hashes = shared;
   size_t min_sz = ref->sketch_size < query->sketch_size ? ref->sketch_size
                                                         : query->sketch_size;
@@ -1202,14 +1128,13 @@ uint32_t find_unionfind(UnionFind *uf, uint32_t x) {
 }
 
 void union_unionfind(UnionFind *uf, uint32_t a, uint32_t b) {
-  uint32_t root_a = find_unionfind(uf, a);
-  uint32_t root_b = find_unionfind(uf, b);
+  uint32_t root_a = find_unionfind(uf, a), root_b = find_unionfind(uf, b);
   if (root_a != root_b) {
-    if (uf->rank[root_a] < uf->rank[root_b]) {
+    if (uf->rank[root_a] < uf->rank[root_b])
       uf->parent[root_a] = root_b;
-    } else if (uf->rank[root_a] > uf->rank[root_b]) {
+    else if (uf->rank[root_a] > uf->rank[root_b])
       uf->parent[root_b] = root_a;
-    } else {
+    else {
       uf->parent[root_b] = root_a;
       uf->rank[root_a]++;
     }
@@ -1225,10 +1150,6 @@ void free_unionfind(UnionFind *uf) {
   uf->rank = NULL;
   uf->n = 0;
 }
-
-// ==============================================================
-// SECTION 8: UTILITIES
-// ==============================================================
 
 void get_basename(const char *filename, char *basename, size_t size) {
   const char *last_slash = strrchr(filename, '/');
@@ -1280,8 +1201,7 @@ static inline uint64_t splitmix64(uint64_t x) {
 
 int bloom_test_and_set(uint8_t *bloom, uint64_t key, uint32_t mask) {
   uint64_t h = splitmix64(key);
-  uint32_t h1 = (uint32_t)h & mask;
-  uint32_t h2 = (uint32_t)(h >> 32) & mask;
+  uint32_t h1 = (uint32_t)h & mask, h2 = (uint32_t)(h >> 32) & mask;
   int was_set =
       ((bloom[h1 >> 3] >> (h1 & 7)) & 1) & ((bloom[h2 >> 3] >> (h2 & 7)) & 1);
   bloom[h1 >> 3] |= (uint8_t)(1 << (h1 & 7));
@@ -1290,27 +1210,12 @@ int bloom_test_and_set(uint8_t *bloom, uint64_t key, uint32_t mask) {
 }
 
 int compare_uint64(const void *a, const void *b) {
-  uint64_t va = *(const uint64_t *)a;
-  uint64_t vb = *(const uint64_t *)b;
+  uint64_t va = *(const uint64_t *)a, vb = *(const uint64_t *)b;
   return (va > vb) - (va < vb);
 }
 
 int compare_hash_entry(const void *a, const void *b) {
-  const HashWindowEntry *ea = (const HashWindowEntry *)a;
-  const HashWindowEntry *eb = (const HashWindowEntry *)b;
+  const HashWindowEntry *ea = (const HashWindowEntry *)a,
+                        *eb = (const HashWindowEntry *)b;
   return (ea->hash > eb->hash) - (ea->hash < eb->hash);
-}
-
-int compare_dup_region(const void *a, const void *b) {
-  const SegtraceDupRegion *ra = (const SegtraceDupRegion *)a;
-  const SegtraceDupRegion *rb = (const SegtraceDupRegion *)b;
-  int c = strcmp(ra->cluster_id, rb->cluster_id);
-  if (c != 0)
-    return c;
-  c = strcmp(ra->chrom, rb->chrom);
-  if (c != 0)
-    return c;
-  if (ra->start != rb->start)
-    return CMP(ra->start, rb->start);
-  return CMP(ra->end, rb->end);
 }

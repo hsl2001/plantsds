@@ -49,9 +49,9 @@ extern "C" {
 #define ABS_DIFF(a, b) ((a) > (b) ? (a) - (b) : (b) - (a))
 
 #define NUM_PARTITIONS 1024
-#define MAX_RUN_LEN 20
+#define MAX_RUN_LEN 100
 
-#define BLOOM_SIZE_BITS (1 << 26)
+#define BLOOM_SIZE_BITS (1 << 22)
 #define BLOOM_SIZE_BYTES (BLOOM_SIZE_BITS / 8)
 #define BLOOM_MASK (BLOOM_SIZE_BITS - 1)
 
@@ -263,7 +263,7 @@ void extract_flankings(char **files, int num_files, const Segtrace *r,
                        size_t n_regions, int n_threads, size_t flank_size);
 void extract_flankings_worker(void *data, long f, int tid);
 void perform_subclustering(SegtraceDupRegion *regions, size_t n_merged,
-                           double max_dist, int n_threads, uint32_t kmer_size);
+                           int n_threads, uint32_t kmer_size);
 void process_subcluster(void *data, long i, int tid);
 void write_dup_bed(const char *out_prefix, SegtraceDupRegion *dup_regions,
                    size_t n_merged);
@@ -294,7 +294,6 @@ uint64_t encode_pair(uint32_t a, uint32_t b);
 int bloom_test_and_set(uint8_t *bloom, uint64_t key, uint32_t mask);
 int compare_uint64(const void *a, const void *b);
 int compare_hash_entry(const void *a, const void *b);
-int compare_dup_region(const void *a, const void *b);
 
 #ifdef __cplusplus
 }
