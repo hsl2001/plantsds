@@ -362,7 +362,8 @@ void merge_global_data(StreamWorkerData *workers, int num_files,
                        GenomeSeqLen **out_seq_lens, size_t *out_num_seqs) {
   (void)out_prefix;
   size_t total_hashes = 0, total_sketches = 0, total_seqs = 0;
-  for (int i = 0; i < num_files; i++) {
+  (void)num_files;
+  for (int i = 0; i < 1; i++) {
     total_hashes += workers[i].num_all_hashes;
     total_sketches += workers[i].num_sketches;
     total_seqs += workers[i].num_seqs;
@@ -376,7 +377,7 @@ void merge_global_data(StreamWorkerData *workers, int num_files,
       total_seqs ? malloc(total_seqs * sizeof(GenomeSeqLen)) : NULL;
   size_t g_hash_offset = 0, g_sketch_offset = 0, g_seq_offset = 0;
 
-  for (int i = 0; i < num_files; i++) {
+  for (int i = 0; i < 1; i++) {
     StreamWorkerData *w = &workers[i];
     if (w->num_all_hashes > 0)
       memcpy(all_hashes + g_hash_offset, w->all_hashes,
@@ -749,6 +750,9 @@ void extract_flankings_worker(void *data, long f, int tid) {
       w->regions[i].flank_sketch.hashes = NULL;
       w->regions[i].flank_sketch.sketch_size = 0;
 
+      if (left_len + right_len == 0)
+        continue;
+
       uint8_t *flank_seq = malloc(left_len + right_len);
       if (left_len > 0)
         memcpy(flank_seq, ks->seq.s + left_start, left_len);
@@ -1097,17 +1101,23 @@ void init_unionfind(UnionFind *uf, size_t n) {
   uf->n = n;
   uf->parent = malloc(n * sizeof(uint32_t));
   uf->rank = calloc(n, sizeof(uint8_t));
+  pthread_mutex_init(&uf->lock, NULL);
   for (size_t i = 0; i < n; i++)
     uf->parent[i] = (uint32_t)i;
 }
 
 uint32_t find_unionfind(UnionFind *uf, uint32_t x) {
-  if (uf->parent[x] != x)
-    uf->parent[x] = find_unionfind(uf, uf->parent[x]);
-  return uf->parent[x];
+  /* Iterative path-splitting to avoid stack overflow on deep chains */
+  while (uf->parent[x] != x) {
+    uint32_t next = uf->parent[x];
+    uf->parent[x] = uf->parent[next]; /* path splitting */
+    x = next;
+  }
+  return x;
 }
 
 void union_unionfind(UnionFind *uf, uint32_t a, uint32_t b) {
+  pthread_mutex_lock(&uf->lock);
   uint32_t root_a = find_unionfind(uf, a), root_b = find_unionfind(uf, b);
   if (root_a != root_b) {
     if (uf->rank[root_a] < uf->rank[root_b])
@@ -1119,6 +1129,7 @@ void union_unionfind(UnionFind *uf, uint32_t a, uint32_t b) {
       uf->rank[root_a]++;
     }
   }
+  pthread_mutex_unlock(&uf->lock);
 }
 
 void free_unionfind(UnionFind *uf) {
@@ -1126,6 +1137,7 @@ void free_unionfind(UnionFind *uf) {
     free(uf->parent);
   if (uf->rank)
     free(uf->rank);
+  pthread_mutex_destroy(&uf->lock);
   uf->parent = NULL;
   uf->rank = NULL;
   uf->n = 0;

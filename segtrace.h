@@ -5,6 +5,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <pthread.h>
 
 #ifndef PATH_MAX
 #define PATH_MAX 4096
@@ -78,6 +79,7 @@ typedef struct {
   uint32_t *parent;
   uint8_t *rank;
   size_t n;
+  pthread_mutex_t lock;
 } UnionFind;
 
 typedef struct {
