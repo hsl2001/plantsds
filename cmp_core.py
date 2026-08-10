@@ -19,6 +19,8 @@ ACC_MAP = {
     'NC_060925.1': 'chr1', 'NC_060926.1': 'chr2', 'NC_060927.1': 'chr3',
     'NC_060928.1': 'chr4', 'NC_060929.1': 'chr5', 'NC_060930.1': 'chr6',
     'NC_060931.1': 'chr7', 'NC_060932.1': 'chr8', 'NC_060933.1': 'chr9',
+    'NC_060934.1': 'chr10', 'NC_060935.1': 'chr11', 'NC_060936.1': 'chr12',
+    'NC_060937.1': 'chr13', 'NC_060938.1': 'chr14', 'NC_060939.1': 'chr15',
     'NC_060940.1': 'chr16', 'NC_060941.1': 'chr17', 'NC_060942.1': 'chr18',
     'NC_060943.1': 'chr19', 'NC_060944.1': 'chr20', 'NC_060945.1': 'chr21',
     'NC_060946.1': 'chr22', 'NC_060947.1': 'chrX', 'NC_060948.1': 'chrY',
@@ -26,7 +28,7 @@ ACC_MAP = {
 }
 
 def parse_chrom(c):
-    if '-' in c:
+    if '-' in c and not c.startswith('chr'):
         c = c.split('-')[-1]
     return ACC_MAP.get(c, c)
 
@@ -88,11 +90,10 @@ def load_bed_bp(filepath):
             total_bp += max(0, e - s)
     return total_bp
 
-def load_segtrace_pairs(in_path, max_pairs_per_cluster=1000):
+def load_segtrace_pairs(in_path):
     """
     Loads paired SD regions from Segtrace .dup.bed file based on cluster_id.
-    Filters same subcluster and self-overlapping regions (matching evaluate.py).
-    Caps pairs per cluster to 1000 to prevent OOM / hanging on massive repeat clusters.
+    Filters same subcluster and self-overlapping regions (matching evaluate.py 100%).
     """
     clusters = {}
     if not os.path.exists(in_path):
@@ -111,40 +112,15 @@ def load_segtrace_pairs(in_path, max_pairs_per_cluster=1000):
     pairs = []
     for cid, regions in clusters.items():
         n = len(regions)
-        if n < 2:
-            continue
-        total_possible = (n * (n - 1)) // 2
-        
-        # If cluster is small, generate all pairs
-        if total_possible <= max_pairs_per_cluster:
-            for i in range(n):
-                for j in range(i + 1, n):
-                    ra_c, ra_s, ra_e, ra_sub = regions[i]
-                    rb_c, rb_s, rb_e, rb_sub = regions[j]
-                    if ra_sub == rb_sub and ra_sub != "0":
-                        continue
-                    if ra_c == rb_c and max(ra_s, rb_s) < min(ra_e, rb_e):
-                        continue
-                    pairs.append(((ra_c, ra_s, ra_e), (rb_c, rb_s, rb_e)))
-        else:
-            # For massive clusters, generate adjacent and stride pairs up to max_pairs_per_cluster
-            stride = max(1, n // max_pairs_per_cluster)
-            count = 0
-            for i in range(n):
-                for j in range(i + 1, n, stride):
-                    ra_c, ra_s, ra_e, ra_sub = regions[i]
-                    rb_c, rb_s, rb_e, rb_sub = regions[j]
-                    if ra_sub == rb_sub and ra_sub != "0":
-                        continue
-                    if ra_c == rb_c and max(ra_s, rb_s) < min(ra_e, rb_e):
-                        continue
-                    pairs.append(((ra_c, ra_s, ra_e), (rb_c, rb_s, rb_e)))
-                    count += 1
-                    if count >= max_pairs_per_cluster:
-                        break
-                if count >= max_pairs_per_cluster:
-                    break
-
+        for i in range(n):
+            for j in range(i + 1, n):
+                ra_c, ra_s, ra_e, ra_sub = regions[i]
+                rb_c, rb_s, rb_e, rb_sub = regions[j]
+                if ra_sub == rb_sub and ra_sub != "0":
+                    continue
+                if ra_c == rb_c and max(ra_s, rb_s) < min(ra_e, rb_e):
+                    continue
+                pairs.append(((ra_c, ra_s, ra_e), (rb_c, rb_s, rb_e)))
     return pairs
 
 def load_sedef_pairs(in_path):
