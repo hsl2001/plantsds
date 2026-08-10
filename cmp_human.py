@@ -10,9 +10,8 @@ import argparse
 import subprocess
 import shutil
 import gzip
-import itertools
 
-from cmp_core import load_bed_bp, compute_bp_metrics, evaluate_frag_pairs_fast
+from cmp_core import load_bed_bp, compute_bp_metrics
 
 ACC_MAP = {
     'NC_060925.1': 'chr1', 'NC_060926.1': 'chr2', 'NC_060927.1': 'chr3',
@@ -56,68 +55,18 @@ def normalize_bed(in_path, out_path):
                 count += 1
     return count
 
-def load_segtrace_pairs(in_path):
-    """Loads paired SD regions from Segtrace .dup.bed file based on cluster_id."""
-    clusters = {}
-    if not os.path.exists(in_path):
-        return []
-    with open_file(in_path) as fin:
-        for line in fin:
-            if line.startswith('#') or not line.strip():
-                continue
-            parts = line.strip().split()
-            if len(parts) >= 5:
-                c, s, e, cid, subid = parse_chrom(parts[0]), int(parts[1]), int(parts[2]), parts[3], parts[4]
-                clusters.setdefault(cid, []).append((c, s, e, subid))
-    
-    pairs = []
-    for cid, regions in clusters.items():
-        if len(regions) < 2:
-            continue
-        for (ra_c, ra_s, ra_e, ra_sub), (rb_c, rb_s, rb_e, rb_sub) in itertools.combinations(regions, 2):
-            if ra_sub == rb_sub and ra_sub != "0":
-                continue
-            if ra_c == rb_c and ra_s < rb_e and rb_s < ra_e:
-                continue
-            pairs.append(((ra_c, ra_s, ra_e), (rb_c, rb_s, rb_e)))
-    return pairs
 
-def load_sedef_pairs(in_path):
-    """Loads paired SD regions from SEDEF / CHM13 BED file (supports 12+ cols or col4 chrom:start-end format)."""
-    pairs = []
-    if not os.path.exists(in_path):
-        return pairs
-    with open_file(in_path) as fin:
-        for line in fin:
-            if line.startswith('#') or not line.strip():
-                continue
-            parts = line.strip().split()
-            if len(parts) >= 12:
-                c1, s1, e1 = parse_chrom(parts[0]), int(parts[1]), int(parts[2])
-                c2, s2, e2 = parse_chrom(parts[9]), int(parts[10]), int(parts[11])
-            elif len(parts) >= 4 and ':' in parts[3] and '-' in parts[3]:
-                c1, s1, e1 = parse_chrom(parts[0]), int(parts[1]), int(parts[2])
-                c2_str, pos_str = parts[3].split(':', 1)
-                s2_str, e2_str = pos_str.split('-', 1)
-                c2, s2, e2 = parse_chrom(c2_str), int(s2_str), int(e2_str)
-            else:
-                continue
-            if c1 == c2 and max(s1, s2) < min(e1, e2):
-                continue
-            pairs.append(((c1, s1, e1), (c2, s2, e2)))
-    return pairs
 
 def print_report(segtrace_name, sedef_name, st_bp, sd_bp, is_bp, st_u_bp, sd_u_bp,
-                 bp_recall, bp_precision, bp_f1, bp_jaccard,
-                 st_pairs_count, sd_pairs_count, pair_sn, pair_pr, pair_f1, m_ref, m_tgt):
+                 bp_recall, bp_precision, bp_f1, bp_jaccard):
     """Prints standard human SD comparison report to stdout."""
     print("=================================================================================")
-    print("            SEGMENTAL DUPLICATION COMPARISON REPORT (BP & FRAG LEVEL)")
+    print("            SEGMENTAL DUPLICATION COMPARISON REPORT (BP LEVEL)")
     print("=================================================================================")
     print(f"Segtrace Input:  {segtrace_name}")
     print(f"SEDEF Input:     {sedef_name}")
     print("---------------------------------------------------------------------------------")
-    print(" 1. BASE-PAIR (BP) LEVEL EVALUATION (Genomic Footprint)")
+    print(" BASE-PAIR (BP) LEVEL EVALUATION (Genomic Footprint)")
     print("---------------------------------------------------------------------------------")
     print(f"  Segtrace Merged Footprint:  {st_bp:12,} bp ({st_bp/1e6:8.2f} Mb)")
     print(f"  SEDEF Merged Footprint:     {sd_bp:12,} bp ({sd_bp/1e6:8.2f} Mb)")
@@ -129,14 +78,6 @@ def print_report(segtrace_name, sedef_name, st_bp, sd_bp, is_bp, st_u_bp, sd_u_b
     print(f"  BP Precision:               {bp_precision*100:8.2f}%")
     print(f"  BP F1-Score:                {bp_f1*100:8.2f}%")
     print(f"  BP Jaccard Index:           {bp_jaccard:10.6f}")
-    print("\n---------------------------------------------------------------------------------")
-    print(" 2. RECIPROCAL OVERLAP FRAGMENT (FRAG) LEVEL EVALUATION (50% Threshold)")
-    print("---------------------------------------------------------------------------------")
-    print(f"  Total Segtrace SD Pairs:    {st_pairs_count:12,}")
-    print(f"  Total SEDEF SD Pairs:       {sd_pairs_count:12,}")
-    print(f"  Frag Sensitivity / Recall:  {pair_sn*100:8.2f}% ({m_ref:,} / {sd_pairs_count:,} SEDEF pairs hit)")
-    print(f"  Frag Precision:             {pair_pr*100:8.2f}% ({m_tgt:,} / {st_pairs_count:,} Segtrace pairs hit)")
-    print(f"  Frag F1-Score:              {pair_f1*100:8.2f}%")
     print("=================================================================================")
 
 def evaluate_bp(st_norm, sd_norm, work_dir, use_bedtools=False):
@@ -196,12 +137,8 @@ def run_human_comparison(segtrace_bed, sedef_bed, work_dir="_cmp_tmp", keep_temp
         st_bp, sd_bp, is_bp, st_u_bp, sd_u_bp = evaluate_bp(st_norm, sd_norm, work_dir)
         bp_recall, bp_precision, bp_f1, bp_jaccard = compute_bp_metrics(st_bp, sd_bp, is_bp)
 
-        st_pairs, sd_pairs = load_segtrace_pairs(segtrace_bed), load_sedef_pairs(sedef_bed)
-        pair_sn, pair_pr, pair_f1, m_ref, m_tgt = evaluate_frag_pairs_fast(sd_pairs, st_pairs, threshold=0.5)
-
         print_report(segtrace_bed, sedef_bed, st_bp, sd_bp, is_bp, st_u_bp, sd_u_bp,
-                     bp_recall, bp_precision, bp_f1, bp_jaccard,
-                     len(st_pairs), len(sd_pairs), pair_sn, pair_pr, pair_f1, m_ref, m_tgt)
+                     bp_recall, bp_precision, bp_f1, bp_jaccard)
     finally:
         if not keep_temp:
             shutil.rmtree(work_dir, ignore_errors=True)

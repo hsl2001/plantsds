@@ -8,7 +8,6 @@ import random
 import subprocess
 import os
 import time
-import sys
 import argparse
 import numpy as np
 import pandas as pd
@@ -157,7 +156,7 @@ def run_segtrace_sim(fasta_path, true_pairs):
                 pred_pairs.append(((c1, s1, e1), (c2, s2, e2)))
 
     rec_bp, prec_bp, f1_bp = evaluate_sim_bp(true_pairs, pred_pairs)
-    rec_f, prec_f, f1_f, _, _ = evaluate_frag_pairs_fast(true_pairs, pred_pairs, threshold=0.5)
+    rec_f, prec_f, f1_f, _, _, _ = evaluate_frag_pairs_fast(true_pairs, pred_pairs, threshold=0.5)
     return rec_bp, prec_bp, f1_bp, rec_f, prec_f, f1_f, exec_time
 
 def main():
