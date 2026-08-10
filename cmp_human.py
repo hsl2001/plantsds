@@ -1,19 +1,11 @@
 #!/usr/bin/env python3
 """
-cmp_human.py - Comparison CLI & pipeline for real human / pangenome datasets (Segtrace vs SEDEF / BISER / CHM13).
-
-Includes:
-  1) Human RefSeq chromosome accession mappings (NC_060925.1 -> chr1, etc.).
-  2) BED file chromosome normalization for Human datasets (supports 12-col BEDPE & 9-col chrom:start-end BED).
-  3) Segtrace, SEDEF, and BISER pair parsing with human chromosome mapping.
-  4) Pipeline runner using bedtools (or pure Python fallback) for genomic footprint and bisect/NumPy for frag evaluation.
-
-Usage:
-  python3 cmp_human.py --segtrace t2t-chm13_sd.dup.bed --sedef data/chm13v2.0_SD.bed
+cmp_human.py - Comparison CLI & pipeline for real human / pangenome datasets (Segtrace vs SEDEF / CHM13).
 """
 
 import sys
 import os
+
 import argparse
 import subprocess
 import shutil
@@ -39,41 +31,13 @@ def parse_chrom(c):
         c = c.split('-')[-1]
     return ACC_MAP.get(c, c)
 
-def create_renamed_bed(in_path, out_path):
-    """Creates a new BED file with standard chromosome names."""
-    count = 0
-    open_fn = gzip.open if in_path.endswith('.gz') else open
-    with open_fn(in_path, 'rt') as fin, open(out_path, 'w') as fout:
-        for line in fin:
-            if not line.strip():
-                continue
-            if line.startswith('#'):
-                fout.write(line)
-                continue
-            parts = line.strip().split('\t')
-            parts[0] = parse_chrom(parts[0])
-            fout.write('\t'.join(parts) + '\n')
-            count += 1
-    return count
+def open_file(path):
+    return gzip.open(path, 'rt') if path.endswith('.gz') else open(path)
 
-def normalize_segtrace(in_path, out_path):
+def normalize_bed(in_path, out_path):
+    """Normalizes chromosome names for Segtrace and SEDEF/CHM13 BED files."""
     count = 0
-    open_fn = gzip.open if in_path.endswith('.gz') else open
-    with open_fn(in_path, 'rt') as fin, open(out_path, 'w') as fout:
-        for line in fin:
-            if line.startswith('#') or not line.strip():
-                continue
-            parts = line.strip().split()
-            c = parse_chrom(parts[0])
-            s, e = parts[1], parts[2]
-            fout.write(f"{c}\t{s}\t{e}\n")
-            count += 1
-    return count
-
-def normalize_sedef(in_path, out_path):
-    count = 0
-    open_fn = gzip.open if in_path.endswith('.gz') else open
-    with open_fn(in_path, 'rt') as fin, open(out_path, 'w') as fout:
+    with open_file(in_path) as fin, open(out_path, 'w') as fout:
         for line in fin:
             if line.startswith('#') or not line.strip():
                 continue
@@ -88,30 +52,23 @@ def normalize_sedef(in_path, out_path):
             elif len(parts) >= 4 and ':' in parts[3] and '-' in parts[3]:
                 c2_str, pos_str = parts[3].split(':', 1)
                 s2_str, e2_str = pos_str.split('-', 1)
-                c2 = parse_chrom(c2_str)
-                fout.write(f"{c2}\t{s2_str}\t{e2_str}\n")
+                fout.write(f"{parse_chrom(c2_str)}\t{s2_str}\t{e2_str}\n")
                 count += 1
     return count
 
 def load_segtrace_pairs(in_path):
-    """
-    Loads paired SD regions from Segtrace .dup.bed file based on cluster_id.
-    Filters same subcluster and self-overlapping regions.
-    """
+    """Loads paired SD regions from Segtrace .dup.bed file based on cluster_id."""
     clusters = {}
     if not os.path.exists(in_path):
         return []
-    open_fn = gzip.open if in_path.endswith('.gz') else open
-    with open_fn(in_path, 'rt') as fin:
+    with open_file(in_path) as fin:
         for line in fin:
             if line.startswith('#') or not line.strip():
                 continue
             parts = line.strip().split()
             if len(parts) >= 5:
                 c, s, e, cid, subid = parse_chrom(parts[0]), int(parts[1]), int(parts[2]), parts[3], parts[4]
-                if cid not in clusters:
-                    clusters[cid] = []
-                clusters[cid].append((c, s, e, subid))
+                clusters.setdefault(cid, []).append((c, s, e, subid))
     
     pairs = []
     for cid, regions in clusters.items():
@@ -130,8 +87,7 @@ def load_sedef_pairs(in_path):
     pairs = []
     if not os.path.exists(in_path):
         return pairs
-    open_fn = gzip.open if in_path.endswith('.gz') else open
-    with open_fn(in_path, 'rt') as fin:
+    with open_file(in_path) as fin:
         for line in fin:
             if line.startswith('#') or not line.strip():
                 continue
@@ -139,36 +95,16 @@ def load_sedef_pairs(in_path):
             if len(parts) >= 12:
                 c1, s1, e1 = parse_chrom(parts[0]), int(parts[1]), int(parts[2])
                 c2, s2, e2 = parse_chrom(parts[9]), int(parts[10]), int(parts[11])
-                if c1 == c2 and max(s1, s2) < min(e1, e2):
-                    continue
-                pairs.append(((c1, s1, e1), (c2, s2, e2)))
             elif len(parts) >= 4 and ':' in parts[3] and '-' in parts[3]:
                 c1, s1, e1 = parse_chrom(parts[0]), int(parts[1]), int(parts[2])
                 c2_str, pos_str = parts[3].split(':', 1)
                 s2_str, e2_str = pos_str.split('-', 1)
                 c2, s2, e2 = parse_chrom(c2_str), int(s2_str), int(e2_str)
-                if c1 == c2 and max(s1, s2) < min(e1, e2):
-                    continue
-                pairs.append(((c1, s1, e1), (c2, s2, e2)))
-    return pairs
-
-def load_biser_pairs(in_path):
-    """Loads paired SD regions from BISER .bed file."""
-    pairs = []
-    if not os.path.exists(in_path):
-        return pairs
-    open_fn = gzip.open if in_path.endswith('.gz') else open
-    with open_fn(in_path, 'rt') as fin:
-        for line in fin:
-            if line.startswith('#') or not line.strip():
+            else:
                 continue
-            parts = line.strip().split()
-            if len(parts) >= 6:
-                c1, s1, e1 = parse_chrom(parts[0]), int(parts[1]), int(parts[2])
-                c2, s2, e2 = parse_chrom(parts[3]), int(parts[4]), int(parts[5])
-                if c1 == c2 and max(s1, s2) < min(e1, e2):
-                    continue
-                pairs.append(((c1, s1, e1), (c2, s2, e2)))
+            if c1 == c2 and max(s1, s2) < min(e1, e2):
+                continue
+            pairs.append(((c1, s1, e1), (c2, s2, e2)))
     return pairs
 
 def print_report(segtrace_name, sedef_name, st_bp, sd_bp, is_bp, st_u_bp, sd_u_bp,
@@ -193,7 +129,6 @@ def print_report(segtrace_name, sedef_name, st_bp, sd_bp, is_bp, st_u_bp, sd_u_b
     print(f"  BP Precision:               {bp_precision*100:8.2f}%")
     print(f"  BP F1-Score:                {bp_f1*100:8.2f}%")
     print(f"  BP Jaccard Index:           {bp_jaccard:10.6f}")
-
     print("\n---------------------------------------------------------------------------------")
     print(" 2. RECIPROCAL OVERLAP FRAGMENT (FRAG) LEVEL EVALUATION (50% Threshold)")
     print("---------------------------------------------------------------------------------")
@@ -204,111 +139,69 @@ def print_report(segtrace_name, sedef_name, st_bp, sd_bp, is_bp, st_u_bp, sd_u_b
     print(f"  Frag F1-Score:              {pair_f1*100:8.2f}%")
     print("=================================================================================")
 
-def evaluate_bp_pure_python(st_norm_path, sd_norm_path):
-    """Pure Python fallback for merged base pair calculation when bedtools is unavailable."""
-    def load_merged_intervals(path):
-        by_chrom = {}
+def evaluate_bp(st_norm, sd_norm, work_dir, use_bedtools=False):
+    """Calculates BP footprint overlap using fast in-memory Python calculation or optional bedtools."""
+    if use_bedtools and shutil.which("bedtools") is not None:
+        st_sort, st_merged = os.path.join(work_dir, "st_sort.bed"), os.path.join(work_dir, "st_merged.bed")
+        sd_sort, sd_merged = os.path.join(work_dir, "sd_sort.bed"), os.path.join(work_dir, "sd_merged.bed")
+        is_file, st_u_file, sd_u_file = [os.path.join(work_dir, f) for f in ("is.bed", "st_u.bed", "sd_u.bed")]
+
+        subprocess.run(f"bedtools sort -i {st_norm} | bedtools merge -i - > {st_merged}", shell=True, check=True)
+        subprocess.run(f"bedtools sort -i {sd_norm} | bedtools merge -i - > {sd_merged}", shell=True, check=True)
+        subprocess.run(f"bedtools intersect -a {st_merged} -b {sd_merged} > {is_file}", shell=True, check=True)
+        subprocess.run(f"bedtools subtract -a {st_merged} -b {sd_merged} > {st_u_file}", shell=True, check=True)
+        subprocess.run(f"bedtools subtract -a {sd_merged} -b {st_merged} > {sd_u_file}", shell=True, check=True)
+
+        return load_bed_bp(st_merged), load_bed_bp(sd_merged), load_bed_bp(is_file), load_bed_bp(st_u_file), load_bed_bp(sd_u_file)
+
+    def get_merged(path):
+        by_c = {}
         with open(path) as f:
             for l in f:
-                parts = l.strip().split()
-                if len(parts) >= 3:
-                    by_chrom.setdefault(parts[0], []).append((int(parts[1]), int(parts[2])))
+                p = l.strip().split()
+                if len(p) >= 3:
+                    by_c.setdefault(p[0], []).append((int(p[1]), int(p[2])))
         merged = {}
-        for c, ints in by_chrom.items():
-            if not ints: continue
-            ints.sort(key=lambda x: x[0])
+        for c, ints in by_c.items():
+            ints.sort()
             m = [list(ints[0])]
             for curr in ints[1:]:
-                if curr[0] <= m[-1][1]:
-                    m[-1][1] = max(m[-1][1], curr[1])
-                else:
-                    m.append(list(curr))
+                if curr[0] <= m[-1][1]: m[-1][1] = max(m[-1][1], curr[1])
+                else: m.append(list(curr))
             merged[c] = m
         return merged
 
-    st_m = load_merged_intervals(st_norm_path)
-    sd_m = load_merged_intervals(sd_norm_path)
-
+    st_m, sd_m = get_merged(st_norm), get_merged(sd_norm)
     st_bp = sum(e - s for ints in st_m.values() for s, e in ints)
     sd_bp = sum(e - s for ints in sd_m.values() for s, e in ints)
-
     is_bp = 0
-    common_c = set(st_m.keys()).intersection(sd_m.keys())
-    for c in common_c:
+    for c in set(st_m.keys()).intersection(sd_m.keys()):
         l1, l2 = st_m[c], sd_m[c]
         i = j = 0
         while i < len(l1) and j < len(l2):
-            s1, e1 = l1[i]
-            s2, e2 = l2[j]
-            overlap = max(0, min(e1, e2) - max(s1, s2))
+            overlap = max(0, min(l1[i][1], l2[j][1]) - max(l1[i][0], l2[j][0]))
             is_bp += overlap
-            if e1 < e2:
-                i += 1
-            else:
-                j += 1
+            if l1[i][1] < l2[j][1]: i += 1
+            else: j += 1
+    return st_bp, sd_bp, is_bp, st_bp - is_bp, sd_bp - is_bp
 
-    st_u_bp = st_bp - is_bp
-    sd_u_bp = sd_bp - is_bp
-    return st_bp, sd_bp, is_bp, st_u_bp, sd_u_bp
-
-def run_human_comparison(segtrace_bed, sedef_bed, out_renamed=None, work_dir="_cmp_tmp", keep_temp=False):
+def run_human_comparison(segtrace_bed, sedef_bed, work_dir="_cmp_tmp", keep_temp=False):
     """Human SD comparison pipeline combining BP evaluation and bisect Frag evaluation."""
     os.makedirs(work_dir, exist_ok=True)
-
     try:
-        if out_renamed:
-            create_renamed_bed(segtrace_bed, out_renamed)
+        st_norm, sd_norm = os.path.join(work_dir, "st_norm.bed"), os.path.join(work_dir, "sd_norm.bed")
+        normalize_bed(segtrace_bed, st_norm)
+        normalize_bed(sedef_bed, sd_norm)
 
-        st_norm = os.path.join(work_dir, "segtrace_norm.bed")
-        sd_norm = os.path.join(work_dir, "sedef_norm.bed")
-
-        normalize_segtrace(segtrace_bed, st_norm)
-        normalize_sedef(sedef_bed, sd_norm)
-
-        has_bedtools = shutil.which("bedtools") is not None
-
-        if has_bedtools:
-            st_sort = os.path.join(work_dir, "segtrace_sorted.bed")
-            st_merged = os.path.join(work_dir, "segtrace_merged.bed")
-
-            sd_sort = os.path.join(work_dir, "sedef_sorted.bed")
-            sd_merged = os.path.join(work_dir, "sedef_merged.bed")
-
-            intersect_file = os.path.join(work_dir, "intersect_merged.bed")
-            st_unique_file = os.path.join(work_dir, "segtrace_unique_merged.bed")
-            sd_unique_file = os.path.join(work_dir, "sedef_unique_merged.bed")
-
-            subprocess.run(f"bedtools sort -i {st_norm} > {st_sort}", shell=True, check=True)
-            subprocess.run(f"bedtools merge -i {st_sort} > {st_merged}", shell=True, check=True)
-
-            subprocess.run(f"bedtools sort -i {sd_norm} > {sd_sort}", shell=True, check=True)
-            subprocess.run(f"bedtools merge -i {sd_sort} > {sd_merged}", shell=True, check=True)
-
-            subprocess.run(f"bedtools intersect -a {st_merged} -b {sd_merged} > {intersect_file}", shell=True, check=True)
-            subprocess.run(f"bedtools subtract -a {st_merged} -b {sd_merged} > {st_unique_file}", shell=True, check=True)
-            subprocess.run(f"bedtools subtract -a {sd_merged} -b {st_merged} > {sd_unique_file}", shell=True, check=True)
-
-            st_bp = load_bed_bp(st_merged)
-            sd_bp = load_bed_bp(sd_merged)
-            is_bp = load_bed_bp(intersect_file)
-            st_u_bp = load_bed_bp(st_unique_file)
-            sd_u_bp = load_bed_bp(sd_unique_file)
-        else:
-            st_bp, sd_bp, is_bp, st_u_bp, sd_u_bp = evaluate_bp_pure_python(st_norm, sd_norm)
-
+        st_bp, sd_bp, is_bp, st_u_bp, sd_u_bp = evaluate_bp(st_norm, sd_norm, work_dir)
         bp_recall, bp_precision, bp_f1, bp_jaccard = compute_bp_metrics(st_bp, sd_bp, is_bp)
 
-        # 2. Fragment (Frag) Pair-Level Evaluation
-        st_pairs = load_segtrace_pairs(segtrace_bed)
-        sd_pairs = load_sedef_pairs(sedef_bed)
-
+        st_pairs, sd_pairs = load_segtrace_pairs(segtrace_bed), load_sedef_pairs(sedef_bed)
         pair_sn, pair_pr, pair_f1, m_ref, m_tgt = evaluate_frag_pairs_fast(sd_pairs, st_pairs, threshold=0.5)
 
-        # Print report
         print_report(segtrace_bed, sedef_bed, st_bp, sd_bp, is_bp, st_u_bp, sd_u_bp,
                      bp_recall, bp_precision, bp_f1, bp_jaccard,
                      len(st_pairs), len(sd_pairs), pair_sn, pair_pr, pair_f1, m_ref, m_tgt)
-
     finally:
         if not keep_temp:
             shutil.rmtree(work_dir, ignore_errors=True)
@@ -316,21 +209,10 @@ def run_human_comparison(segtrace_bed, sedef_bed, out_renamed=None, work_dir="_c
 # Alias for backward compatibility
 run_sd_core_comparison = run_human_comparison
 
-def resolve_default_file(primary_path, fallback_path):
-    if os.path.exists(primary_path):
-        return primary_path
-    if os.path.exists(fallback_path):
-        return fallback_path
-    return primary_path
-
 def main():
-    default_st = resolve_default_file("t2t-chm13_sd.dup.bed", "results/t2t-chm13_sd.dup.bed")
-    default_sd = resolve_default_file("data/chm13v2.0_SD.bed", "sedef-human-t2tchm13.bed")
-
     parser = argparse.ArgumentParser(description="Compare Segtrace and SEDEF BED files on Human/Real genome datasets.")
-    parser.add_argument("--segtrace", default=default_st, help="Path to Segtrace dup.bed file")
-    parser.add_argument("--sedef", default=default_sd, help="Path to SEDEF/CHM13 bed file")
-    parser.add_argument("--out-renamed", default=None, help="Optional output path to save renamed Segtrace BED file")
+    parser.add_argument("--segtrace", default="t2t-chm13_sd.dup.bed", help="Path to Segtrace dup.bed file")
+    parser.add_argument("--sedef", default="data/chm13v2.0_SD.bed", help="Path to SEDEF/CHM13 bed file")
     parser.add_argument("--work-dir", default="_cmp_tmp", help="Temporary working directory")
     parser.add_argument("--keep-temp", action="store_true", help="Keep temporary intermediate files")
     args = parser.parse_args()
@@ -342,7 +224,7 @@ def main():
         print(f"[ERROR] SEDEF file '{args.sedef}' not found.")
         sys.exit(1)
 
-    run_human_comparison(args.segtrace, args.sedef, out_renamed=args.out_renamed, work_dir=args.work_dir, keep_temp=args.keep_temp)
+    run_human_comparison(args.segtrace, args.sedef, work_dir=args.work_dir, keep_temp=args.keep_temp)
 
 if __name__ == "__main__":
     main()
