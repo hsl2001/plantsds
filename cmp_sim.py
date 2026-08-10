@@ -11,9 +11,9 @@ import time
 import argparse
 import numpy as np
 import pandas as pd
-from cmp_core import evaluate_frag_pairs_fast
+from cmp_core import calc_frag_metrics
 
-def generate_simulated_genome(chrom_sizes, num_dups=100, min_dup_len=1000, max_dup_len=10_000, out_fasta="sim.fa"):
+def sim_generate_genome(chrom_sizes, num_dups=100, min_dup_len=1000, max_dup_len=10_000, out_fasta="sim.fa"):
     bases_bytes = np.frombuffer(b'ACGT', dtype=np.uint8)
     genomes = {}
     for chrom, size in chrom_sizes.items():
@@ -71,7 +71,7 @@ def generate_simulated_genome(chrom_sizes, num_dups=100, min_dup_len=1000, max_d
             
     return true_pairs, out_fasta
 
-def merge_intervals_dict(pairs):
+def sim_merge_intervals(pairs):
     by_chrom = {}
     for (c1, s1, e1), (c2, s2, e2) in pairs:
         by_chrom.setdefault(c1, []).append((s1, e1))
@@ -92,12 +92,12 @@ def merge_intervals_dict(pairs):
         merged_by_chrom[chrom] = merged
     return merged_by_chrom
 
-def evaluate_sim_bp(true_pairs, pred_pairs):
+def sim_calc_bp_metrics(true_pairs, pred_pairs):
     if not true_pairs or not pred_pairs:
         return 0.0, 0.0, 0.0
 
-    true_m = merge_intervals_dict(true_pairs)
-    pred_m = merge_intervals_dict(pred_pairs)
+    true_m = sim_merge_intervals(true_pairs)
+    pred_m = sim_merge_intervals(pred_pairs)
 
     t_bp = sum(e - s for intervals in true_m.values() for s, e in intervals)
     p_bp = sum(e - s for intervals in pred_m.values() for s, e in intervals)
@@ -123,7 +123,7 @@ def evaluate_sim_bp(true_pairs, pred_pairs):
     f1 = 2 * rec * prec / (rec + prec) if (rec + prec) > 0 else 0.0
     return rec, prec, f1
 
-def run_segtrace_sim(fasta_path, true_pairs):
+def sim_run_segtrace(fasta_path, true_pairs):
     start_time = time.perf_counter()
     out_prefix = "sim_out"
     segtrace_bin = "./segtrace" if os.path.isfile("./segtrace") else "./segtrace/segtrace"
@@ -155,8 +155,8 @@ def run_segtrace_sim(fasta_path, true_pairs):
                 if c1 == c2 and max(s1, s2) < min(e1, e2): continue
                 pred_pairs.append(((c1, s1, e1), (c2, s2, e2)))
 
-    rec_bp, prec_bp, f1_bp = evaluate_sim_bp(true_pairs, pred_pairs)
-    rec_f, prec_f, f1_f, _, _, _ = evaluate_frag_pairs_fast(true_pairs, pred_pairs, threshold=0.5)
+    rec_bp, prec_bp, f1_bp = sim_calc_bp_metrics(true_pairs, pred_pairs)
+    rec_f, prec_f, f1_f, _, _, _ = calc_frag_metrics(true_pairs, pred_pairs, threshold=0.5)
     return rec_bp, prec_bp, f1_bp, rec_f, prec_f, f1_f, exec_time
 
 def main():
@@ -166,10 +166,10 @@ def main():
     args = parser.parse_args()
 
     chrom_sizes = {'chr1': args.genome_size // 2, 'chr2': args.genome_size // 2}
-    true_pairs, fasta_path = generate_simulated_genome(chrom_sizes, num_dups=args.num_dups)
+    true_pairs, fasta_path = sim_generate_genome(chrom_sizes, num_dups=args.num_dups)
 
     print(f"\n[BENCHMARK] Evaluating Segtrace on simulated genome ({args.genome_size:,} bp)...")
-    r_bp, p_bp, f1_bp, r_f, p_f, f1_f, elapsed = run_segtrace_sim(fasta_path, true_pairs)
+    r_bp, p_bp, f1_bp, r_f, p_f, f1_f, elapsed = sim_run_segtrace(fasta_path, true_pairs)
 
     results = [{
         'Tool': 'Segtrace',

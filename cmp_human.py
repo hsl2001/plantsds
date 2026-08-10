@@ -11,7 +11,7 @@ import subprocess
 import shutil
 import gzip
 
-from cmp_core import load_bed_bp, compute_bp_metrics
+from cmp_core import count_bed_bp, calc_bp_metrics, calc_frag_metrics
 
 ACC_MAP = {
     'NC_060925.1': 'chr1', 'NC_060926.1': 'chr2', 'NC_060927.1': 'chr3',
@@ -33,7 +33,18 @@ def parse_chrom(c):
 def open_file(path):
     return gzip.open(path, 'rt') if path.endswith('.gz') else open(path)
 
-def normalize_bed(in_path, out_path):
+def load_fragments(filepath):
+    frags = []
+    with open(filepath) as f:
+        for line in f:
+            if line.startswith('#') or not line.strip():
+                continue
+            parts = line.strip().split()
+            if len(parts) >= 3:
+                frags.append([(parts[0], int(parts[1]), int(parts[2]))])
+    return frags
+
+def cmp_human_normalize_bed(in_path, out_path):
     """Normalizes chromosome names for Segtrace and SEDEF/CHM13 BED files."""
     count = 0
     with open_file(in_path) as fin, open(out_path, 'w') as fout:
@@ -58,10 +69,11 @@ def normalize_bed(in_path, out_path):
 
 
 def print_report(segtrace_name, sedef_name, st_bp, sd_bp, is_bp, st_u_bp, sd_u_bp,
-                 bp_recall, bp_precision, bp_f1, bp_jaccard):
+                 bp_recall, bp_precision, bp_f1, bp_jaccard,
+                 frag_recall, frag_precision, frag_f1):
     """Prints standard human SD comparison report to stdout."""
     print("=================================================================================")
-    print("            SEGMENTAL DUPLICATION COMPARISON REPORT (BP LEVEL)")
+    print("            SEGMENTAL DUPLICATION COMPARISON REPORT")
     print("=================================================================================")
     print(f"Segtrace Input:  {segtrace_name}")
     print(f"SEDEF Input:     {sedef_name}")
@@ -78,9 +90,15 @@ def print_report(segtrace_name, sedef_name, st_bp, sd_bp, is_bp, st_u_bp, sd_u_b
     print(f"  BP Precision:               {bp_precision*100:8.2f}%")
     print(f"  BP F1-Score:                {bp_f1*100:8.2f}%")
     print(f"  BP Jaccard Index:           {bp_jaccard:10.6f}")
+    print("---------------------------------------------------------------------------------")
+    print(" FRAGMENT (FRAG) LEVEL EVALUATION (Reciprocal Overlap)")
+    print("---------------------------------------------------------------------------------")
+    print(f"  FRAG Sensitivity / Recall:  {frag_recall*100:8.2f}%")
+    print(f"  FRAG Precision:             {frag_precision*100:8.2f}%")
+    print(f"  FRAG F1-Score:              {frag_f1*100:8.2f}%")
     print("=================================================================================")
 
-def evaluate_bp(st_norm, sd_norm, work_dir, use_bedtools=False):
+def cmp_human_calc_bp(st_norm, sd_norm, work_dir, use_bedtools=False):
     """Calculates BP footprint overlap using fast in-memory Python calculation or optional bedtools."""
     if use_bedtools and shutil.which("bedtools") is not None:
         st_sort, st_merged = os.path.join(work_dir, "st_sort.bed"), os.path.join(work_dir, "st_merged.bed")
@@ -93,7 +111,7 @@ def evaluate_bp(st_norm, sd_norm, work_dir, use_bedtools=False):
         subprocess.run(f"bedtools subtract -a {st_merged} -b {sd_merged} > {st_u_file}", shell=True, check=True)
         subprocess.run(f"bedtools subtract -a {sd_merged} -b {st_merged} > {sd_u_file}", shell=True, check=True)
 
-        return load_bed_bp(st_merged), load_bed_bp(sd_merged), load_bed_bp(is_file), load_bed_bp(st_u_file), load_bed_bp(sd_u_file)
+        return count_bed_bp(st_merged), count_bed_bp(sd_merged), count_bed_bp(is_file), count_bed_bp(st_u_file), count_bed_bp(sd_u_file)
 
     def get_merged(path):
         by_c = {}
@@ -126,25 +144,30 @@ def evaluate_bp(st_norm, sd_norm, work_dir, use_bedtools=False):
             else: j += 1
     return st_bp, sd_bp, is_bp, st_bp - is_bp, sd_bp - is_bp
 
-def run_human_comparison(segtrace_bed, sedef_bed, work_dir="_cmp_tmp", keep_temp=False):
+def cmp_human_run(segtrace_bed, sedef_bed, work_dir="_cmp_tmp", keep_temp=False):
     """Human SD comparison pipeline combining BP evaluation and bisect Frag evaluation."""
     os.makedirs(work_dir, exist_ok=True)
     try:
         st_norm, sd_norm = os.path.join(work_dir, "st_norm.bed"), os.path.join(work_dir, "sd_norm.bed")
-        normalize_bed(segtrace_bed, st_norm)
-        normalize_bed(sedef_bed, sd_norm)
+        cmp_human_normalize_bed(segtrace_bed, st_norm)
+        cmp_human_normalize_bed(sedef_bed, sd_norm)
 
-        st_bp, sd_bp, is_bp, st_u_bp, sd_u_bp = evaluate_bp(st_norm, sd_norm, work_dir)
-        bp_recall, bp_precision, bp_f1, bp_jaccard = compute_bp_metrics(st_bp, sd_bp, is_bp)
+        st_bp, sd_bp, is_bp, st_u_bp, sd_u_bp = cmp_human_calc_bp(st_norm, sd_norm, work_dir)
+        bp_recall, bp_precision, bp_f1, bp_jaccard = calc_bp_metrics(st_bp, sd_bp, is_bp)
+        
+        st_frags = load_fragments(st_norm)
+        sd_frags = load_fragments(sd_norm)
+        frag_recall, frag_precision, frag_f1, _, _, _ = calc_frag_metrics(sd_frags, st_frags)
 
         print_report(segtrace_bed, sedef_bed, st_bp, sd_bp, is_bp, st_u_bp, sd_u_bp,
-                     bp_recall, bp_precision, bp_f1, bp_jaccard)
+                     bp_recall, bp_precision, bp_f1, bp_jaccard,
+                     frag_recall, frag_precision, frag_f1)
     finally:
         if not keep_temp:
             shutil.rmtree(work_dir, ignore_errors=True)
 
 # Alias for backward compatibility
-run_sd_core_comparison = run_human_comparison
+run_sd_core_comparison = cmp_human_run
 
 def main():
     parser = argparse.ArgumentParser(description="Compare Segtrace and SEDEF BED files on Human/Real genome datasets.")
@@ -161,7 +184,7 @@ def main():
         print(f"[ERROR] SEDEF file '{args.sedef}' not found.")
         sys.exit(1)
 
-    run_human_comparison(args.segtrace, args.sedef, work_dir=args.work_dir, keep_temp=args.keep_temp)
+    cmp_human_run(args.segtrace, args.sedef, work_dir=args.work_dir, keep_temp=args.keep_temp)
 
 if __name__ == "__main__":
     main()

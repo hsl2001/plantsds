@@ -12,7 +12,7 @@ Provides core dataset-agnostic evaluation algorithms:
 import os
 import collections
 
-def load_bed_bp(filepath):
+def count_bed_bp(filepath):
     """Calculates total base pairs in a BED file."""
     total_bp = 0
     if not os.path.exists(filepath):
@@ -26,7 +26,7 @@ def load_bed_bp(filepath):
             total_bp += max(0, e - s)
     return total_bp
 
-def compute_bp_metrics(st_bp, sd_bp, is_bp):
+def calc_bp_metrics(st_bp, sd_bp, is_bp):
     """
     Computes Base-Pair (BP) level metrics.
     Returns (bp_recall, bp_precision, bp_f1, bp_jaccard).
@@ -38,171 +38,156 @@ def compute_bp_metrics(st_bp, sd_bp, is_bp):
     bp_jaccard = is_bp / union_bp if union_bp > 0 else 0.0
     return bp_recall, bp_precision, bp_f1, bp_jaccard
 
-def evaluate_frag_pairs_fast(ref_pairs, target_pairs, threshold=0.5, bin_size=1000000):
+def calc_frag_metrics(ref_pairs, target_pairs, threshold=0.5, bin_size=1000000):
     """
-    Ultra-fast 2D spatial grid reciprocal overlap pair evaluation (< 0.2s for 300k pairs).
+    Ultra-fast 1D spatial grid reciprocal overlap fragment evaluation.
+    Evaluates fragments as independent SD regions, ignoring pair matching.
     """
+    import collections
     if not ref_pairs or not target_pairs:
-        return 0.0, 0.0, 0.0, 0, 0
+        return 0.0, 0.0, 0.0, 0, 0, 0
+
+    ref_frags = list(set([f for p in ref_pairs for f in p]))
+    tgt_frags = list(set([f for p in target_pairs for f in p]))
 
     t_grid = collections.defaultdict(list)
-    for t_idx, ((c1, s1, e1), (c2, s2, e2)) in enumerate(target_pairs):
-        key = (c1, c2) if c1 <= c2 else (c2, c1)
-        if c1 <= c2:
-            r1_s, r1_e, r2_s, r2_e = s1, e1, s2, e2
-        else:
-            r1_s, r1_e, r2_s, r2_e = s2, e2, s1, e1
-        b1_min, b1_max = r1_s // bin_size, r1_e // bin_size
-        b2_min, b2_max = r2_s // bin_size, r2_e // bin_size
-        for b1 in range(b1_min, b1_max + 1):
-            for b2 in range(b2_min, b2_max + 1):
-                t_grid[(key, b1, b2)].append((r1_s, r1_e, r2_s, r2_e, t_idx))
+    for t_idx, (c, s, e) in enumerate(tgt_frags):
+        b_min, b_max = s // bin_size, e // bin_size
+        for b in range(b_min, b_max + 1):
+            t_grid[(c, b)].append((s, e, t_idx))
 
-    matched_ref_count = 0
-    matched_target = set()
-    total_ref = 0
+    r_grid = collections.defaultdict(list)
+    for r_idx, (c, s, e) in enumerate(ref_frags):
+        b_min, b_max = s // bin_size, e // bin_size
+        for b in range(b_min, b_max + 1):
+            r_grid[(c, b)].append((s, e, r_idx))
 
-    for ((c1, s1, e1), (c2, s2, e2)) in ref_pairs:
-        total_ref += 1
-        key = (c1, c2) if c1 <= c2 else (c2, c1)
-        if c1 <= c2:
-            r1_s, r1_e, r2_s, r2_e = s1, e1, s2, e2
-        else:
-            r1_s, r1_e, r2_s, r2_e = s2, e2, s1, e1
-
-        Lt1 = float(r1_e - r1_s)
-        Lt2 = float(r2_e - r2_s)
-        if Lt1 <= 0 or Lt2 <= 0:
-            continue
-
-        b1_min, b1_max = r1_s // bin_size, r1_e // bin_size
-        b2_min, b2_max = r2_s // bin_size, r2_e // bin_size
-
+    matched_ref = 0
+    for c, s, e in ref_frags:
+        Lt = float(e - s)
+        if Lt <= 0: continue
+        
+        b_min, b_max = s // bin_size, e // bin_size
         cands = []
-        for b1 in range(b1_min, b1_max + 1):
-            for b2 in range(b2_min, b2_max + 1):
-                if (key, b1, b2) in t_grid:
-                    cands.extend(t_grid[(key, b1, b2)])
-
-        for x1, y1, x2, y2, t_orig_idx in cands:
-            Lp1 = float(y1 - x1)
-            Lp2 = float(y2 - x2)
-            if Lp1 <= 0 or Lp2 <= 0:
-                continue
-
-            # Direct orientation
-            o1 = max(0.0, min(r1_e, y1) - max(r1_s, x1))
-            o2 = max(0.0, min(r2_e, y2) - max(r2_s, x2))
-            if (o1 / Lt1 >= threshold and o1 / Lp1 >= threshold and
-                o2 / Lt2 >= threshold and o2 / Lp2 >= threshold):
-                matched_ref_count += 1
-                matched_target.add(t_orig_idx)
+        for b in range(b_min, b_max + 1):
+            if (c, b) in t_grid:
+                cands.extend(t_grid[(c, b)])
+        
+        matched = False
+        for x, y, _ in cands:
+            Lp = float(y - x)
+            if Lp <= 0: continue
+            
+            o = max(0.0, min(e, y) - max(s, x))
+            if o / Lt >= threshold and o / Lp >= threshold:
+                matched = True
                 break
+        if matched:
+            matched_ref += 1
 
-            # Cross orientation
-            o12 = max(0.0, min(r1_e, y2) - max(r1_s, x2))
-            o21 = max(0.0, min(r2_e, y1) - max(r2_s, x1))
-            if (o12 / Lt1 >= threshold and o12 / Lp2 >= threshold and
-                o21 / Lt2 >= threshold and o21 / Lp1 >= threshold):
-                matched_ref_count += 1
-                matched_target.add(t_orig_idx)
+    matched_tgt = 0
+    for c, s, e in tgt_frags:
+        Lp = float(e - s)
+        if Lp <= 0: continue
+        
+        b_min, b_max = s // bin_size, e // bin_size
+        cands = []
+        for b in range(b_min, b_max + 1):
+            if (c, b) in r_grid:
+                cands.extend(r_grid[(c, b)])
+        
+        matched = False
+        for x, y, _ in cands:
+            Lt = float(y - x)
+            if Lt <= 0: continue
+            
+            o = max(0.0, min(e, y) - max(s, x))
+            if o / Lp >= threshold and o / Lt >= threshold:
+                matched = True
                 break
+        if matched:
+            matched_tgt += 1
 
-    total_target = len(target_pairs)
-
-    Sn = matched_ref_count / total_ref if total_ref > 0 else 0.0
-    Pr = len(matched_target) / total_target if total_target > 0 else 0.0
+    Sn = matched_ref / len(ref_frags) if len(ref_frags) > 0 else 0.0
+    Pr = matched_tgt / len(tgt_frags) if len(tgt_frags) > 0 else 0.0
     f1 = 2 * Sn * Pr / (Sn + Pr) if (Sn + Pr) > 0 else 0.0
-    return Sn, Pr, f1, matched_ref_count, len(matched_target), total_ref
+    return Sn, Pr, f1, matched_ref, matched_tgt, len(ref_frags)
 
-def evaluate_frag_pairs_clusters(sedef_pairs, segtrace_clusters, threshold=0.5, bin_size=1000000):
-    import itertools
+def calc_frag_metrics_from_clusters(sedef_pairs, segtrace_clusters, threshold=0.5, bin_size=1000000):
     import collections
     
-    r_grid = collections.defaultdict(list)
-    r_idx = 0
-    total_st_pairs = 0
+    ref_frags = list(set([f for p in sedef_pairs for f in p]))
     
+    tgt_frags_raw = []
     for cid, regions in segtrace_clusters.items():
-        n = len(regions)
-        if n >= 2:
-            subid_counts = {}
-            for r in regions:
-                if r[3] != "0":
-                    subid_counts[r[3]] = subid_counts.get(r[3], 0) + 1
-            
-            cluster_pairs = n * (n - 1) // 2
-            for count in subid_counts.values():
-                if count >= 2:
-                    cluster_pairs -= count * (count - 1) // 2
-                    
-            by_chr = {}
-            for r in regions:
-                by_chr.setdefault(r[0], []).append(r)
-                
-            for chrom, chrom_regions in by_chr.items():
-                if len(chrom_regions) < 2: continue
-                chrom_regions.sort(key=lambda x: x[1])
-                for i in range(len(chrom_regions)):
-                    ra_c, ra_s, ra_e, ra_sub = chrom_regions[i]
-                    for j in range(i + 1, len(chrom_regions)):
-                        rb_c, rb_s, rb_e, rb_sub = chrom_regions[j]
-                        if rb_s >= ra_e: break
-                        cluster_pairs -= 1
-                        if ra_sub == rb_sub and ra_sub != "0":
-                            cluster_pairs += 1
-            
-            total_st_pairs += cluster_pairs
-
         for (c, s, e, subid) in regions:
-            b_min, b_max = s // bin_size, e // bin_size
-            for b in range(b_min, b_max + 1):
-                r_grid[(c, b)].append((r_idx, c, s, e, cid, subid))
-            r_idx += 1
-            
-    matched_sd = set()
-    matched_st = set()
-    
-    for sd_idx, ((t1_c, t1_s, t1_e), (t2_c, t2_s, t2_e)) in enumerate(sedef_pairs):
-        L1 = t1_e - t1_s
-        L2 = t2_e - t2_s
-        if L1 <= 0 or L2 <= 0: continue
-        
-        b1_min, b1_max = t1_s // bin_size, t1_e // bin_size
-        S1 = []
-        for b in range(b1_min, b1_max + 1):
-            for (rid, rc, rs, re, rcid, rsub) in r_grid.get((t1_c, b), []):
-                o = max(0.0, min(t1_e, re) - max(t1_s, rs))
-                L_r = re - rs
-                if o / L1 >= threshold and o / L_r >= threshold:
-                    S1.append((rid, rc, rs, re, rcid, rsub))
-        if not S1: continue
-        
-        b2_min, b2_max = t2_s // bin_size, t2_e // bin_size
-        S2 = []
-        for b in range(b2_min, b2_max + 1):
-            for (rid, rc, rs, re, rcid, rsub) in r_grid.get((t2_c, b), []):
-                o = max(0.0, min(t2_e, re) - max(t2_s, rs))
-                L_r = re - rs
-                if o / L2 >= threshold and o / L_r >= threshold:
-                    S2.append((rid, rc, rs, re, rcid, rsub))
-        if not S2: continue
-        
-        S1 = {r[0]: r for r in S1}.values()
-        S2 = {r[0]: r for r in S2}.values()
-        
-        for r1 in S1:
-            for r2 in S2:
-                if r1[4] == r2[4] and r1[0] != r2[0]: 
-                    if r1[5] == r2[5] and r1[5] != "0": continue
-                    if r1[1] == r2[1] and max(r1[2], r2[2]) < min(r1[3], r2[3]): continue
-                    
-                    matched_sd.add(sd_idx)
-                    matched_st.add(tuple(sorted((r1[0], r2[0]))))
+            tgt_frags_raw.append((c, s, e))
+    tgt_frags = list(set(tgt_frags_raw))
 
-    total_sd = len(sedef_pairs)
-    
-    Sn = len(matched_sd) / total_sd if total_sd > 0 else 0.0
-    Pr = len(matched_st) / total_st_pairs if total_st_pairs > 0 else 0.0
+    if not ref_frags or not tgt_frags:
+        return 0.0, 0.0, 0.0, 0, 0, 0
+
+    t_grid = collections.defaultdict(list)
+    for t_idx, (c, s, e) in enumerate(tgt_frags):
+        b_min, b_max = s // bin_size, e // bin_size
+        for b in range(b_min, b_max + 1):
+            t_grid[(c, b)].append((s, e, t_idx))
+
+    r_grid = collections.defaultdict(list)
+    for r_idx, (c, s, e) in enumerate(ref_frags):
+        b_min, b_max = s // bin_size, e // bin_size
+        for b in range(b_min, b_max + 1):
+            r_grid[(c, b)].append((s, e, r_idx))
+
+    matched_ref = 0
+    for c, s, e in ref_frags:
+        Lt = float(e - s)
+        if Lt <= 0: continue
+        
+        b_min, b_max = s // bin_size, e // bin_size
+        cands = []
+        for b in range(b_min, b_max + 1):
+            if (c, b) in t_grid:
+                cands.extend(t_grid[(c, b)])
+        
+        matched = False
+        for x, y, _ in cands:
+            Lp = float(y - x)
+            if Lp <= 0: continue
+            
+            o = max(0.0, min(e, y) - max(s, x))
+            if o / Lt >= threshold and o / Lp >= threshold:
+                matched = True
+                break
+        if matched:
+            matched_ref += 1
+
+    matched_tgt = 0
+    for c, s, e in tgt_frags:
+        Lp = float(e - s)
+        if Lp <= 0: continue
+        
+        b_min, b_max = s // bin_size, e // bin_size
+        cands = []
+        for b in range(b_min, b_max + 1):
+            if (c, b) in r_grid:
+                cands.extend(r_grid[(c, b)])
+        
+        matched = False
+        for x, y, _ in cands:
+            Lt = float(y - x)
+            if Lt <= 0: continue
+            
+            o = max(0.0, min(e, y) - max(s, x))
+            if o / Lp >= threshold and o / Lt >= threshold:
+                matched = True
+                break
+        if matched:
+            matched_tgt += 1
+
+    total_ref = len(ref_frags)
+    total_tgt = len(tgt_frags)
+    Sn = matched_ref / total_ref if total_ref > 0 else 0.0
+    Pr = matched_tgt / total_tgt if total_tgt > 0 else 0.0
     f1 = 2 * Sn * Pr / (Sn + Pr) if (Sn + Pr) > 0 else 0.0
-    return Pr, Sn, f1, len(matched_st), len(matched_sd), total_st_pairs
+    return Pr, Sn, f1, matched_tgt, matched_ref, total_tgt
