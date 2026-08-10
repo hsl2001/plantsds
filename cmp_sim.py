@@ -72,45 +72,52 @@ def generate_simulated_genome(chrom_sizes, num_dups=100, min_dup_len=1000, max_d
             
     return true_pairs, out_fasta
 
+def merge_intervals_dict(pairs):
+    by_chrom = {}
+    for (c1, s1, e1), (c2, s2, e2) in pairs:
+        by_chrom.setdefault(c1, []).append((s1, e1))
+        by_chrom.setdefault(c2, []).append((s2, e2))
+    
+    merged_by_chrom = {}
+    for chrom, intervals in by_chrom.items():
+        if not intervals:
+            continue
+        intervals.sort(key=lambda x: x[0])
+        merged = [list(intervals[0])]
+        for curr in intervals[1:]:
+            prev = merged[-1]
+            if curr[0] <= prev[1]:
+                prev[1] = max(prev[1], curr[1])
+            else:
+                merged.append(list(curr))
+        merged_by_chrom[chrom] = merged
+    return merged_by_chrom
+
 def evaluate_sim_bp(true_pairs, pred_pairs):
     if not true_pairs or not pred_pairs:
         return 0.0, 0.0, 0.0
 
-    # Calculate merged BP overlap using temp BED files
-    work_dir = "_sim_tmp"
-    os.makedirs(work_dir, exist_ok=True)
-    t_bed = os.path.join(work_dir, "true.bed")
-    p_bed = os.path.join(work_dir, "pred.bed")
-    t_m = os.path.join(work_dir, "true_m.bed")
-    p_m = os.path.join(work_dir, "pred_m.bed")
-    is_bed = os.path.join(work_dir, "is.bed")
+    true_m = merge_intervals_dict(true_pairs)
+    pred_m = merge_intervals_dict(pred_pairs)
 
-    with open(t_bed, 'w') as f:
-        for (c1, s1, e1), (c2, s2, e2) in true_pairs:
-            f.write(f"{c1}\t{s1}\t{e1}\n{c2}\t{s2}\t{e2}\n")
+    t_bp = sum(e - s for intervals in true_m.values() for s, e in intervals)
+    p_bp = sum(e - s for intervals in pred_m.values() for s, e in intervals)
 
-    with open(p_bed, 'w') as f:
-        for (c1, s1, e1), (c2, s2, e2) in pred_pairs:
-            f.write(f"{c1}\t{s1}\t{e1}\n{c2}\t{s2}\t{e2}\n")
-
-    subprocess.run(f"bedtools sort -i {t_bed} | bedtools merge -i - > {t_m}", shell=True, check=True)
-    subprocess.run(f"bedtools sort -i {p_bed} | bedtools merge -i - > {p_m}", shell=True, check=True)
-    subprocess.run(f"bedtools intersect -a {p_m} -b {t_m} > {is_bed}", shell=True, check=True)
-
-    def bp_count(filepath):
-        total = 0
-        with open(filepath) as f:
-            for l in f:
-                parts = l.strip().split()
-                if len(parts) >= 3:
-                    total += int(parts[2]) - int(parts[1])
-        return total
-
-    t_bp = bp_count(t_m)
-    p_bp = bp_count(p_m)
-    i_bp = bp_count(is_bed)
-
-    shutil.rmtree(work_dir, ignore_errors=True)
+    i_bp = 0
+    common_chroms = set(true_m.keys()).intersection(pred_m.keys())
+    for chrom in common_chroms:
+        list_t = true_m[chrom]
+        list_p = pred_m[chrom]
+        i = j = 0
+        while i < len(list_t) and j < len(list_p):
+            t_s, t_e = list_t[i]
+            p_s, p_e = list_p[j]
+            overlap = max(0, min(t_e, p_e) - max(t_s, p_s))
+            i_bp += overlap
+            if t_e < p_e:
+                i += 1
+            else:
+                j += 1
 
     rec = i_bp / t_bp if t_bp > 0 else 0.0
     prec = i_bp / p_bp if p_bp > 0 else 0.0
@@ -120,7 +127,8 @@ def evaluate_sim_bp(true_pairs, pred_pairs):
 def run_segtrace_sim(fasta_path, true_pairs):
     start_time = time.perf_counter()
     out_prefix = "sim_out"
-    subprocess.run(["./segtrace/segtrace", "-k", "15", "-p", "8", fasta_path, "-o", out_prefix],
+    segtrace_bin = "./segtrace" if os.path.isfile("./segtrace") else "./segtrace/segtrace"
+    subprocess.run([segtrace_bin, "-k", "15", "-p", "8", fasta_path, "-o", out_prefix],
                    check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     exec_time = time.perf_counter() - start_time
 
