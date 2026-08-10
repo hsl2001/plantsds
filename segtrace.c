@@ -256,8 +256,10 @@ StreamWorkerData *extract_all_windows(char **files, int num_files,
     get_basename(files[f], bname, sizeof(bname));
 
     gzFile fp = gzopen(files[f], "r");
-    if (!fp)
+    if (!fp) {
+      fprintf(stderr, "[WARNING] Failed to open FASTA file: %s\n", files[f]);
       continue;
+    }
     kseq_t *ks = kseq_init(fp);
     if (!ks) {
       gzclose(fp);
