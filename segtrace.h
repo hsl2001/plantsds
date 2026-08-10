@@ -44,7 +44,7 @@ extern "C" {
 #define ABS_DIFF(a, b) ((a) > (b) ? (a) - (b) : (b) - (a))
 
 #define NUM_PARTITIONS 512
-#define MAX_RUN_LEN 100
+#define MAX_KMER_FREQ 4096
 
 #define BLOOM_SIZE_BITS (1 << 22)
 #define BLOOM_SIZE_BYTES (BLOOM_SIZE_BITS / 8)
