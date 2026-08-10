@@ -92,11 +92,8 @@ def load_bed_bp(filepath):
             total_bp += max(0, e - s)
     return total_bp
 
-def load_segtrace_pairs(in_path, max_pairs_per_cluster=500):
-    """
-    Loads paired SD regions from Segtrace .dup.bed file based on cluster_id.
-    Caps max pairs per cluster to prevent memory blowup on ultra-large multi-copy clusters.
-    """
+def load_segtrace_pairs(in_path):
+    """Loads paired SD regions from Segtrace .dup.bed file filtering out same subcluster and self-overlapping regions."""
     clusters = {}
     if not os.path.exists(in_path):
         return []
@@ -105,26 +102,26 @@ def load_segtrace_pairs(in_path, max_pairs_per_cluster=500):
             if line.startswith('#') or not line.strip():
                 continue
             parts = line.strip().split()
-            if len(parts) >= 4:
-                c, s, e, cid = parse_chrom(parts[0]), int(parts[1]), int(parts[2]), parts[3]
+            if len(parts) >= 5:
+                c, s, e, cid, subid = parse_chrom(parts[0]), int(parts[1]), int(parts[2]), parts[3], parts[4]
                 if cid not in clusters:
                     clusters[cid] = []
-                clusters[cid].append((c, s, e))
+                clusters[cid].append((c, s, e, subid))
     
     pairs = []
-    for cid, locs in clusters.items():
-        n = len(locs)
-        if n < 2:
-            continue
-        # For large clusters, generate adjacent/representative pairs to prevent O(N^2) memory explosion
-        if (n * (n - 1)) // 2 > max_pairs_per_cluster:
-            for i in range(n):
-                j = (i + 1) % n
-                pairs.append((locs[i], locs[j]))
-        else:
-            for i in range(n):
-                for j in range(i + 1, n):
-                    pairs.append((locs[i], locs[j]))
+    for cid, regions in clusters.items():
+        n = len(regions)
+        for i in range(n):
+            for j in range(i + 1, n):
+                ra_c, ra_s, ra_e, ra_sub = regions[i]
+                rb_c, rb_s, rb_e, rb_sub = regions[j]
+                # Filter 1: Skip if same subcluster_id
+                if ra_sub == rb_sub and ra_sub != "0":
+                    continue
+                # Filter 2: Skip self-overlapping regions on the same chromosome
+                if ra_c == rb_c and max(ra_s, rb_s) < min(ra_e, rb_e):
+                    continue
+                pairs.append(((ra_c, ra_s, ra_e), (rb_c, rb_s, rb_e)))
     return pairs
 
 def load_sedef_pairs(in_path):
@@ -140,18 +137,19 @@ def load_sedef_pairs(in_path):
             if len(parts) >= 12:
                 c1, s1, e1 = parse_chrom(parts[0]), int(parts[1]), int(parts[2])
                 c2, s2, e2 = parse_chrom(parts[9]), int(parts[10]), int(parts[11])
+                # Skip self-overlapping regions on the same chromosome
+                if c1 == c2 and max(s1, s2) < min(e1, e2):
+                    continue
                 pairs.append(((c1, s1, e1), (c2, s2, e2)))
     return pairs
 
 def evaluate_frag_pairs_fast(ref_pairs, target_pairs, threshold=0.5):
     """
-    Ultra-fast, memory-efficient reciprocal overlap pair evaluation using binary search indexing.
-    O(N log M) time complexity, O(N + M) memory complexity.
+    Reciprocal overlap pair evaluation algorithm matching evaluate.py.
     """
     if not ref_pairs or not target_pairs:
         return 0.0, 0.0, 0.0, 0, 0
 
-    # Group target pairs by chromosome pair and sort by x1
     target_by_chrom = {}
     for t_idx, ((c1, s1, e1), (c2, s2, e2)) in enumerate(target_pairs):
         key = (c1, c2) if c1 <= c2 else (c2, c1)
@@ -162,7 +160,6 @@ def evaluate_frag_pairs_fast(ref_pairs, target_pairs, threshold=0.5):
         else:
             target_by_chrom[key].append(((s2, e2), (s1, e1), t_idx))
 
-    # Sort each chrom pair's target list by x1 for binary search
     target_index = {}
     for key, t_list in target_by_chrom.items():
         t_list.sort(key=lambda item: item[0][0])
@@ -188,8 +185,6 @@ def evaluate_frag_pairs_fast(ref_pairs, target_pairs, threshold=0.5):
             continue
 
         t_list, x1_starts = target_index[key]
-
-        # Bisect to find candidate target pairs where x1 < r1_e
         limit_idx = bisect.bisect_left(x1_starts, r1_e)
 
         for i in range(limit_idx):
@@ -212,7 +207,7 @@ def evaluate_frag_pairs_fast(ref_pairs, target_pairs, threshold=0.5):
                 matched_target.add(t_orig_idx)
                 continue
 
-            # Cross orientation (for intra-chromosomal or symmetric)
+            # Cross orientation
             o12 = max(0.0, min(r1_e, y2) - max(r1_s, x2))
             o21 = max(0.0, min(r2_e, y1) - max(r2_s, x1))
 
@@ -229,11 +224,10 @@ def evaluate_frag_pairs_fast(ref_pairs, target_pairs, threshold=0.5):
     f1 = 2 * Sn * Pr / (Sn + Pr) if (Sn + Pr) > 0 else 0.0
     return Sn, Pr, f1, len(matched_ref), len(matched_target)
 
-def run_comparison(segtrace_bed, sedef_bed, out_renamed=None, work_dir="_cmp_tmp", keep_temp=False):
+def compare_sd(segtrace_bed, sedef_bed, out_renamed=None, work_dir="_cmp_tmp", keep_temp=False):
     os.makedirs(work_dir, exist_ok=True)
 
     try:
-        # Create renamed BED file if requested
         if out_renamed:
             create_renamed_bed(segtrace_bed, out_renamed)
 
@@ -276,11 +270,11 @@ def run_comparison(segtrace_bed, sedef_bed, out_renamed=None, work_dir="_cmp_tmp
         bp_f1 = 2 * bp_recall * bp_precision / (bp_recall + bp_precision) if (bp_recall + bp_precision) > 0 else 0.0
         bp_jaccard = is_bp / (st_bp + sd_bp - is_bp) if (st_bp + sd_bp - is_bp) > 0 else 0.0
 
-        # 2. Ultra-fast Frag Pair-Level Evaluation (50% Reciprocal Overlap)
+        # 2. Fragment (Frag) Pair-Level Evaluation (evaluate.py algorithm at 50% reciprocal overlap)
         st_pairs = load_segtrace_pairs(segtrace_bed)
         sd_pairs = load_sedef_pairs(sedef_bed)
 
-        pair_sn, pair_pr, pair_f1, m_ref, m_tgt = evaluate_frag_pairs_fast(sd_pairs, st_pairs, threshold=0.5)
+        pair_sn_50, pair_pr_50, pair_f1_50, m_ref_50, m_tgt_50 = evaluate_frag_pairs_fast(sd_pairs, st_pairs, threshold=0.5)
 
         # Output Summary Report
         print("=================================================================================")
@@ -307,13 +301,12 @@ def run_comparison(segtrace_bed, sedef_bed, out_renamed=None, work_dir="_cmp_tmp
         print("---------------------------------------------------------------------------------")
         print(f"  Total Segtrace SD Pairs:    {len(st_pairs):12,}")
         print(f"  Total SEDEF SD Pairs:       {len(sd_pairs):12,}")
-        print(f"  Frag Sensitivity / Recall:  {pair_sn*100:8.2f}% ({m_ref:,} / {len(sd_pairs):,} SEDEF pairs hit)")
-        print(f"  Frag Precision:             {pair_pr*100:8.2f}% ({m_tgt:,} / {len(st_pairs):,} Segtrace pairs hit)")
-        print(f"  Frag F1-Score:              {pair_f1*100:8.2f}%")
+        print(f"  Frag Sensitivity / Recall:  {pair_sn_50*100:8.2f}% ({m_ref_50:,} / {len(sd_pairs):,} SEDEF pairs hit)")
+        print(f"  Frag Precision:             {pair_pr_50*100:8.2f}% ({m_tgt_50:,} / {len(st_pairs):,} Segtrace pairs hit)")
+        print(f"  Frag F1-Score:              {pair_f1_50*100:8.2f}%")
         print("=================================================================================")
 
     finally:
-        # Clean up temporary working directory unless requested to keep
         if not keep_temp:
             shutil.rmtree(work_dir, ignore_errors=True)
 
@@ -332,4 +325,4 @@ if __name__ == "__main__":
         print(f"[ERROR] SEDEF file '{args.sedef}' not found.")
         sys.exit(1)
 
-    run_comparison(args.segtrace, args.sedef, out_renamed=args.out_renamed, keep_temp=args.keep_temp)
+    compare_sd(args.segtrace, args.sedef, out_renamed=args.out_renamed, keep_temp=args.keep_temp)
