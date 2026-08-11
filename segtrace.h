@@ -1,11 +1,11 @@
 #ifndef SEGTRACE_H
 #define SEGTRACE_H
 
+#include <pthread.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
-#include <pthread.h>
 
 #ifndef PATH_MAX
 #define PATH_MAX 4096
@@ -44,7 +44,7 @@ extern "C" {
 #define ABS_DIFF(a, b) ((a) > (b) ? (a) - (b) : (b) - (a))
 
 #define NUM_PARTITIONS 512
-#define MAX_KMER_FREQ 4096
+#define MAX_KMER_FREQ 8196
 
 #define BLOOM_SIZE_BITS (1 << 22)
 #define BLOOM_SIZE_BYTES (BLOOM_SIZE_BITS / 8)

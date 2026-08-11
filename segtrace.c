@@ -58,7 +58,7 @@ void print_usage(void) {
          "  -e: hash seed (default: 42)\n"
          "  -w: window size in bp (default: 1024)\n"
          "  -t: step size in bp (default: 0 [auto: 33%% of window size])\n"
-         "  -b: minimum valid bases per window (default: 0 [auto: 50%% of "
+         "  -b: minimum valid bases per window (default: 0 [auto: 10%% of "
          "window size])\n"
          "  -m: filter soft-masked bases (treat lowercase a/c/g/t as invalid)\n"
          "  -o: output file prefix (default: segtrace)\n"
@@ -118,7 +118,7 @@ int main(int argc, char **argv) {
   if (step_size == 0)
     step_size = window_size / 3;
   if (min_bases == 0)
-    min_bases = (size_t)(window_size / 2);
+    min_bases = (size_t)(window_size / 10);
   if (opt.ind == argc) {
     fprintf(stderr, "[ERROR] Input FASTA files are required.\n");
     return 1;
