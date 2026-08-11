@@ -98,6 +98,23 @@ def print_report(segtrace_name, sedef_name, st_bp, sd_bp, is_bp, st_u_bp, sd_u_b
     print(f"  FRAG F1-Score:              {frag_f1*100:8.2f}%")
     print("=================================================================================")
 
+def get_merged(path):
+    by_c = {}
+    with open(path) as f:
+        for l in f:
+            p = l.strip().split()
+            if len(p) >= 3:
+                by_c.setdefault(p[0], []).append((int(p[1]), int(p[2])))
+    merged = {}
+    for c, ints in by_c.items():
+        ints.sort()
+        m = [list(ints[0])]
+        for curr in ints[1:]:
+            if curr[0] <= m[-1][1]: m[-1][1] = max(m[-1][1], curr[1])
+            else: m.append(list(curr))
+        merged[c] = m
+    return merged
+
 def cmp_human_calc_bp(st_norm, sd_norm, work_dir, use_bedtools=False):
     """Calculates BP footprint overlap using fast in-memory Python calculation or optional bedtools."""
     if use_bedtools and shutil.which("bedtools") is not None:
@@ -112,23 +129,6 @@ def cmp_human_calc_bp(st_norm, sd_norm, work_dir, use_bedtools=False):
         subprocess.run(f"bedtools subtract -a {sd_merged} -b {st_merged} > {sd_u_file}", shell=True, check=True)
 
         return count_bed_bp(st_merged), count_bed_bp(sd_merged), count_bed_bp(is_file), count_bed_bp(st_u_file), count_bed_bp(sd_u_file)
-
-    def get_merged(path):
-        by_c = {}
-        with open(path) as f:
-            for l in f:
-                p = l.strip().split()
-                if len(p) >= 3:
-                    by_c.setdefault(p[0], []).append((int(p[1]), int(p[2])))
-        merged = {}
-        for c, ints in by_c.items():
-            ints.sort()
-            m = [list(ints[0])]
-            for curr in ints[1:]:
-                if curr[0] <= m[-1][1]: m[-1][1] = max(m[-1][1], curr[1])
-                else: m.append(list(curr))
-            merged[c] = m
-        return merged
 
     st_m, sd_m = get_merged(st_norm), get_merged(sd_norm)
     st_bp = sum(e - s for ints in st_m.values() for s, e in ints)
@@ -145,7 +145,7 @@ def cmp_human_calc_bp(st_norm, sd_norm, work_dir, use_bedtools=False):
     return st_bp, sd_bp, is_bp, st_bp - is_bp, sd_bp - is_bp
 
 def cmp_human_run(segtrace_bed, sedef_bed, work_dir="_cmp_tmp", keep_temp=False):
-    """Human SD comparison pipeline combining BP evaluation and bisect Frag evaluation."""
+    """Human SD comparison pipeline combining BP evaluation and footprint Coverage Frag evaluation."""
     os.makedirs(work_dir, exist_ok=True)
     try:
         st_norm, sd_norm = os.path.join(work_dir, "st_norm.bed"), os.path.join(work_dir, "sd_norm.bed")
@@ -157,6 +157,7 @@ def cmp_human_run(segtrace_bed, sedef_bed, work_dir="_cmp_tmp", keep_temp=False)
         
         st_frags = load_fragments(st_norm)
         sd_frags = load_fragments(sd_norm)
+        
         frag_recall, frag_precision, frag_f1, _, _, _ = calc_frag_metrics(sd_frags, st_frags)
 
         print_report(segtrace_bed, sedef_bed, st_bp, sd_bp, is_bp, st_u_bp, sd_u_bp,

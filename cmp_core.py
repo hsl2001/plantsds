@@ -38,84 +38,67 @@ def calc_bp_metrics(st_bp, sd_bp, is_bp):
     bp_jaccard = is_bp / union_bp if union_bp > 0 else 0.0
     return bp_recall, bp_precision, bp_f1, bp_jaccard
 
-def calc_frag_metrics(ref_pairs, target_pairs, threshold=0.5, bin_size=1000000):
+def merge_fragments(frags):
+    by_c = collections.defaultdict(list)
+    for c, s, e in frags:
+        by_c[c].append([s, e])
+    merged = {}
+    for c, ints in by_c.items():
+        ints.sort()
+        m = [list(ints[0])]
+        for curr in ints[1:]:
+            if curr[0] <= m[-1][1]: m[-1][1] = max(m[-1][1], curr[1])
+            else: m.append(list(curr))
+        merged[c] = m
+    return merged
+
+def _calc_coverage(query_m, ref_m, threshold=0.5):
+    matched = 0
+    total = 0
+    for c, q_ints in query_m.items():
+        if c not in ref_m:
+            total += len(q_ints)
+            continue
+        r_ints = ref_m[c]
+        for qs, qe in q_ints:
+            total += 1
+            ql = qe - qs
+            if ql <= 0: continue
+            overlap = 0
+            for rs, re in r_ints:
+                if re <= qs: continue
+                if rs >= qe: break
+                overlap += max(0, min(qe, re) - max(qs, rs))
+            if overlap / ql >= threshold:
+                matched += 1
+    return matched, total
+
+def calc_frag_metrics(ref_pairs, target_pairs, threshold=0.5, bin_size=None):
     """
-    Ultra-fast 1D spatial grid reciprocal overlap fragment evaluation.
-    Evaluates fragments as independent SD regions, ignoring pair matching.
+    Evaluates fragments using merged footprint coverage, ignoring pair matching.
+    Calculates if a predicted fragment overlaps > 50% with truth fragments, and vice-versa.
     """
-    import collections
     if not ref_pairs or not target_pairs:
         return 0.0, 0.0, 0.0, 0, 0, 0
 
     ref_frags = list(set([f for p in ref_pairs for f in p]))
     tgt_frags = list(set([f for p in target_pairs for f in p]))
 
-    t_grid = collections.defaultdict(list)
-    for t_idx, (c, s, e) in enumerate(tgt_frags):
-        b_min, b_max = s // bin_size, e // bin_size
-        for b in range(b_min, b_max + 1):
-            t_grid[(c, b)].append((s, e, t_idx))
+    r_m = merge_fragments(ref_frags)
+    t_m = merge_fragments(tgt_frags)
 
-    r_grid = collections.defaultdict(list)
-    for r_idx, (c, s, e) in enumerate(ref_frags):
-        b_min, b_max = s // bin_size, e // bin_size
-        for b in range(b_min, b_max + 1):
-            r_grid[(c, b)].append((s, e, r_idx))
+    r_match, r_total = _calc_coverage(r_m, t_m, threshold)
+    p_match, p_total = _calc_coverage(t_m, r_m, threshold)
 
-    matched_ref = 0
-    for c, s, e in ref_frags:
-        Lt = float(e - s)
-        if Lt <= 0: continue
-        
-        b_min, b_max = s // bin_size, e // bin_size
-        cands = []
-        for b in range(b_min, b_max + 1):
-            if (c, b) in t_grid:
-                cands.extend(t_grid[(c, b)])
-        
-        matched = False
-        for x, y, _ in cands:
-            Lp = float(y - x)
-            if Lp <= 0: continue
-            
-            o = max(0.0, min(e, y) - max(s, x))
-            if o / Lt >= threshold and o / Lp >= threshold:
-                matched = True
-                break
-        if matched:
-            matched_ref += 1
-
-    matched_tgt = 0
-    for c, s, e in tgt_frags:
-        Lp = float(e - s)
-        if Lp <= 0: continue
-        
-        b_min, b_max = s // bin_size, e // bin_size
-        cands = []
-        for b in range(b_min, b_max + 1):
-            if (c, b) in r_grid:
-                cands.extend(r_grid[(c, b)])
-        
-        matched = False
-        for x, y, _ in cands:
-            Lt = float(y - x)
-            if Lt <= 0: continue
-            
-            o = max(0.0, min(e, y) - max(s, x))
-            if o / Lp >= threshold and o / Lt >= threshold:
-                matched = True
-                break
-        if matched:
-            matched_tgt += 1
-
-    Sn = matched_ref / len(ref_frags) if len(ref_frags) > 0 else 0.0
-    Pr = matched_tgt / len(tgt_frags) if len(tgt_frags) > 0 else 0.0
+    Sn = r_match / r_total if r_total > 0 else 0.0
+    Pr = p_match / p_total if p_total > 0 else 0.0
     f1 = 2 * Sn * Pr / (Sn + Pr) if (Sn + Pr) > 0 else 0.0
-    return Sn, Pr, f1, matched_ref, matched_tgt, len(ref_frags)
+    return Sn, Pr, f1, r_match, p_match, r_total
 
-def calc_frag_metrics_from_clusters(sedef_pairs, segtrace_clusters, threshold=0.5, bin_size=1000000):
-    import collections
-    
+def calc_frag_metrics_from_clusters(sedef_pairs, segtrace_clusters, threshold=0.5, bin_size=None):
+    """
+    Same as above but extracts target fragments directly from cluster dictionary.
+    """
     ref_frags = list(set([f for p in sedef_pairs for f in p]))
     
     tgt_frags_raw = []
@@ -127,67 +110,13 @@ def calc_frag_metrics_from_clusters(sedef_pairs, segtrace_clusters, threshold=0.
     if not ref_frags or not tgt_frags:
         return 0.0, 0.0, 0.0, 0, 0, 0
 
-    t_grid = collections.defaultdict(list)
-    for t_idx, (c, s, e) in enumerate(tgt_frags):
-        b_min, b_max = s // bin_size, e // bin_size
-        for b in range(b_min, b_max + 1):
-            t_grid[(c, b)].append((s, e, t_idx))
+    r_m = merge_fragments(ref_frags)
+    t_m = merge_fragments(tgt_frags)
 
-    r_grid = collections.defaultdict(list)
-    for r_idx, (c, s, e) in enumerate(ref_frags):
-        b_min, b_max = s // bin_size, e // bin_size
-        for b in range(b_min, b_max + 1):
-            r_grid[(c, b)].append((s, e, r_idx))
+    r_match, r_total = _calc_coverage(r_m, t_m, threshold)
+    p_match, p_total = _calc_coverage(t_m, r_m, threshold)
 
-    matched_ref = 0
-    for c, s, e in ref_frags:
-        Lt = float(e - s)
-        if Lt <= 0: continue
-        
-        b_min, b_max = s // bin_size, e // bin_size
-        cands = []
-        for b in range(b_min, b_max + 1):
-            if (c, b) in t_grid:
-                cands.extend(t_grid[(c, b)])
-        
-        matched = False
-        for x, y, _ in cands:
-            Lp = float(y - x)
-            if Lp <= 0: continue
-            
-            o = max(0.0, min(e, y) - max(s, x))
-            if o / Lt >= threshold and o / Lp >= threshold:
-                matched = True
-                break
-        if matched:
-            matched_ref += 1
-
-    matched_tgt = 0
-    for c, s, e in tgt_frags:
-        Lp = float(e - s)
-        if Lp <= 0: continue
-        
-        b_min, b_max = s // bin_size, e // bin_size
-        cands = []
-        for b in range(b_min, b_max + 1):
-            if (c, b) in r_grid:
-                cands.extend(r_grid[(c, b)])
-        
-        matched = False
-        for x, y, _ in cands:
-            Lt = float(y - x)
-            if Lt <= 0: continue
-            
-            o = max(0.0, min(e, y) - max(s, x))
-            if o / Lp >= threshold and o / Lt >= threshold:
-                matched = True
-                break
-        if matched:
-            matched_tgt += 1
-
-    total_ref = len(ref_frags)
-    total_tgt = len(tgt_frags)
-    Sn = matched_ref / total_ref if total_ref > 0 else 0.0
-    Pr = matched_tgt / total_tgt if total_tgt > 0 else 0.0
+    Sn = r_match / r_total if r_total > 0 else 0.0
+    Pr = p_match / p_total if p_total > 0 else 0.0
     f1 = 2 * Sn * Pr / (Sn + Pr) if (Sn + Pr) > 0 else 0.0
-    return Pr, Sn, f1, matched_tgt, matched_ref, total_tgt
+    return Pr, Sn, f1, p_match, r_match, p_total

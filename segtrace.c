@@ -473,8 +473,8 @@ static inline int check_collinear_neighbor(DiscoverComputeData *w, uint32_t wa,
   const int dir_b[] = {1, -1, -1, 1};
 
   for (int d = 0; d < 4; d++) {
-    for (int step_a = 1; step_a <= MAX_COLLINEAR_STEP; step_a++) {
-      for (int step_b = 1; step_b <= MAX_COLLINEAR_STEP; step_b++) {
+    for (int step_a = 1; step_a <= MAX_COLLINEAR_LOOOKAHEAD; step_a++) {
+      for (int step_b = 1; step_b <= MAX_COLLINEAR_LOOOKAHEAD; step_b++) {
         long long next_a = (long long)wa + dir_a[d] * step_a;
         long long next_b = (long long)wb + dir_b[d] * step_b;
 
@@ -925,12 +925,12 @@ void write_dup_bed(const char *out_prefix, SegtraceDupRegion *dup_regions,
     if (cluster_size >= 2) {
       int valid_regions = 0;
       for (size_t k = i; k < j; k++) {
-        if (dup_regions[k].end - dup_regions[k].start >= 1000)
+        if (dup_regions[k].end - dup_regions[k].start >= MIN_SD_LEN)
           valid_regions++;
       }
       if (valid_regions >= 2) {
         for (size_t k = i; k < j; k++) {
-          if (dup_regions[k].end - dup_regions[k].start >= 1000) {
+          if (dup_regions[k].end - dup_regions[k].start >= MIN_SD_LEN) {
             fprintf(out_bed, "%s\t%zu\t%zu\t%s\t%u\n", dup_regions[k].chrom,
                     dup_regions[k].start, dup_regions[k].end,
                     dup_regions[k].cluster_id, dup_regions[k].subcluster_id);
