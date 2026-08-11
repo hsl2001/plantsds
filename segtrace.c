@@ -236,6 +236,57 @@ static void seq_chunk_worker(void *data, long i, int tid) {
   }
 }
 
+static void process_and_gather_jobs(StreamWorkerData *worker, SeqChunkJob *jobs,
+                                    size_t num_jobs, int n_threads) {
+  if (num_jobs == 0)
+    return;
+  kt_for(n_threads, seq_chunk_worker, jobs, num_jobs);
+
+  for (size_t j = 0; j < num_jobs; j++) {
+    SeqChunkJob *job = &jobs[j];
+    if (job->num_coords > 0) {
+      size_t base_h_offset = worker->num_all_hashes;
+      DA_RESERVE(worker->all_hashes, worker->cap_all_hashes,
+                 worker->num_all_hashes + job->num_hashes);
+      memcpy(worker->all_hashes + base_h_offset, job->hashes,
+             job->num_hashes * sizeof(uint64_t));
+      worker->num_all_hashes += job->num_hashes;
+
+      size_t base_c_offset = worker->num_sketches;
+      DA_RESERVE(worker->coords, worker->cap_sketches,
+                 worker->num_sketches + job->num_coords);
+
+      for (size_t k = 0; k < job->num_coords; k++) {
+        WindowCoord wc = job->coords[k];
+        wc.sketch_offset += base_h_offset;
+        worker->coords[base_c_offset + k] = wc;
+      }
+      worker->num_sketches += job->num_coords;
+    }
+    free(job->hashes);
+    free(job->coords);
+  }
+
+  uint8_t **freed_seqs = NULL;
+  size_t n_freed = 0, cap_freed = 0;
+  for (size_t j = 0; j < num_jobs; j++) {
+    uint8_t *p = (uint8_t *)jobs[j].seq_ptr;
+    int already = 0;
+    for (size_t k = 0; k < n_freed; k++) {
+      if (freed_seqs[k] == p) {
+        already = 1;
+        break;
+      }
+    }
+    if (!already) {
+      DA_RESERVE(freed_seqs, cap_freed, n_freed + 1);
+      freed_seqs[n_freed++] = p;
+      free(p);
+    }
+  }
+  free(freed_seqs);
+}
+
 StreamWorkerData *extract_all_windows(char **files, int num_files,
                                       const Segtrace *r, uint64_t scale,
                                       size_t window_size, size_t step_size,
@@ -249,6 +300,7 @@ StreamWorkerData *extract_all_windows(char **files, int num_files,
 
   size_t cap_jobs = 16, num_jobs = 0;
   SeqChunkJob *jobs = malloc(cap_jobs * sizeof(SeqChunkJob));
+  size_t batch_seq_len = 0;
 
   for (int f = 0; f < num_files; f++) {
     char bname[256];
@@ -277,7 +329,12 @@ StreamWorkerData *extract_all_windows(char **files, int num_files,
       uint32_t seq_id = (uint32_t)workers[0].num_seqs++;
 
       uint8_t *seq_copy = malloc(len + 1);
+      if (!seq_copy) {
+        fprintf(stderr, "[ERROR] Memory allocation failed for seq_copy\n");
+        exit(1);
+      }
       memcpy(seq_copy, ks->seq.s, len + 1);
+      batch_seq_len += len;
 
       size_t chunk_size = len / (n_threads * 4);
       if (chunk_size < 100000)
@@ -304,56 +361,18 @@ StreamWorkerData *extract_all_windows(char **files, int num_files,
                                          .chunk_start_idx = c_start,
                                          .chunk_end_idx = c_end};
       }
+
+      if (num_jobs >= (size_t)(n_threads * 4) || batch_seq_len > 250000000) {
+        process_and_gather_jobs(&workers[0], jobs, num_jobs, n_threads);
+        num_jobs = 0;
+        batch_seq_len = 0;
+      }
     }
     kseq_destroy(ks);
     gzclose(fp);
   }
 
-  kt_for(n_threads, seq_chunk_worker, jobs, num_jobs);
-
-  for (size_t j = 0; j < num_jobs; j++) {
-    SeqChunkJob *job = &jobs[j];
-    if (job->num_coords > 0) {
-      size_t base_h_offset = workers[0].num_all_hashes;
-      DA_RESERVE(workers[0].all_hashes, workers[0].cap_all_hashes,
-                 workers[0].num_all_hashes + job->num_hashes);
-      memcpy(workers[0].all_hashes + base_h_offset, job->hashes,
-             job->num_hashes * sizeof(uint64_t));
-      workers[0].num_all_hashes += job->num_hashes;
-
-      size_t base_c_offset = workers[0].num_sketches;
-      DA_RESERVE(workers[0].coords, workers[0].cap_sketches,
-                 workers[0].num_sketches + job->num_coords);
-
-      for (size_t k = 0; k < job->num_coords; k++) {
-        WindowCoord wc = job->coords[k];
-        wc.sketch_offset += base_h_offset;
-        workers[0].coords[base_c_offset + k] = wc;
-      }
-      workers[0].num_sketches += job->num_coords;
-    }
-    free(job->hashes);
-    free(job->coords);
-  }
-
-  uint8_t **freed_seqs = NULL;
-  size_t n_freed = 0, cap_freed = 0;
-  for (size_t j = 0; j < num_jobs; j++) {
-    uint8_t *p = (uint8_t *)jobs[j].seq_ptr;
-    int already = 0;
-    for (size_t k = 0; k < n_freed; k++) {
-      if (freed_seqs[k] == p) {
-        already = 1;
-        break;
-      }
-    }
-    if (!already) {
-      DA_RESERVE(freed_seqs, cap_freed, n_freed + 1);
-      freed_seqs[n_freed++] = p;
-      free(p);
-    }
-  }
-  free(freed_seqs);
+  process_and_gather_jobs(&workers[0], jobs, num_jobs, n_threads);
   free(jobs);
   return workers;
 }

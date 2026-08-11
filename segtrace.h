@@ -4,6 +4,7 @@
 #include <pthread.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -28,7 +29,12 @@ extern "C" {
       (cap) = (cap) ? (cap) : 16;                                              \
       while ((cap) < (req_cap))                                                \
         (cap) *= 2;                                                            \
-      (arr) = realloc((arr), (cap) * sizeof(*(arr)));                          \
+      void *tmp = realloc((arr), (cap) * sizeof(*(arr)));                      \
+      if (!tmp) {                                                              \
+        fprintf(stderr, "[ERROR] Memory allocation failed\n");                 \
+        exit(1);                                                               \
+      }                                                                        \
+      (arr) = tmp;                                                             \
     }                                                                          \
   } while (0)
 
@@ -49,7 +55,7 @@ extern "C" {
 #define MAX_COLLINEAR_LOOOKAHEAD 25
 #define MIN_SD_LEN 1000
 
-#define BLOOM_SIZE_BITS (1 << 22)
+#define BLOOM_SIZE_BITS (1 << 24)
 #define BLOOM_SIZE_BYTES (BLOOM_SIZE_BITS / 8)
 #define BLOOM_MASK (BLOOM_SIZE_BITS - 1)
 
