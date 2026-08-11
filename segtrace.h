@@ -49,7 +49,7 @@ extern "C" {
 #define ABS_DIFF(a, b) ((a) > (b) ? (a) - (b) : (b) - (a))
 
 #define NUM_PARTITIONS 512
-#define MAX_KMER_FREQ 128
+#define MAX_KMER_FREQ 32
 #define MAX_PAIR_COMPARISONS 64
 #define MAX_COLLINEAR_LOOOKAHEAD 3
 #define MIN_SD_LEN 1000
