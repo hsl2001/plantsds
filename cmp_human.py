@@ -50,8 +50,8 @@ def load_fragments(filepath):
                 frags.append([(parts[0], int(parts[1]), int(parts[2]))])
     return frags
 
-def cmp_human_normalize_bed(in_path, out_path):
-    """Normalizes chromosome names for Segtrace and SEDEF/CHM13 BED files."""
+def cmp_human_normalize_bed(in_path, out_path, exclude_chrm=True):
+    """Normalizes chromosome names for Segtrace and SEDEF/CHM13 BED files, optionally excluding chrM."""
     count = 0
     with open_file(in_path) as fin, open(out_path, 'w') as fout:
         for line in fin:
@@ -59,17 +59,21 @@ def cmp_human_normalize_bed(in_path, out_path):
                 continue
             parts = line.strip().split()
             c1, s1, e1 = parse_chrom(parts[0]), parts[1], parts[2]
-            fout.write(f"{c1}\t{s1}\t{e1}\n")
-            count += 1
+            if not (exclude_chrm and c1 == 'chrM'):
+                fout.write(f"{c1}\t{s1}\t{e1}\n")
+                count += 1
             if len(parts) >= 12:
                 c2, s2, e2 = parse_chrom(parts[9]), parts[10], parts[11]
-                fout.write(f"{c2}\t{s2}\t{e2}\n")
-                count += 1
+                if not (exclude_chrm and c2 == 'chrM'):
+                    fout.write(f"{c2}\t{s2}\t{e2}\n")
+                    count += 1
             elif len(parts) >= 4 and ':' in parts[3] and '-' in parts[3]:
                 c2_str, pos_str = parts[3].split(':', 1)
+                c2 = parse_chrom(c2_str)
                 s2_str, e2_str = pos_str.split('-', 1)
-                fout.write(f"{parse_chrom(c2_str)}\t{s2_str}\t{e2_str}\n")
-                count += 1
+                if not (exclude_chrm and c2 == 'chrM'):
+                    fout.write(f"{c2}\t{s2_str}\t{e2_str}\n")
+                    count += 1
     return count
 
 def print_report(segtrace_name, sedef_name, st_bp, sd_bp, is_bp, st_u_bp, sd_u_bp,
@@ -200,13 +204,13 @@ def cmp_human_calc_per_chrom(st_norm, sd_norm, st_frags, sd_frags):
         })
     return per_chrom
 
-def cmp_human_run(segtrace_bed, sedef_bed, work_dir="_cmp_tmp", keep_temp=False, show_per_chrom=True):
+def cmp_human_run(segtrace_bed, sedef_bed, work_dir="_cmp_tmp", keep_temp=False, show_per_chrom=True, exclude_chrm=True):
     """Human SD comparison pipeline combining BP evaluation and footprint Coverage Frag evaluation."""
     os.makedirs(work_dir, exist_ok=True)
     try:
         st_norm, sd_norm = os.path.join(work_dir, "st_norm.bed"), os.path.join(work_dir, "sd_norm.bed")
-        cmp_human_normalize_bed(segtrace_bed, st_norm)
-        cmp_human_normalize_bed(sedef_bed, sd_norm)
+        cmp_human_normalize_bed(segtrace_bed, st_norm, exclude_chrm=exclude_chrm)
+        cmp_human_normalize_bed(sedef_bed, sd_norm, exclude_chrm=exclude_chrm)
 
         st_bp, sd_bp, is_bp, st_u_bp, sd_u_bp = cmp_human_calc_bp(st_norm, sd_norm, work_dir)
         bp_recall, bp_precision, bp_f1, bp_jaccard = calc_bp_metrics(st_bp, sd_bp, is_bp)
@@ -236,6 +240,7 @@ def main():
     parser.add_argument("--work-dir", default="_cmp_tmp", help="Temporary working directory")
     parser.add_argument("--keep-temp", action="store_true", help="Keep temporary intermediate files")
     parser.add_argument("--no-per-chrom", action="store_true", help="Hide per-chromosome accuracy table")
+    parser.add_argument("--include-chrm", action="store_true", help="Include mitochondrial chromosome (chrM) in evaluation")
     args = parser.parse_args()
 
     if not os.path.exists(args.segtrace):
@@ -245,7 +250,8 @@ def main():
         print(f"[ERROR] SEDEF file '{args.sedef}' not found.")
         sys.exit(1)
 
-    cmp_human_run(args.segtrace, args.sedef, work_dir=args.work_dir, keep_temp=args.keep_temp, show_per_chrom=not args.no_per_chrom)
+    cmp_human_run(args.segtrace, args.sedef, work_dir=args.work_dir, keep_temp=args.keep_temp,
+                  show_per_chrom=not args.no_per_chrom, exclude_chrm=not args.include_chrm)
 
 if __name__ == "__main__":
     main()
