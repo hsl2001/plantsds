@@ -147,6 +147,7 @@ def sim_run_segtrace(fasta_path, true_pairs):
                 parts = line.strip().split()
                 if len(parts) < 5: continue
                 chrom, start, end, cid, subid = parts[0], int(parts[1]), int(parts[2]), parts[3], parts[4]
+                if "-" in chrom: chrom = chrom.split("-", 1)[-1]
                 if cid not in clusters:
                     clusters[cid] = []
                 clusters[cid].append((chrom, start, end, subid))
