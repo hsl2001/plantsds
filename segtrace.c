@@ -55,12 +55,12 @@ void print_usage(void) {
          "Options:\n"
          "  -k: kmer size (default: 15)\n"
          "  -s: scale factor (default: 16)\n"
-         "  -e: hash seed (default: 42)\n"
          "  -w: window size in bp (default: 1024)\n"
          "  -t: step size in bp (default: 0 [auto: 33%% of window size])\n"
          "  -b: minimum valid bases per window (default: 0 [auto: 25%% of "
          "window size])\n"
-         "  -m: filter soft-masked bases (treat lowercase a/c/g/t as invalid)\n"
+         "  -m: do not filter soft-masked bases (treat lowercase a/c/g/t as "
+         "valid)\n"
          "  -o: output file prefix (default: segtrace)\n"
          "  -p: number of threads (default: 8)\n"
          "  -h, --help: show this help message\n\n");
@@ -94,8 +94,6 @@ int main(int argc, char **argv) {
       def_kmer_size = (uint32_t)atoi(opt.arg);
     else if (c == 's')
       def_scale = (uint64_t)strtoull(opt.arg, NULL, 10);
-    else if (c == 'e')
-      def_hash_seed = strtoull(opt.arg, NULL, 0);
     else if (c == 'w')
       window_size = (size_t)strtoull(opt.arg, NULL, 10);
     else if (c == 't')
