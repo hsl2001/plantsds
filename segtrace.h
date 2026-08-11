@@ -4,7 +4,6 @@
 #include <pthread.h>
 #include <stddef.h>
 #include <stdint.h>
-#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -29,12 +28,7 @@ extern "C" {
       (cap) = (cap) ? (cap) : 16;                                              \
       while ((cap) < (req_cap))                                                \
         (cap) *= 2;                                                            \
-      void *tmp = realloc((arr), (cap) * sizeof(*(arr)));                      \
-      if (!tmp) {                                                              \
-        fprintf(stderr, "[ERROR] Memory allocation failed\n");                 \
-        exit(1);                                                               \
-      }                                                                        \
-      (arr) = tmp;                                                             \
+      (arr) = realloc((arr), (cap) * sizeof(*(arr)));                          \
     }                                                                          \
   } while (0)
 
@@ -50,14 +44,9 @@ extern "C" {
 #define ABS_DIFF(a, b) ((a) > (b) ? (a) - (b) : (b) - (a))
 
 #define NUM_PARTITIONS 512
-#define MAX_KMER_FREQ 128
-#define MAX_PAIR_COMPARISONS 64
-#define STEP_FRAC 3
-#define MAX_COLLINEAR_LOOKAHEAD 8
-#define MIN_SD_LEN 1000
-#define MIN_CONTAINMENT 0.9
+#define MAX_KMER_FREQ 8196
 
-#define BLOOM_SIZE_BITS (1 << 24)
+#define BLOOM_SIZE_BITS (1 << 22)
 #define BLOOM_SIZE_BYTES (BLOOM_SIZE_BITS / 8)
 #define BLOOM_MASK (BLOOM_SIZE_BITS - 1)
 
@@ -98,6 +87,7 @@ typedef struct {
   size_t start;
   size_t end;
   char *cluster_id;
+  uint32_t copy_count;
   uint32_t subcluster_id;
   SegtraceSketch flank_sketch;
   uint32_t window_idx;
@@ -112,17 +102,6 @@ typedef struct {
   uint64_t hash_threshold;
   uint64_t *hashes;
 } HashPool;
-
-typedef struct {
-  uint32_t pos;
-  uint64_t hash;
-} PosHash;
-
-typedef struct {
-  PosHash *entries;
-  size_t size;
-  size_t cap;
-} PosHashPool;
 
 typedef struct {
   uint32_t seq_id;
@@ -209,17 +188,10 @@ typedef struct {
   uint32_t window_id;
 } HashWindowEntry;
 
-#define BUCKET_BLOCK_SIZE 1024
-
-typedef struct HashBlock {
-  HashWindowEntry entries[BUCKET_BLOCK_SIZE];
-  struct HashBlock *next;
-} HashBlock;
-
 typedef struct {
-  HashBlock *head;
-  HashBlock *tail;
+  HashWindowEntry *entries;
   size_t size;
+  size_t cap;
 } PartitionBucket;
 
 typedef struct {
@@ -265,11 +237,11 @@ SegtraceDistResult calculate_window_dist(const uint64_t *all_hashes,
 
 // 5. REGION CLUSTERING & OUTPUT
 void build_duplicate_regions(UnionFind *uf, size_t num_sketches,
+                             size_t window_size, int num_files, char **files,
                              GenomeSeqLen *seq_lens, WindowCoord *coords,
                              SegtraceDupRegion **out_regions,
                              size_t *out_n_regions);
-size_t merge_dup_regions(SegtraceDupRegion *regions, size_t n,
-                         size_t step_size);
+size_t merge_dup_regions(SegtraceDupRegion *regions, size_t n);
 void extract_flankings(char **files, int num_files, const Segtrace *r,
                        uint64_t scale, SegtraceDupRegion *regions,
                        size_t n_regions, int n_threads, size_t flank_size);
@@ -284,8 +256,6 @@ void write_dup_bed(const char *out_prefix, SegtraceDupRegion *dup_regions,
 void init_segtrace(Segtrace *r, size_t hash_window, int filter_masked);
 void extract_hash(const Segtrace *r, HashPool *pool, const uint8_t *seq,
                   size_t len);
-void extract_hash_chunk(const Segtrace *r, PosHashPool *pool,
-                        const uint8_t *seq, size_t len, uint64_t threshold);
 void init_hash_pool(HashPool *pool, uint64_t threshold);
 void insert_hash_pool(HashPool *pool, uint64_t h);
 void finalize_hash_pool(HashPool *pool, uint64_t **out_hashes,
