@@ -496,6 +496,15 @@ static inline int check_collinear_neighbor(DiscoverComputeData *w, uint32_t wa,
             .shared_hashes >= min_shared)
       return 1;
   }
+  // 4. Backward-forward collinear neighbor: (wa - 1, wb + 1)
+  if (wa > 0 && wb + 1 < w->n_windows &&
+      w->coords[wa - 1].seq_id == w->coords[wa].seq_id &&
+      w->coords[wb + 1].seq_id == w->coords[wb].seq_id) {
+    if (calculate_window_dist(w->all_hashes, &w->coords[wa - 1],
+                              &w->coords[wb + 1], w->kmer_size)
+            .shared_hashes >= min_shared)
+      return 1;
+  }
   return 0;
 }
 
@@ -670,7 +679,7 @@ size_t merge_dup_regions(SegtraceDupRegion *regions, size_t n) {
   for (size_t i = 1; i < n; i++) {
     if (strcmp(regions[i].cluster_id, regions[out].cluster_id) == 0 &&
         strcmp(regions[i].chrom, regions[out].chrom) == 0 &&
-        regions[i].start <= regions[out].end) {
+        regions[i].start <= regions[out].end + 8192) {
       if (regions[i].end > regions[out].end)
         regions[out].end = regions[i].end;
       if (regions[i].window_idx > regions[out].window_idx)
