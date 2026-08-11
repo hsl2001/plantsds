@@ -53,9 +53,9 @@ extern "C" {
 #define MAX_KMER_FREQ 128
 #define MAX_PAIR_COMPARISONS 64
 #define STEP_FRAC 3
-#define MAX_COLLINEAR_LOOKAHEAD 4
+#define MAX_COLLINEAR_LOOKAHEAD 8
 #define MIN_SD_LEN 1000
-#define MIN_CONTAINMENT 0.3
+#define MIN_CONTAINMENT 0.4
 
 #define BLOOM_SIZE_BITS (1 << 24)
 #define BLOOM_SIZE_BYTES (BLOOM_SIZE_BITS / 8)
@@ -98,7 +98,6 @@ typedef struct {
   size_t start;
   size_t end;
   char *cluster_id;
-  uint32_t copy_count;
   uint32_t subcluster_id;
   SegtraceSketch flank_sketch;
   uint32_t window_idx;
@@ -269,7 +268,8 @@ void build_duplicate_regions(UnionFind *uf, size_t num_sketches,
                              GenomeSeqLen *seq_lens, WindowCoord *coords,
                              SegtraceDupRegion **out_regions,
                              size_t *out_n_regions);
-size_t merge_dup_regions(SegtraceDupRegion *regions, size_t n);
+size_t merge_dup_regions(SegtraceDupRegion *regions, size_t n,
+                         size_t step_size);
 void extract_flankings(char **files, int num_files, const Segtrace *r,
                        uint64_t scale, SegtraceDupRegion *regions,
                        size_t n_regions, int n_threads, size_t flank_size);

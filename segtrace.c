@@ -158,7 +158,7 @@ int main(int argc, char **argv) {
   free(coords);
   coords = NULL;
 
-  size_t n_merged = merge_dup_regions(dup_regions, n_dup_regions);
+  size_t n_merged = merge_dup_regions(dup_regions, n_dup_regions, step_size);
 
   fprintf(stderr,
           "[INFO] Extracting flanking sequences for sub-clustering...\n");
@@ -500,28 +500,33 @@ static inline int check_collinear_neighbor(DiscoverComputeData *w, uint32_t wa,
   const int dir_a[] = {1, -1, 1, -1};
   const int dir_b[] = {1, -1, -1, 1};
 
+  uint32_t seq_a = w->coords[wa].seq_id;
+  uint32_t seq_b = w->coords[wb].seq_id;
+  uint32_t win_a = w->coords[wa].window_idx;
+  uint32_t win_b = w->coords[wb].window_idx;
+
   for (int d = 0; d < 4; d++) {
-    for (int step_a = 1; step_a <= MAX_COLLINEAR_LOOKAHEAD; step_a++) {
-      for (int step_b = 1; step_b <= MAX_COLLINEAR_LOOKAHEAD; step_b++) {
-        if (ABS_DIFF(step_a, step_b) > STEP_FRAC)
-          continue;
+    for (int step = 1; step <= MAX_COLLINEAR_LOOKAHEAD; step++) {
+      uint32_t target_win_a = win_a + dir_a[d] * step;
+      uint32_t target_win_b = win_b + dir_b[d] * step;
 
-        long long next_a = (long long)wa + dir_a[d] * step_a;
-        long long next_b = (long long)wb + dir_b[d] * step_b;
+      long long search_a = (long long)wa + dir_a[d] * step;
+      long long search_b = (long long)wb + dir_b[d] * step;
 
-        if (next_a >= 0 && next_a < (long long)w->n_windows && next_b >= 0 &&
-            next_b < (long long)w->n_windows &&
-            w->coords[next_a].seq_id == w->coords[wa].seq_id &&
-            w->coords[next_b].seq_id == w->coords[wb].seq_id) {
+      if (search_a >= 0 && search_a < (long long)w->n_windows &&
+          search_b >= 0 && search_b < (long long)w->n_windows &&
+          w->coords[search_a].seq_id == seq_a &&
+          w->coords[search_b].seq_id == seq_b &&
+          w->coords[search_a].window_idx == target_win_a &&
+          w->coords[search_b].window_idx == target_win_b) {
 
-          if (w->coords[next_a].sketch_size > 0 &&
-              w->coords[next_b].sketch_size > 0) {
-            SegtraceDistResult d =
-                calculate_window_dist(w->all_hashes, &w->coords[next_a],
-                                      &w->coords[next_b], w->kmer_size);
-            if (d.containment >= MIN_CONTAINMENT)
-              return 1;
-          }
+        if (w->coords[search_a].sketch_size > 0 &&
+            w->coords[search_b].sketch_size > 0) {
+          SegtraceDistResult dist_res =
+              calculate_window_dist(w->all_hashes, &w->coords[search_a],
+                                    &w->coords[search_b], w->kmer_size);
+          if (dist_res.containment >= MIN_CONTAINMENT)
+            return 1;
         }
       }
     }
@@ -634,7 +639,6 @@ void build_duplicate_regions(UnionFind *uf, size_t num_sketches,
                                  .start = coords[i].start,
                                  .end = coords[i].end,
                                  .cluster_id = strdup(label),
-                                 .copy_count = comp_size[root_i],
                                  .subcluster_id = 0,
                                  .flank_sketch = {0},
                                  .window_idx = coords[i].window_idx}));
@@ -673,29 +677,62 @@ static int compare_dup_region_by_cluster(const void *a, const void *b) {
   return CMP(ra->end, rb->end);
 }
 
-size_t merge_dup_regions(SegtraceDupRegion *regions, size_t n) {
+size_t merge_dup_regions(SegtraceDupRegion *regions, size_t n,
+                         size_t step_size) {
   if (n <= 1)
     return n;
-  qsort(regions, n, sizeof(SegtraceDupRegion), compare_dup_region_by_cluster);
+
+  qsort(regions, n, sizeof(SegtraceDupRegion), compare_dup_region_by_pos);
+
+  UnionFind cluster_uf;
+  init_unionfind(&cluster_uf, n);
 
   size_t out = 0;
   for (size_t i = 1; i < n; i++) {
-    if (strcmp(regions[i].cluster_id, regions[out].cluster_id) == 0 &&
-        strcmp(regions[i].chrom, regions[out].chrom) == 0 &&
-        regions[i].start <= regions[out].end) {
+    if (strcmp(regions[i].chrom, regions[out].chrom) == 0 &&
+        regions[i].start <= regions[out].end + step_size) {
       if (regions[i].end > regions[out].end)
         regions[out].end = regions[i].end;
       if (regions[i].window_idx > regions[out].window_idx)
         regions[out].window_idx = regions[i].window_idx;
+
+      union_unionfind(&cluster_uf, (uint32_t)out, (uint32_t)i);
+
       free(regions[i].cluster_id);
       free(regions[i].chrom);
+      if (regions[i].flank_sketch.hashes)
+        free(regions[i].flank_sketch.hashes);
     } else {
       out++;
       if (out != i)
         regions[out] = regions[i];
     }
   }
-  return out + 1;
+  size_t n_merged = out + 1;
+
+  uint32_t *new_cid_map = calloc(n_merged, sizeof(uint32_t));
+  uint32_t next_cid = 1;
+
+  for (size_t i = 0; i < n_merged; i++) {
+    uint32_t root = find_unionfind(&cluster_uf, (uint32_t)i);
+    if (new_cid_map[root] == 0)
+      new_cid_map[root] = next_cid++;
+  }
+
+  for (size_t i = 0; i < n_merged; i++) {
+    uint32_t root = find_unionfind(&cluster_uf, (uint32_t)i);
+    uint32_t cid = new_cid_map[root];
+    char label[32];
+    snprintf(label, sizeof(label), "%u", cid);
+    if (regions[i].cluster_id)
+      free(regions[i].cluster_id);
+    regions[i].cluster_id = strdup(label);
+  }
+
+  free(new_cid_map);
+  free_unionfind(&cluster_uf);
+
+  return n_merged;
 }
 
 void extract_flankings(char **files, int num_files, const Segtrace *r,
