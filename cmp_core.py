@@ -86,7 +86,7 @@ def calc_bp_metrics(pred_intervals, ref_intervals):
         'jaccard': bp_jaccard
     }
 
-def eval_reciprocal_overlap(pred_intervals, ref_intervals, fraction=0.5):
+def eval_reciprocal_overlap(pred_intervals, ref_intervals, fraction=0.3):
     """
     Evaluates intervals using reciprocal fraction overlap (bedtools intersect -f <fraction> -r).
     Calculates TP, FP, FN, Recall, Precision, and F1.
