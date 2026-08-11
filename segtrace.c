@@ -54,13 +54,14 @@ void print_usage(void) {
          "Usage: segtrace [options] fasta1 [fasta2 ...]\n\n"
          "Options:\n"
          "  -k: kmer size (default: 15)\n"
-         "  -s: scale factor (default: 16)\n"
+         "  -s: scale factor (default: 8)\n"
          "  -e: hash seed (default: 42)\n"
          "  -w: window size in bp (default: 1024)\n"
          "  -t: step size in bp (default: 0 [auto: 33%% of window size])\n"
          "  -b: minimum valid bases per window (default: 0 [auto: 25%% of "
          "window size])\n"
-         "  -m: filter soft-masked bases (treat lowercase a/c/g/t as invalid)\n"
+         "  -m: not filtering soft-masked bases (treat lowercase a/c/g/t as "
+         "valid)\n"
          "  -o: output file prefix (default: segtrace)\n"
          "  -p: number of threads (default: 8)\n"
          "  -h, --help: show this help message\n\n");
@@ -79,7 +80,7 @@ int main(int argc, char **argv) {
   }
 
   uint32_t def_kmer_size = 15;
-  uint64_t def_scale = 16, def_hash_seed = 42;
+  uint64_t def_scale = 8, def_hash_seed = 42;
   size_t window_size = 1024, step_size = 0, min_bases = 0, flank_size = 2048;
   const char *out_prefix = "segtrace";
   int n_threads = 8, filter_masked = 1;
@@ -647,7 +648,7 @@ size_t merge_dup_regions(SegtraceDupRegion *regions, size_t n) {
   for (size_t i = 1; i < n; i++) {
     if (strcmp(regions[i].cluster_id, regions[out].cluster_id) == 0 &&
         strcmp(regions[i].chrom, regions[out].chrom) == 0 &&
-        regions[i].start <= regions[out].end + 8192) {
+        regions[i].start <= regions[out].end) {
       if (regions[i].end > regions[out].end)
         regions[out].end = regions[i].end;
       if (regions[i].window_idx > regions[out].window_idx)
