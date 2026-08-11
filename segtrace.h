@@ -47,7 +47,7 @@ extern "C" {
 #define MAX_KMER_FREQ 8196
 #define MAX_PAIR_COMPARISONS 128
 
-#define BLOOM_SIZE_BITS (1 << 24)
+#define BLOOM_SIZE_BITS (1 << 26)
 #define BLOOM_SIZE_BYTES (BLOOM_SIZE_BITS / 8)
 #define BLOOM_MASK (BLOOM_SIZE_BITS - 1)
 
