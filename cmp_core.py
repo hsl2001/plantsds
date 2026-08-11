@@ -86,9 +86,11 @@ def calc_bp_metrics(pred_intervals, ref_intervals):
         'jaccard': bp_jaccard
     }
 
-def eval_reciprocal_overlap(pred_intervals, ref_intervals, fraction=0.5):
+def eval_fragment_overlap(pred_intervals, ref_intervals, fraction=0.5):
     """
-    Evaluates intervals by checking if predicted interval covers >= fraction of reference interval (ov / len_r >= fraction).
+    Evaluates fragment intervals:
+    - Recall (Sensitivity): Fraction of reference intervals covered >= fraction (ov / len_r >= fraction).
+    - Precision: Fraction of predicted intervals valid SD sequence (ov / len_p >= fraction).
     Calculates TP, FP, FN, Recall, Precision, and F1.
     """
     p_by_c = {}
@@ -99,7 +101,7 @@ def eval_reciprocal_overlap(pred_intervals, ref_intervals, fraction=0.5):
     for c, s, e in ref_intervals:
         r_by_c.setdefault(c, []).append((s, e))
 
-    # TP & FN: Reference Intervals covered >= 50% by any prediction
+    # TP & FN: Reference Intervals covered >= fraction by any prediction
     tp = 0
     total_ref = len(ref_intervals)
     for c, s_r, e_r in ref_intervals:
@@ -117,7 +119,7 @@ def eval_reciprocal_overlap(pred_intervals, ref_intervals, fraction=0.5):
 
     fn = total_ref - tp
 
-    # Matched Predictions & FP: Predictions covering >= 50% of any reference interval
+    # Matched Predictions & FP: Predictions where >= fraction of prediction is valid reference SD
     matched_pred = 0
     total_pred = len(pred_intervals)
     for c, s_p, e_p in pred_intervals:
@@ -126,11 +128,8 @@ def eval_reciprocal_overlap(pred_intervals, ref_intervals, fraction=0.5):
             continue
         matched = False
         for s_r, e_r in r_by_c[c]:
-            len_r = e_r - s_r
-            if len_r <= 0:
-                continue
             ov = max(0, min(e_r, e_p) - max(s_r, s_p))
-            if ov / len_r >= fraction:
+            if ov / len_p >= fraction:
                 matched = True
                 break
         if matched:
@@ -152,3 +151,6 @@ def eval_reciprocal_overlap(pred_intervals, ref_intervals, fraction=0.5):
         'total_ref': total_ref,
         'total_pred': total_pred
     }
+
+# Backwards compatibility alias
+eval_reciprocal_overlap = eval_fragment_overlap

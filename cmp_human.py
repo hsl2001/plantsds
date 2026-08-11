@@ -74,7 +74,7 @@ def cmp_human_run(segtrace_bed, sedef_bed, exclude_chrm=True):
     sd_ints = load_normalized_intervals(sedef_bed, exclude_chrm=exclude_chrm)
 
     bp_m = calc_bp_metrics(st_ints, sd_ints)
-    frag_m = eval_reciprocal_overlap(st_ints, sd_ints, fraction=0.5)
+    frag_m = eval_reciprocal_overlap(st_ints, sd_ints)
 
     print_report(segtrace_bed, sedef_bed, bp_m, frag_m)
     return bp_m, frag_m

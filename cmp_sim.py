@@ -88,14 +88,14 @@ def sim_run_segtrace(fasta_path, true_intervals):
     pred_intervals = parse_bed_intervals(dup_file)
 
     bp_m = calc_bp_metrics(pred_intervals, true_intervals)
-    frag_m = eval_reciprocal_overlap(pred_intervals, true_intervals, fraction=0.5)
+    frag_m = eval_reciprocal_overlap(pred_intervals, true_intervals)
 
     return bp_m, frag_m, exec_time
 
 def evaluate_bedpe_sim(true_intervals, filepath):
     pred_intervals = parse_bed_intervals(filepath)
     bp_m = calc_bp_metrics(pred_intervals, true_intervals)
-    frag_m = eval_reciprocal_overlap(pred_intervals, true_intervals, fraction=0.5)
+    frag_m = eval_reciprocal_overlap(pred_intervals, true_intervals)
     return bp_m, frag_m
 
 def plot_sim_results(results_df, output_png="evaluation_plots.png"):
