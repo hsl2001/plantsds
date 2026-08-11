@@ -457,7 +457,7 @@ SegtraceDistResult calculate_window_dist(const uint64_t *all_hashes,
                        .hashes = (uint64_t *)(all_hashes + wa->sketch_offset)};
   SegtraceSketch sb = {.sketch_size = wb->sketch_size,
                        .hashes = (uint64_t *)(all_hashes + wb->sketch_offset)};
-  return calculate_segtrace_dist(&sa, &sb, kmer_size);
+  return calculate_segtrace_dist(&sa, &sb);
 }
 
 static inline int check_collinear_neighbor(DiscoverComputeData *w, uint32_t wa,
@@ -840,8 +840,8 @@ static inline void check_and_eval_flank_pair(SubclusterData *w, int tid,
   if (min_shared < 2)
     min_shared = 2;
 
-  SegtraceDistResult d = calculate_segtrace_dist(
-      &w->regions[ra].flank_sketch, &w->regions[rb].flank_sketch, w->kmer_size);
+  SegtraceDistResult d = calculate_segtrace_dist(&w->regions[ra].flank_sketch,
+                                                 &w->regions[rb].flank_sketch);
   if (d.shared_hashes >= min_shared) {
     DA_PUSH(w->t_pairs[tid], w->t_n_pairs[tid], w->t_cap_pairs[tid],
             ((SubclusterPair){(uint32_t)ra, (uint32_t)rb}));
@@ -1040,9 +1040,7 @@ void finalize_hash_pool(HashPool *pool, uint64_t **out_hashes,
 }
 
 SegtraceDistResult calculate_segtrace_dist(const SegtraceSketch *ref,
-                                           const SegtraceSketch *query,
-                                           uint32_t kmer_size) {
-  (void)kmer_size;
+                                           const SegtraceSketch *query) {
   SegtraceDistResult res = {0};
   if (!ref || !query || ref->sketch_size == 0 || query->sketch_size == 0)
     return res;

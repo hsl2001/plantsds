@@ -51,7 +51,7 @@ extern "C" {
 #define NUM_PARTITIONS 512
 #define MAX_KMER_FREQ 32
 #define MAX_PAIR_COMPARISONS 64
-#define MAX_COLLINEAR_LOOOKAHEAD 3
+#define MAX_COLLINEAR_LOOOKAHEAD 8
 #define MIN_SD_LEN 1000
 #define MERGE_COEFF 10
 
@@ -267,8 +267,7 @@ void insert_hash_pool(HashPool *pool, uint64_t h);
 void finalize_hash_pool(HashPool *pool, uint64_t **out_hashes,
                         size_t *out_size);
 SegtraceDistResult calculate_segtrace_dist(const SegtraceSketch *ref,
-                                           const SegtraceSketch *query,
-                                           uint32_t kmer_size);
+                                           const SegtraceSketch *query);
 void init_unionfind(UnionFind *uf, size_t n);
 uint32_t find_unionfind(UnionFind *uf, uint32_t x);
 void union_unionfind(UnionFind *uf, uint32_t a, uint32_t b);
