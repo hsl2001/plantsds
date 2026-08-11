@@ -57,7 +57,7 @@ void print_usage(void) {
          "  -s: scale factor (default: 8)\n"
          "  -e: hash seed (default: 42)\n"
          "  -w: window size in bp (default: 1024)\n"
-         "  -t: step size in bp (default: 0 [auto: 33%% of window size])\n"
+         "  -t: step size in bp (default: 0 [auto: window_size / STEP_FRAC])\n"
          "  -b: minimum valid bases per window (default: 0 [auto: 25%% of "
          "window size])\n"
          "  -m: not filtering soft-masked bases (treat lowercase a/c/g/t as "
@@ -116,8 +116,8 @@ int main(int argc, char **argv) {
       return 1;
   }
 
-  if (step_size == 0)
-    step_size = window_size / 3;
+  /* Always automatically set step size based on STEP_FRAC */
+  step_size = window_size / STEP_FRAC;
   if (min_bases == 0)
     min_bases = window_size / 4;
   if (opt.ind == argc) {
@@ -506,8 +506,11 @@ static inline int check_collinear_neighbor(DiscoverComputeData *w, uint32_t wa,
   const int dir_b[] = {1, -1, -1, 1};
 
   for (int d = 0; d < 4; d++) {
-    for (int step_a = 1; step_a <= MAX_COLLINEAR_LOOOKAHEAD; step_a++) {
-      for (int step_b = 1; step_b <= MAX_COLLINEAR_LOOOKAHEAD; step_b++) {
+    for (int step_a = 1; step_a <= MAX_COLLINEAR_LOOKAHEAD; step_a++) {
+      for (int step_b = 1; step_b <= MAX_COLLINEAR_LOOKAHEAD; step_b++) {
+        if (ABS_DIFF(step_a, step_b) > STEP_FRAC)
+          continue;
+
         long long next_a = (long long)wa + dir_a[d] * step_a;
         long long next_b = (long long)wb + dir_b[d] * step_b;
 
