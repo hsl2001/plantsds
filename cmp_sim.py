@@ -141,7 +141,7 @@ def plot_sim_results(results_df, output_png="evaluation_plots.png"):
 def main():
     parser = argparse.ArgumentParser(description="Run simulation benchmark comparing SD callers.")
     parser.add_argument("--num-dups", type=int, default=None, help="Number of synthetic SDs to inject")
-    parser.add_argument("--genome-size", type=int, default=100_000_000, help="Simulated genome size (bp)")
+    parser.add_argument("--genome-size", type=int, default=500_000_000, help="Simulated genome size (bp)")
     parser.add_argument("--no-sedef", action='store_true', help="Skip SEDEF benchmark")
     parser.add_argument("--plot", action='store_true', help="Generate evaluation_plots.png visualization")
     args = parser.parse_args()

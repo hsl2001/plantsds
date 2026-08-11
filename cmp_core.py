@@ -86,9 +86,9 @@ def calc_bp_metrics(pred_intervals, ref_intervals):
         'jaccard': bp_jaccard
     }
 
-def eval_reciprocal_overlap(pred_intervals, ref_intervals, fraction=0.3):
+def eval_reciprocal_overlap(pred_intervals, ref_intervals, fraction=0.5):
     """
-    Evaluates intervals using reciprocal fraction overlap (bedtools intersect -f <fraction> -r).
+    Evaluates intervals by checking if predicted interval covers >= fraction of reference interval (ov / len_r >= fraction).
     Calculates TP, FP, FN, Recall, Precision, and F1.
     """
     p_by_c = {}
@@ -99,7 +99,7 @@ def eval_reciprocal_overlap(pred_intervals, ref_intervals, fraction=0.3):
     for c, s, e in ref_intervals:
         r_by_c.setdefault(c, []).append((s, e))
 
-    # TP & FN: Matched Reference Intervals
+    # TP & FN: Reference Intervals covered >= 50% by any prediction
     tp = 0
     total_ref = len(ref_intervals)
     for c, s_r, e_r in ref_intervals:
@@ -108,11 +108,8 @@ def eval_reciprocal_overlap(pred_intervals, ref_intervals, fraction=0.3):
             continue
         matched = False
         for s_p, e_p in p_by_c[c]:
-            len_p = e_p - s_p
-            if len_p <= 0:
-                continue
             ov = max(0, min(e_r, e_p) - max(s_r, s_p))
-            if (ov / len_r >= fraction) and (ov / len_p >= fraction):
+            if ov / len_r >= fraction:
                 matched = True
                 break
         if matched:
@@ -120,7 +117,7 @@ def eval_reciprocal_overlap(pred_intervals, ref_intervals, fraction=0.3):
 
     fn = total_ref - tp
 
-    # Matched Predictions & FP
+    # Matched Predictions & FP: Predictions covering >= 50% of any reference interval
     matched_pred = 0
     total_pred = len(pred_intervals)
     for c, s_p, e_p in pred_intervals:
@@ -133,7 +130,7 @@ def eval_reciprocal_overlap(pred_intervals, ref_intervals, fraction=0.3):
             if len_r <= 0:
                 continue
             ov = max(0, min(e_r, e_p) - max(s_r, s_p))
-            if (ov / len_r >= fraction) and (ov / len_p >= fraction):
+            if ov / len_r >= fraction:
                 matched = True
                 break
         if matched:
