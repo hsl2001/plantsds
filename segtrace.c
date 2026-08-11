@@ -283,9 +283,10 @@ StreamWorkerData *extract_all_windows(char **files, int num_files,
       size_t chunk_size = len / (n_threads * 4);
       if (chunk_size < 100000)
         chunk_size = 100000;
+      chunk_size = ((chunk_size + step_size - 1) / step_size) * step_size;
 
       for (size_t c_start = 0; c_start < len; c_start += chunk_size) {
-        size_t c_end = c_start + chunk_size;
+        size_t c_end = c_start + chunk_size + window_size - step_size;
         if (c_end > len)
           c_end = len;
         if (c_end - c_start < window_size)
@@ -591,50 +592,30 @@ void build_duplicate_regions(UnionFind *uf, size_t num_sketches,
   size_t n_dup_regions = 0, cap_dup_regions = 0;
   SegtraceDupRegion *dup_regions = NULL;
 
-  size_t i = 0;
-  while (i < num_sketches) {
+  for (size_t i = 0; i < num_sketches; i++) {
     uint32_t root_i = find_unionfind(uf, (uint32_t)i);
-    if (cluster_map[root_i] == 0) {
-      i++;
+    uint32_t cid = cluster_map[root_i];
+    if (cid == 0) {
       continue;
     }
 
-    uint32_t seq_i = coords[i].seq_id;
-    size_t min_start = coords[i].start;
-    size_t max_end = coords[i].end;
-    uint32_t min_cid = cluster_map[root_i];
-    uint32_t win_idx = coords[i].window_idx;
-
-    size_t j = i + 1;
-    while (j < num_sketches && coords[j].seq_id == seq_i &&
-           coords[j].start <= max_end + 4 * window_size) {
-      uint32_t root_j = find_unionfind(uf, (uint32_t)j);
-      if (cluster_map[root_j] != 0) {
-        if (coords[j].end > max_end)
-          max_end = coords[j].end;
-        if (cluster_map[root_j] < min_cid)
-          min_cid = cluster_map[root_j];
-      }
-      j++;
-    }
-
     char label[32];
-    snprintf(label, sizeof(label), "%u", min_cid);
+    snprintf(label, sizeof(label), "%u", cid);
 
     char chrom_name[512];
+    uint32_t seq_i = coords[i].seq_id;
     snprintf(chrom_name, sizeof(chrom_name), "%s-%s", seq_lens[seq_i].genome,
              seq_lens[seq_i].seq);
 
     DA_PUSH(dup_regions, n_dup_regions, cap_dup_regions,
             ((SegtraceDupRegion){.chrom = strdup(chrom_name),
-                                 .start = min_start,
-                                 .end = max_end,
+                                 .start = coords[i].start,
+                                 .end = coords[i].end,
                                  .cluster_id = strdup(label),
                                  .copy_count = comp_size[root_i],
                                  .subcluster_id = 0,
                                  .flank_sketch = {0},
-                                 .window_idx = win_idx}));
-    i = j;
+                                 .window_idx = coords[i].window_idx}));
   }
 
   free(comp_size);
