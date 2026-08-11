@@ -21,9 +21,12 @@ def parse_bed_intervals(filepath):
             if len(parts) >= 3:
                 c1 = parts[0].split('-')[-1] if '-' in parts[0] and not parts[0].startswith('chr') else parts[0]
                 intervals.append((c1, int(parts[1]), int(parts[2])))
-            if len(parts) >= 12:  # SEDEF 12+ column pair second arm
-                c2 = parts[9].split('-')[-1] if '-' in parts[9] and not parts[9].startswith('chr') else parts[9]
-                intervals.append((c2, int(parts[10]), int(parts[11])))
+            if len(parts) >= 6:  # SEDEF / BEDPE pair second arm (chrom2, start2, end2)
+                try:
+                    c2 = parts[3].split('-')[-1] if '-' in parts[3] and not parts[3].startswith('chr') else parts[3]
+                    intervals.append((c2, int(parts[4]), int(parts[5])))
+                except ValueError:
+                    pass
     return list(set(intervals))
 
 def merge_intervals_by_chrom(intervals):

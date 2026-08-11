@@ -7,7 +7,6 @@ Evaluates Base-Pair (BP) footprint and Fragment-level Reciprocal 50% Overlap (be
 import sys
 import os
 import argparse
-import gzip
 from cmp_core import parse_bed_intervals, calc_bp_metrics, eval_reciprocal_overlap
 
 ACC_MAP = {
@@ -57,7 +56,7 @@ def print_report(segtrace_name, sedef_name, bp_m, frag_m):
     print(f"  BP F1-Score:                {bp_m['f1']*100:8.2f}%")
     print(f"  BP Jaccard Index:           {bp_m['jaccard']:10.6f}")
     print("---------------------------------------------------------------------------------")
-    print(" FRAGMENT (FRAG) LEVEL EVALUATION")
+    print(" FRAGMENT (FRAG) LEVEL EVALUATION (bedtools intersect -f 0.5 -r Reciprocal Overlap)")
     print("---------------------------------------------------------------------------------")
     print(f"  True Positives (TP):        {frag_m['tp']:12,}")
     print(f"  False Positives (FP):       {frag_m['fp']:12,}")

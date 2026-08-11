@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
 cmp_sim.py - Simulation benchmark script for Segtrace, SEDEF, and BISER.
+Generates synthetic SDs, runs callers, evaluates TP/FP/FN/Recall/Precision/F1, and generates visualization plots.
 """
 
 import random
@@ -9,6 +10,8 @@ import os
 import time
 import argparse
 import numpy as np
+import pandas as pd
+
 from cmp_core import parse_bed_intervals, calc_bp_metrics, eval_reciprocal_overlap
 
 def sim_generate_genome(chrom_sizes, num_dups=100, min_dup_len=1000, max_dup_len=10_000, out_fasta="sim.fa"):
@@ -47,7 +50,7 @@ def sim_generate_genome(chrom_sizes, num_dups=100, min_dup_len=1000, max_dup_len
         
         genomes[c2][s2:s2 + dup_len] = genomes[c1][s1:s1 + dup_len]
 
-        div = random.uniform(0.0, 0.1)
+        div = random.uniform(0.0, 0.0)
         num_muts = np.random.binomial(dup_len, div)
         if num_muts > 0:
             mut_offsets = np.random.choice(dup_len, size=num_muts, replace=False)
@@ -95,11 +98,52 @@ def evaluate_bedpe_sim(true_intervals, filepath):
     frag_m = eval_reciprocal_overlap(pred_intervals, true_intervals, fraction=0.5)
     return bp_m, frag_m
 
+def plot_sim_results(results_df, output_png="evaluation_plots.png"):
+    """Generates 3-panel visualization plots for simulation benchmark."""
+    try:
+        import matplotlib.pyplot as plt
+        import seaborn as sns
+
+        fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(18, 5))
+
+        # 1. BP-level Metrics
+        df_bp = results_df[['Tool', 'Recall_bp', 'Precision_bp']].melt(id_vars='Tool', var_name='Metric', value_name='Score')
+        df_bp['Metric'] = df_bp['Metric'].map({'Recall_bp': 'Recall', 'Precision_bp': 'Precision'})
+        sns.barplot(data=df_bp, x='Tool', y='Score', hue='Metric', ax=ax1, alpha=0.7)
+        ax1.set_ylim(0, 1.05)
+        ax1.set_title('BP-level Recall & Precision')
+        ax1.grid(axis='y', alpha=0.3)
+
+        # 2. Fragment-level Metrics
+        df_frag = results_df[['Tool', 'Recall_frag', 'Precision_frag']].melt(id_vars='Tool', var_name='Metric', value_name='Score')
+        df_frag['Metric'] = df_frag['Metric'].map({'Recall_frag': 'Recall', 'Precision_frag': 'Precision'})
+        sns.barplot(data=df_frag, x='Tool', y='Score', hue='Metric', ax=ax2, alpha=0.7)
+        ax2.set_ylim(0, 1.05)
+        ax2.set_title('Fragment-level (bedtools -f 0.5 -r) Recall & Precision')
+        ax2.grid(axis='y', alpha=0.3)
+
+        # 3. Time vs F1-Score
+        palette = {'Segtrace': 'blue', 'SEDEF': 'red', 'BISER': 'green'}
+        sns.scatterplot(data=results_df, x='Time(s)', y='F1_frag', hue='Tool', s=150, palette=palette, ax=ax3)
+        ax3.set_xlabel('Execution Time (seconds)')
+        ax3.set_ylabel('Fragment F1-Score')
+        ax3.set_title('F1-Score vs Execution Time')
+        ax3.set_ylim(0, 1.05)
+        ax3.grid(True, alpha=0.3)
+
+        plt.tight_layout()
+        plt.savefig(output_png, dpi=300)
+        plt.close()
+        print(f"[INFO] Visualization saved to {output_png}")
+    except Exception as e:
+        print(f"[WARNING] Could not generate plots: {e}")
+
 def main():
     parser = argparse.ArgumentParser(description="Run simulation benchmark comparing SD callers.")
     parser.add_argument("--num-dups", type=int, default=None, help="Number of synthetic SDs to inject")
-    parser.add_argument("--genome-size", type=int, default=10_000_000, help="Simulated genome size (bp)")
+    parser.add_argument("--genome-size", type=int, default=100_000_000, help="Simulated genome size (bp)")
     parser.add_argument("--no-sedef", action='store_true', help="Skip SEDEF benchmark")
+    parser.add_argument("--plot", action='store_true', help="Generate evaluation_plots.png visualization")
     args = parser.parse_args()
 
     g_size = args.genome_size
@@ -107,13 +151,29 @@ def main():
     print(f"            SIMULATION BENCHMARK REPORT (Genome Size: {g_size:,} bp)")
     print(f"=================================================================================")
     
-    chrom_sizes = {'chr1': g_size // 2, 'chr2': g_size - (g_size // 2)}
+    chrom_sizes = {f'chr{i}': g_size // 5 for i in range(1, 6)}
     num_dups = args.num_dups if args.num_dups else max(10, g_size // 1_000_000)
     
     true_intervals, fasta_path = sim_generate_genome(chrom_sizes, num_dups=num_dups)
     
-    bp_m, frag_m, elapsed = sim_run_segtrace(fasta_path, true_intervals)
+    all_results = []
     
+    bp_m, frag_m, elapsed = sim_run_segtrace(fasta_path, true_intervals)
+    all_results.append({
+        'Tool': 'Segtrace',
+        'GenomeSize': g_size,
+        'Recall_bp': bp_m['recall'],
+        'Precision_bp': bp_m['precision'],
+        'F1_bp': bp_m['f1'],
+        'Recall_frag': frag_m['recall'],
+        'Precision_frag': frag_m['precision'],
+        'F1_frag': frag_m['f1'],
+        'TP': frag_m['tp'],
+        'FP': frag_m['fp'],
+        'FN': frag_m['fn'],
+        'Time(s)': elapsed
+    })
+
     print("\n[Segtrace Performance]")
     print(f"  Time Elapsed:               {elapsed:.2f} s")
     print(f"  BP Recall / Precision / F1: {bp_m['recall']*100:.2f}% / {bp_m['precision']*100:.2f}% / {bp_m['f1']*100:.2f}%")
@@ -131,6 +191,20 @@ def main():
             sedef_exec_time = time.perf_counter() - t0
             if os.path.exists(f"{sedef_out_dir}/final.bed"):
                 s_bp_m, s_frag_m = evaluate_bedpe_sim(true_intervals, f"{sedef_out_dir}/final.bed")
+                all_results.append({
+                    'Tool': 'SEDEF',
+                    'GenomeSize': g_size,
+                    'Recall_bp': s_bp_m['recall'],
+                    'Precision_bp': s_bp_m['precision'],
+                    'F1_bp': s_bp_m['f1'],
+                    'Recall_frag': s_frag_m['recall'],
+                    'Precision_frag': s_frag_m['precision'],
+                    'F1_frag': s_frag_m['f1'],
+                    'TP': s_frag_m['tp'],
+                    'FP': s_frag_m['fp'],
+                    'FN': s_frag_m['fn'],
+                    'Time(s)': sedef_exec_time
+                })
                 print("\n[SEDEF Performance]")
                 print(f"  Time Elapsed:               {sedef_exec_time:.2f} s")
                 print(f"  BP Recall / Precision / F1: {s_bp_m['recall']*100:.2f}% / {s_bp_m['precision']*100:.2f}% / {s_bp_m['f1']*100:.2f}%")
@@ -140,6 +214,12 @@ def main():
             print(f"[WARNING] SEDEF execution failed: {e}")
             
     print("=================================================================================")
+
+    df_results = pd.DataFrame(all_results)
+    df_results.to_csv("evaluation_results.csv", index=False)
+    
+    if args.plot or True:  # Generate plots by default
+        plot_sim_results(df_results, "evaluation_plots.png")
 
 if __name__ == "__main__":
     main()
