@@ -53,12 +53,12 @@ void print_usage(void) {
   printf("Segtrace: Segmental Duplication Tracer\n\n"
          "Usage: segtrace [options] fasta1 [fasta2 ...]\n\n"
          "Options:\n"
-         "  -k: kmer size (default: 25)\n"
+         "  -k: kmer size (default: 15)\n"
          "  -s: scale factor (default: 16)\n"
          "  -e: hash seed (default: 42)\n"
          "  -w: window size in bp (default: 1024)\n"
          "  -t: step size in bp (default: 0 [auto: 33%% of window size])\n"
-         "  -b: minimum valid bases per window (default: 0 [auto: 50%% of "
+         "  -b: minimum valid bases per window (default: 0 [auto: 20%% of "
          "window size])\n"
          "  -m: filter soft-masked bases (treat lowercase a/c/g/t as invalid)\n"
          "  -o: output file prefix (default: segtrace)\n"
@@ -78,9 +78,9 @@ int main(int argc, char **argv) {
     }
   }
 
-  uint32_t def_kmer_size = 25;
+  uint32_t def_kmer_size = 15;
   uint64_t def_scale = 16, def_hash_seed = 42;
-  size_t window_size = 1024, step_size = 0, min_bases = 0, flank_size = 1000;
+  size_t window_size = 1024, step_size = 0, min_bases = 0, flank_size = 512;
   const char *out_prefix = "segtrace";
   int n_threads = 8, filter_masked = 0;
 
@@ -118,7 +118,7 @@ int main(int argc, char **argv) {
   if (step_size == 0)
     step_size = window_size / 3;
   if (min_bases == 0)
-    min_bases = (size_t)(window_size / 3);
+    min_bases = (size_t)(window_size / 5);
   if (opt.ind == argc) {
     fprintf(stderr, "[ERROR] Input FASTA files are required.\n");
     return 1;
