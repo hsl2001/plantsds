@@ -57,7 +57,6 @@ void print_usage(void) {
          "  -s: scale factor (default: 8)\n"
          "  -e: hash seed (default: 42)\n"
          "  -w: window size in bp (default: 1024)\n"
-         "  -t: step size in bp (default: 0 [auto: window_size / STEP_FRAC])\n"
          "  -b: minimum valid bases per window (default: 0 [auto: 25%% of "
          "window size])\n"
          "  -m: not filtering soft-masked bases (treat lowercase a/c/g/t as "
@@ -87,8 +86,7 @@ int main(int argc, char **argv) {
 
   ketopt_t opt = KETOPT_INIT;
   int c;
-  while ((c = ketopt(&opt, argc, argv, 1, "k:s:e:w:t:b:d:o:p:D:f:mh", 0)) >=
-         0) {
+  while ((c = ketopt(&opt, argc, argv, 1, "k:s:e:w:b:d:o:p:D:f:mh", 0)) >= 0) {
     if (c == 'h') {
       print_usage();
       return 0;
@@ -100,8 +98,6 @@ int main(int argc, char **argv) {
       def_hash_seed = strtoull(opt.arg, NULL, 0);
     else if (c == 'w')
       window_size = (size_t)strtoull(opt.arg, NULL, 10);
-    else if (c == 't')
-      step_size = (size_t)strtoull(opt.arg, NULL, 10);
     else if (c == 'b')
       min_bases = (size_t)strtoull(opt.arg, NULL, 10);
     else if (c == 'o')
@@ -116,7 +112,6 @@ int main(int argc, char **argv) {
       return 1;
   }
 
-  /* Always automatically set step size based on STEP_FRAC */
   step_size = window_size / STEP_FRAC;
   if (min_bases == 0)
     min_bases = window_size / 4;
