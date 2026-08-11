@@ -53,7 +53,7 @@ void print_usage(void) {
   printf("Segtrace: Segmental Duplication Tracer\n\n"
          "Usage: segtrace [options] fasta1 [fasta2 ...]\n\n"
          "Options:\n"
-         "  -k: kmer size (default: 15)\n"
+         "  -k: kmer size (default: 17)\n"
          "  -s: scale factor (default: 16)\n"
          "  -w: window size in bp (default: 1024)\n"
          "  -t: step size in bp (default: 0 [auto: 33%% of window size])\n"
@@ -78,7 +78,7 @@ int main(int argc, char **argv) {
     }
   }
 
-  uint32_t def_kmer_size = 15;
+  uint32_t def_kmer_size = 17;
   uint64_t def_scale = 16, def_hash_seed = 42;
   size_t window_size = 1024, step_size = 0, min_bases = 0, flank_size = 256;
   const char *out_prefix = "segtrace";
