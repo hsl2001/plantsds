@@ -325,8 +325,8 @@ StreamWorkerData *extract_all_windows(char **files, int num_files,
     exit(1);
   }
 
-  size_t cap_jobs = 16, num_jobs = 0;
-  SeqChunkJob *jobs = malloc(cap_jobs * sizeof(SeqChunkJob));
+  SeqChunkJob *jobs = NULL;
+  size_t num_jobs = 0, cap_jobs = 0;
   size_t batch_seq_len = 0;
 
   for (int f = 0; f < num_files; f++) {
@@ -376,17 +376,19 @@ StreamWorkerData *extract_all_windows(char **files, int num_files,
           break;
 
         DA_RESERVE(jobs, cap_jobs, num_jobs + 1);
-        jobs[num_jobs++] = (SeqChunkJob){.r = r,
-                                         .base_lookup = r->base_lookup,
-                                         .scale = scale,
-                                         .window_size = window_size,
-                                         .step_size = step_size,
-                                         .min_bases = min_bases,
-                                         .seq_id = seq_id,
-                                         .seq_ptr = seq_copy,
-                                         .seq_len = len,
-                                         .chunk_start_idx = c_start,
-                                         .chunk_end_idx = c_end};
+        SeqChunkJob *job = &jobs[num_jobs++];
+        memset(job, 0, sizeof(SeqChunkJob));
+        job->r = r;
+        job->base_lookup = r->base_lookup;
+        job->scale = scale;
+        job->window_size = window_size;
+        job->step_size = step_size;
+        job->min_bases = min_bases;
+        job->seq_id = seq_id;
+        job->seq_ptr = seq_copy;
+        job->seq_len = len;
+        job->chunk_start_idx = c_start;
+        job->chunk_end_idx = c_end;
       }
 
       if (num_jobs >= (size_t)(n_threads * 4) || batch_seq_len > 250000000) {
@@ -507,8 +509,11 @@ static inline int check_collinear_neighbor(DiscoverComputeData *w, uint32_t wa,
 
   for (int d = 0; d < 4; d++) {
     for (int step = 1; step <= MAX_COLLINEAR_LOOKAHEAD; step++) {
-      uint32_t target_win_a = win_a + dir_a[d] * step;
-      uint32_t target_win_b = win_b + dir_b[d] * step;
+      long long target_win_a = (long long)win_a + dir_a[d] * step;
+      long long target_win_b = (long long)win_b + dir_b[d] * step;
+
+      if (target_win_a < 0 || target_win_b < 0)
+        continue;
 
       long long search_a = (long long)wa + dir_a[d] * step;
       long long search_b = (long long)wb + dir_b[d] * step;
@@ -517,8 +522,8 @@ static inline int check_collinear_neighbor(DiscoverComputeData *w, uint32_t wa,
           search_b >= 0 && search_b < (long long)w->n_windows &&
           w->coords[search_a].seq_id == seq_a &&
           w->coords[search_b].seq_id == seq_b &&
-          w->coords[search_a].window_idx == target_win_a &&
-          w->coords[search_b].window_idx == target_win_b) {
+          (long long)w->coords[search_a].window_idx == target_win_a &&
+          (long long)w->coords[search_b].window_idx == target_win_b) {
 
         if (w->coords[search_a].sketch_size > 0 &&
             w->coords[search_b].sketch_size > 0) {
@@ -710,7 +715,7 @@ size_t merge_dup_regions(SegtraceDupRegion *regions, size_t n,
   }
   size_t n_merged = out + 1;
 
-  uint32_t *new_cid_map = calloc(n_merged, sizeof(uint32_t));
+  uint32_t *new_cid_map = calloc(n, sizeof(uint32_t));
   uint32_t next_cid = 1;
 
   for (size_t i = 0; i < n_merged; i++) {
