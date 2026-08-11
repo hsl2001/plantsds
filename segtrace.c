@@ -80,14 +80,13 @@ int main(int argc, char **argv) {
 
   uint32_t def_kmer_size = 15;
   uint64_t def_scale = 16, def_hash_seed = 42;
-  size_t window_size = 1024, step_size = 0, min_bases = 0, flank_size = 2048;
+  size_t window_size = 1024, step_size = 0, min_bases = 0, flank_size = 256;
   const char *out_prefix = "segtrace";
   int n_threads = 8, filter_masked = 1;
 
   ketopt_t opt = KETOPT_INIT;
   int c;
-  while ((c = ketopt(&opt, argc, argv, 1, "k:s:e:w:t:b:d:o:p:D:f:mh", 0)) >=
-         0) {
+  while ((c = ketopt(&opt, argc, argv, 1, "k:s:e:w:t:b:d:o:p:D:mh", 0)) >= 0) {
     if (c == 'h') {
       print_usage();
       return 0;
@@ -107,14 +106,11 @@ int main(int argc, char **argv) {
       out_prefix = opt.arg;
     else if (c == 'p')
       n_threads = atoi(opt.arg) < 1 ? 1 : atoi(opt.arg);
-    else if (c == 'f')
-      flank_size = (size_t)strtoull(opt.arg, NULL, 10);
     else if (c == 'm')
       filter_masked = 0;
     else
       return 1;
   }
-
   if (step_size == 0)
     step_size = window_size / 3;
   if (min_bases == 0)
@@ -518,7 +514,7 @@ void discover_compute_worker(void *data, long p, int tid) {
   qsort(b->entries, b->size, sizeof(HashWindowEntry), compare_hash_entry);
   memset(w_data->t_bloom[tid], 0, BLOOM_SIZE_BYTES);
 
-  double p_kmer = pow(0.95, (double)w_data->kmer_size);
+  double p_kmer = pow(0.90, (double)w_data->kmer_size);
   size_t i = 0;
   while (i < b->size) {
     size_t j = i + 1;
@@ -546,7 +542,7 @@ void discover_compute_worker(void *data, long p, int tid) {
               w_data->coords[wa].sketch_size < w_data->coords[wb].sketch_size
                   ? w_data->coords[wa].sketch_size
                   : w_data->coords[wb].sketch_size;
-          size_t min_shared = (size_t)ceil((double)min_sz * p_kmer) + 1;
+          size_t min_shared = (size_t)ceil((double)min_sz * p_kmer) * 2;
           if (min_shared < 2)
             min_shared = 2;
 
@@ -846,7 +842,7 @@ static inline void check_and_eval_flank_pair(SubclusterData *w, int tid,
                           w->regions[rb].flank_sketch.sketch_size
                       ? w->regions[ra].flank_sketch.sketch_size
                       : w->regions[rb].flank_sketch.sketch_size;
-  size_t min_shared = (size_t)ceil((double)min_sz * p_kmer) + 1;
+  size_t min_shared = (size_t)ceil((double)min_sz * p_kmer) * 2;
   if (min_shared < 2)
     min_shared = 2;
 
@@ -864,7 +860,7 @@ void process_subcluster(void *data, long s, int tid) {
   if (count <= 1)
     return;
 
-  double p_kmer = pow(0.95, (double)w->kmer_size);
+  double p_kmer = pow(0.90, (double)w->kmer_size);
 
   size_t total_flank_hashes = 0;
   for (size_t a = 0; a < count; a++)
