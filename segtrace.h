@@ -51,7 +51,7 @@ extern "C" {
 #define NUM_PARTITIONS 512
 #define MAX_KMER_FREQ 128
 #define MAX_PAIR_COMPARISONS 64
-#define MAX_COLLINEAR_LOOOKAHEAD 1
+#define MAX_COLLINEAR_LOOOKAHEAD 3
 #define MIN_SD_LEN 1000
 #define MERGE_COEFF 8
 
@@ -96,7 +96,6 @@ typedef struct {
   size_t start;
   size_t end;
   char *cluster_id;
-  uint32_t copy_count;
   uint32_t subcluster_id;
   SegtraceSketch flank_sketch;
   uint32_t window_idx;

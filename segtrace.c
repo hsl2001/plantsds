@@ -518,7 +518,7 @@ void discover_compute_worker(void *data, long p, int tid) {
   qsort(b->entries, b->size, sizeof(HashWindowEntry), compare_hash_entry);
   memset(w_data->t_bloom[tid], 0, BLOOM_SIZE_BYTES);
 
-  double p_kmer = pow(0.90, (double)w_data->kmer_size);
+  double p_kmer = pow(0.95, (double)w_data->kmer_size);
   size_t i = 0;
   while (i < b->size) {
     size_t j = i + 1;
@@ -611,7 +611,6 @@ void build_duplicate_regions(UnionFind *uf, size_t num_sketches,
                                  .start = coords[i].start,
                                  .end = coords[i].end,
                                  .cluster_id = strdup(label),
-                                 .copy_count = comp_size[root_i],
                                  .subcluster_id = 0,
                                  .flank_sketch = {0},
                                  .window_idx = coords[i].window_idx}));
@@ -865,7 +864,7 @@ void process_subcluster(void *data, long s, int tid) {
   if (count <= 1)
     return;
 
-  double p_kmer = pow(0.90, (double)w->kmer_size);
+  double p_kmer = pow(0.95, (double)w->kmer_size);
 
   size_t total_flank_hashes = 0;
   for (size_t a = 0; a < count; a++)
@@ -937,30 +936,12 @@ void write_dup_bed(const char *out_prefix, SegtraceDupRegion *dup_regions,
   }
 
   fprintf(out_bed, "#chrom\tstart\tend\tcluster_id\tsubcluster_id\n");
-  size_t i = 0;
-  while (i < n_merged) {
-    size_t j = i + 1;
-    while (j < n_merged &&
-           strcmp(dup_regions[i].cluster_id, dup_regions[j].cluster_id) == 0)
-      j++;
-    size_t cluster_size = j - i;
-    if (cluster_size >= 2) {
-      int valid_regions = 0;
-      for (size_t k = i; k < j; k++) {
-        if (dup_regions[k].end - dup_regions[k].start >= MIN_SD_LEN)
-          valid_regions++;
-      }
-      if (valid_regions >= 2) {
-        for (size_t k = i; k < j; k++) {
-          if (dup_regions[k].end - dup_regions[k].start >= MIN_SD_LEN) {
-            fprintf(out_bed, "%s\t%zu\t%zu\t%s\t%u\n", dup_regions[k].chrom,
-                    dup_regions[k].start, dup_regions[k].end,
-                    dup_regions[k].cluster_id, dup_regions[k].subcluster_id);
-          }
-        }
-      }
+  for (size_t k = 0; k < n_merged; k++) {
+    if (dup_regions[k].end - dup_regions[k].start >= MIN_SD_LEN) {
+      fprintf(out_bed, "%s\t%zu\t%zu\t%s\t%u\n", dup_regions[k].chrom,
+              dup_regions[k].start, dup_regions[k].end,
+              dup_regions[k].cluster_id, dup_regions[k].subcluster_id);
     }
-    i = j;
   }
   fclose(out_bed);
 }
