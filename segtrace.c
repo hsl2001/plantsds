@@ -460,40 +460,26 @@ SegtraceDistResult calculate_window_dist(const uint64_t *all_hashes,
   return calculate_segtrace_dist(&sa, &sb, kmer_size);
 }
 
-static inline int find_window_by_idx(DiscoverComputeData *w, uint32_t curr_idx,
-                                     uint32_t target_win_idx, int dir) {
-  long long idx = (long long)curr_idx + dir;
-  uint32_t seq_id = w->coords[curr_idx].seq_id;
-  int max_scan = 16;
-  while (idx >= 0 && idx < (long long)w->n_windows && max_scan-- > 0) {
-    if (w->coords[idx].seq_id != seq_id)
-      break;
-    if (w->coords[idx].window_idx == target_win_idx)
-      return (int)idx;
-    idx += dir;
-  }
-  return -1;
-}
-
 static inline int check_collinear_neighbor(DiscoverComputeData *w, uint32_t wa,
                                            uint32_t wb, size_t min_shared) {
   const int dir_a[] = {1, -1, 1, -1};
   const int dir_b[] = {1, -1, -1, 1};
 
-  uint32_t win_a = w->coords[wa].window_idx;
-  uint32_t win_b = w->coords[wb].window_idx;
+  uint32_t seq_a = w->coords[wa].seq_id;
+  uint32_t seq_b = w->coords[wb].seq_id;
 
   for (int d = 0; d < 4; d++) {
     for (int step_a = 1; step_a <= MAX_COLLINEAR_LOOOKAHEAD; step_a++) {
       for (int step_b = 1; step_b <= MAX_COLLINEAR_LOOOKAHEAD; step_b++) {
 
-        uint32_t target_win_a = win_a + dir_a[d] * step_a;
-        uint32_t target_win_b = win_b + dir_b[d] * step_b;
+        long long next_a = (long long)wa + (long long)dir_a[d] * step_a;
+        long long next_b = (long long)wb + (long long)dir_b[d] * step_b;
 
-        int next_a = find_window_by_idx(w, wa, target_win_a, dir_a[d]);
-        int next_b = find_window_by_idx(w, wb, target_win_b, dir_b[d]);
+        if (next_a >= 0 && next_a < (long long)w->n_windows && next_b >= 0 &&
+            next_b < (long long)w->n_windows &&
+            w->coords[next_a].seq_id == seq_a &&
+            w->coords[next_b].seq_id == seq_b) {
 
-        if (next_a >= 0 && next_b >= 0) {
           if (w->coords[next_a].sketch_size > 0 &&
               w->coords[next_b].sketch_size > 0) {
             SegtraceDistResult res =
