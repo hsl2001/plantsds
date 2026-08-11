@@ -689,8 +689,15 @@ size_t merge_dup_regions(SegtraceDupRegion *regions, size_t n,
 
   qsort(regions, n, sizeof(SegtraceDupRegion), compare_dup_region_by_pos);
 
+  uint32_t max_cid = 0;
+  for (size_t i = 0; i < n; i++) {
+    uint32_t cid = (uint32_t)strtoul(regions[i].cluster_id, NULL, 10);
+    if (cid > max_cid)
+      max_cid = cid;
+  }
+
   UnionFind cluster_uf;
-  init_unionfind(&cluster_uf, n);
+  init_unionfind(&cluster_uf, max_cid + 1);
 
   size_t out = 0;
   for (size_t i = 1; i < n; i++) {
@@ -701,7 +708,9 @@ size_t merge_dup_regions(SegtraceDupRegion *regions, size_t n,
       if (regions[i].window_idx > regions[out].window_idx)
         regions[out].window_idx = regions[i].window_idx;
 
-      union_unionfind(&cluster_uf, (uint32_t)out, (uint32_t)i);
+      uint32_t cid_out = (uint32_t)strtoul(regions[out].cluster_id, NULL, 10);
+      uint32_t cid_i = (uint32_t)strtoul(regions[i].cluster_id, NULL, 10);
+      union_unionfind(&cluster_uf, cid_out, cid_i);
 
       free(regions[i].cluster_id);
       free(regions[i].chrom);
@@ -715,22 +724,23 @@ size_t merge_dup_regions(SegtraceDupRegion *regions, size_t n,
   }
   size_t n_merged = out + 1;
 
-  uint32_t *new_cid_map = calloc(n, sizeof(uint32_t));
+  uint32_t *new_cid_map = calloc(max_cid + 1, sizeof(uint32_t));
   uint32_t next_cid = 1;
 
   for (size_t i = 0; i < n_merged; i++) {
-    uint32_t root = find_unionfind(&cluster_uf, (uint32_t)i);
+    uint32_t orig_cid = (uint32_t)strtoul(regions[i].cluster_id, NULL, 10);
+    uint32_t root = find_unionfind(&cluster_uf, orig_cid);
     if (new_cid_map[root] == 0)
       new_cid_map[root] = next_cid++;
   }
 
   for (size_t i = 0; i < n_merged; i++) {
-    uint32_t root = find_unionfind(&cluster_uf, (uint32_t)i);
+    uint32_t orig_cid = (uint32_t)strtoul(regions[i].cluster_id, NULL, 10);
+    uint32_t root = find_unionfind(&cluster_uf, orig_cid);
     uint32_t cid = new_cid_map[root];
     char label[32];
     snprintf(label, sizeof(label), "%u", cid);
-    if (regions[i].cluster_id)
-      free(regions[i].cluster_id);
+    free(regions[i].cluster_id);
     regions[i].cluster_id = strdup(label);
   }
 
