@@ -528,7 +528,8 @@ void discover_compute_worker(void *data, long p, int tid) {
 
     if (run_len >= 2 && run_len <= MAX_KMER_FREQ) {
       for (size_t a = i; a < j; a++) {
-        for (size_t b_idx = a + 1; b_idx < j; b_idx++) {
+        size_t b_max = a + 1 + MAX_PAIR_COMPARISONS < j ? a + 1 + MAX_PAIR_COMPARISONS : j;
+        for (size_t b_idx = a + 1; b_idx < b_max; b_idx++) {
           uint32_t wa = b->entries[a].window_id,
                    wb = b->entries[b_idx].window_id;
           if (w_data->coords[wa].seq_id == w_data->coords[wb].seq_id &&
@@ -910,7 +911,8 @@ void process_subcluster(void *data, long s, int tid) {
       size_t run_len = j - i;
       if (run_len >= 2) {
         for (size_t a = i; a < j; a++) {
-          for (size_t b = a + 1; b < j; b++) {
+          size_t b_max = a + 1 + MAX_PAIR_COMPARISONS < j ? a + 1 + MAX_PAIR_COMPARISONS : j;
+          for (size_t b = a + 1; b < b_max; b++) {
             uint32_t la = entries[a].local_idx, lb = entries[b].local_idx;
             if (la == lb)
               continue;
