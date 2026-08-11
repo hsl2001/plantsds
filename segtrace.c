@@ -574,6 +574,7 @@ void build_duplicate_regions(UnionFind *uf, size_t num_sketches,
                              size_t *out_n_regions) {
   (void)num_files;
   (void)files;
+  (void)window_size;
 
   uint32_t *comp_size = calloc(num_sketches, sizeof(uint32_t));
   for (size_t i = 0; i < num_sketches; i++) {
