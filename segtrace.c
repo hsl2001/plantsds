@@ -501,7 +501,7 @@ SegtraceDistResult calculate_window_dist(const uint64_t *all_hashes,
 }
 
 static inline int check_collinear_neighbor(DiscoverComputeData *w, uint32_t wa,
-                                           uint32_t wb, size_t min_shared) {
+                                           uint32_t wb) {
   const int dir_a[] = {1, -1, 1, -1};
   const int dir_b[] = {1, -1, -1, 1};
 
@@ -521,8 +521,7 @@ static inline int check_collinear_neighbor(DiscoverComputeData *w, uint32_t wa,
             SegtraceDistResult d =
                 calculate_window_dist(w->all_hashes, &w->coords[next_a],
                                       &w->coords[next_b], w->kmer_size);
-            if (d.shared_hashes >= min_shared &&
-                d.containment >= MIN_CONTAINMENT)
+            if (d.containment >= MIN_CONTAINMENT)
               return 1;
           }
         }
@@ -552,7 +551,6 @@ void discover_compute_worker(void *data, long p, int tid) {
   qsort(flat_entries, b->size, sizeof(HashWindowEntry), compare_hash_entry);
   memset(w_data->t_bloom[tid], 0, BLOOM_SIZE_BYTES);
 
-  double p_kmer = pow(0.90, (double)w_data->kmer_size);
   size_t i = 0;
   while (i < b->size) {
     size_t j = i + 1;
@@ -576,20 +574,11 @@ void discover_compute_worker(void *data, long p, int tid) {
           if (bloom_test_and_set(w_data->t_bloom[tid], pk, BLOOM_MASK))
             continue;
 
-          size_t min_sz =
-              w_data->coords[wa].sketch_size < w_data->coords[wb].sketch_size
-                  ? w_data->coords[wa].sketch_size
-                  : w_data->coords[wb].sketch_size;
-          size_t min_shared = (size_t)ceil((double)min_sz * p_kmer) + 1;
-          if (min_shared < 2)
-            min_shared = 2;
-
           SegtraceDistResult d =
               calculate_window_dist(w_data->all_hashes, &w_data->coords[wa],
                                     &w_data->coords[wb], w_data->kmer_size);
-          if (d.shared_hashes >= min_shared &&
-              d.containment >= MIN_CONTAINMENT) {
-            if (check_collinear_neighbor(w_data, wa, wb, min_shared)) {
+          if (d.containment >= MIN_CONTAINMENT) {
+            if (check_collinear_neighbor(w_data, wa, wb)) {
               union_unionfind(w_data->uf, wa, wb);
             }
           }
@@ -863,23 +852,14 @@ void perform_subclustering(SegtraceDupRegion *regions, size_t n_merged,
 }
 
 static inline void check_and_eval_flank_pair(SubclusterData *w, int tid,
-                                             size_t ra, size_t rb,
-                                             double p_kmer) {
+                                             size_t ra, size_t rb) {
   if (w->regions[ra].flank_sketch.sketch_size == 0 ||
       w->regions[rb].flank_sketch.sketch_size == 0)
     return;
 
-  size_t min_sz = w->regions[ra].flank_sketch.sketch_size <
-                          w->regions[rb].flank_sketch.sketch_size
-                      ? w->regions[ra].flank_sketch.sketch_size
-                      : w->regions[rb].flank_sketch.sketch_size;
-  size_t min_shared = (size_t)ceil((double)min_sz * p_kmer) + 1;
-  if (min_shared < 2)
-    min_shared = 2;
-
   SegtraceDistResult d = calculate_segtrace_dist(
       &w->regions[ra].flank_sketch, &w->regions[rb].flank_sketch, w->kmer_size);
-  if (d.shared_hashes >= min_shared) {
+  if (d.containment >= MIN_CONTAINMENT) {
     DA_PUSH(w->t_pairs[tid], w->t_n_pairs[tid], w->t_cap_pairs[tid],
             ((SubclusterPair){(uint32_t)ra, (uint32_t)rb}));
   }
@@ -890,8 +870,6 @@ void process_subcluster(void *data, long s, int tid) {
   size_t start = w->spans[s].start, count = w->spans[s].count;
   if (count <= 1)
     return;
-
-  double p_kmer = pow(0.90, (double)w->kmer_size);
 
   size_t total_flank_hashes = 0;
   for (size_t a = 0; a < count; a++)
@@ -934,7 +912,7 @@ void process_subcluster(void *data, long s, int tid) {
           uint64_t pk = encode_pair(la, lb);
           if (bloom_test_and_set(bloom, pk, SUBCLUSTER_BLOOM_MASK))
             continue;
-          check_and_eval_flank_pair(w, tid, start + la, start + lb, p_kmer);
+          check_and_eval_flank_pair(w, tid, start + la, start + lb);
         }
       }
     }
