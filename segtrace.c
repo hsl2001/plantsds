@@ -472,22 +472,34 @@ static inline int check_collinear_neighbor(DiscoverComputeData *w, uint32_t wa,
   const int dir_a[] = {1, -1, 1, -1};
   const int dir_b[] = {1, -1, -1, 1};
 
+  uint32_t seq_a = w->coords[wa].seq_id;
+  uint32_t seq_b = w->coords[wb].seq_id;
+  uint32_t win_a = w->coords[wa].window_idx;
+  uint32_t win_b = w->coords[wb].window_idx;
+
   for (int d = 0; d < 4; d++) {
     for (int step_a = 1; step_a <= MAX_COLLINEAR_LOOOKAHEAD; step_a++) {
       for (int step_b = 1; step_b <= MAX_COLLINEAR_LOOOKAHEAD; step_b++) {
+
+        uint32_t target_win_a = win_a + dir_a[d] * step_a;
+        uint32_t target_win_b = win_b + dir_b[d] * step_b;
+
         long long next_a = (long long)wa + dir_a[d] * step_a;
         long long next_b = (long long)wb + dir_b[d] * step_b;
 
         if (next_a >= 0 && next_a < (long long)w->n_windows && next_b >= 0 &&
             next_b < (long long)w->n_windows &&
-            w->coords[next_a].seq_id == w->coords[wa].seq_id &&
-            w->coords[next_b].seq_id == w->coords[wb].seq_id) {
+            w->coords[next_a].seq_id == seq_a &&
+            w->coords[next_b].seq_id == seq_b &&
+            w->coords[next_a].window_idx == target_win_a &&
+            w->coords[next_b].window_idx == target_win_b) {
 
           if (w->coords[next_a].sketch_size > 0 &&
               w->coords[next_b].sketch_size > 0) {
-            if (calculate_window_dist(w->all_hashes, &w->coords[next_a],
-                                      &w->coords[next_b], w->kmer_size)
-                    .shared_hashes >= min_shared)
+            SegtraceDistResult res =
+                calculate_window_dist(w->all_hashes, &w->coords[next_a],
+                                      &w->coords[next_b], w->kmer_size);
+            if (res.shared_hashes >= min_shared)
               return 1;
           }
         }
