@@ -195,7 +195,8 @@ static void seq_chunk_worker(void *data, long i, int tid) {
       (uint32_t)(job->chunk_start_idx / job->step_size);
 
   for (size_t idx = job->chunk_start_idx;
-       idx + job->window_size <= job->chunk_end_idx;
+       idx + job->window_size <= job->chunk_end_idx &&
+       idx + job->window_size <= job->seq_len;
        idx += job->step_size, current_window_idx++) {
     size_t valid_bases = 0;
     for (size_t j = 0; j < job->window_size; j++) {
@@ -281,9 +282,7 @@ StreamWorkerData *extract_all_windows(char **files, int num_files,
 
       for (size_t c_start = 0; c_start < len; c_start += chunk_size) {
         size_t c_end = c_start + chunk_size + window_size - step_size;
-        if (c_end > len)
-          c_end = len;
-        if (c_end - c_start < window_size)
+        if (c_start + window_size > len)
           break;
 
         DA_RESERVE(jobs, cap_jobs, num_jobs + 1);
@@ -1129,16 +1128,18 @@ void free_unionfind(UnionFind *uf) {
 void get_basename(const char *filename, char *basename, size_t size) {
   const char *last_slash = strrchr(filename, '/');
   const char *name = last_slash ? last_slash + 1 : filename;
-  const char *dot = strrchr(name, '.');
-  if (dot && dot != name) {
-    size_t len = dot - name;
-    if (len >= size)
-      len = size - 1;
-    strncpy(basename, name, len);
-    basename[len] = '\0';
-  } else {
-    strncpy(basename, name, size - 1);
-    basename[size - 1] = '\0';
+  strncpy(basename, name, size - 1);
+  basename[size - 1] = '\0';
+
+  char *dot = strrchr(basename, '.');
+  if (dot && (strcmp(dot, ".gz") == 0 || strcmp(dot, ".bgz") == 0)) {
+    *dot = '\0';
+  }
+  dot = strrchr(basename, '.');
+  if (dot && (strcmp(dot, ".fa") == 0 || strcmp(dot, ".fna") == 0 ||
+              strcmp(dot, ".fasta") == 0 || strcmp(dot, ".fastq") == 0 ||
+              strcmp(dot, ".fq") == 0)) {
+    *dot = '\0';
   }
 }
 
