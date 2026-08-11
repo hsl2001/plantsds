@@ -908,7 +908,7 @@ void process_subcluster(void *data, long s, int tid) {
       while (j < n_entries && entries[j].hash == entries[i].hash)
         j++;
       size_t run_len = j - i;
-      if (run_len >= 2 && run_len <= MAX_KMER_FREQ) {
+      if (run_len >= 2) {
         for (size_t a = i; a < j; a++) {
           for (size_t b = a + 1; b < j; b++) {
             uint32_t la = entries[a].local_idx, lb = entries[b].local_idx;
