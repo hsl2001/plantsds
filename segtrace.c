@@ -451,8 +451,7 @@ void discover_and_compute(const uint64_t *all_hashes, WindowCoord *coords,
 
 SegtraceDistResult calculate_window_dist(const uint64_t *all_hashes,
                                          const WindowCoord *wa,
-                                         const WindowCoord *wb,
-                                         uint32_t kmer_size) {
+                                         const WindowCoord *wb) {
   SegtraceSketch sa = {.sketch_size = wa->sketch_size,
                        .hashes = (uint64_t *)(all_hashes + wa->sketch_offset)};
   SegtraceSketch sb = {.sketch_size = wb->sketch_size,
@@ -482,9 +481,8 @@ static inline int check_collinear_neighbor(DiscoverComputeData *w, uint32_t wa,
 
           if (w->coords[next_a].sketch_size > 0 &&
               w->coords[next_b].sketch_size > 0) {
-            SegtraceDistResult res =
-                calculate_window_dist(w->all_hashes, &w->coords[next_a],
-                                      &w->coords[next_b], w->kmer_size);
+            SegtraceDistResult res = calculate_window_dist(
+                w->all_hashes, &w->coords[next_a], &w->coords[next_b]);
             if (res.shared_hashes >= min_shared)
               return 1;
           }
@@ -536,9 +534,8 @@ void discover_compute_worker(void *data, long p, int tid) {
           if (min_shared < 2)
             min_shared = 2;
 
-          SegtraceDistResult d =
-              calculate_window_dist(w_data->all_hashes, &w_data->coords[wa],
-                                    &w_data->coords[wb], w_data->kmer_size);
+          SegtraceDistResult d = calculate_window_dist(
+              w_data->all_hashes, &w_data->coords[wa], &w_data->coords[wb]);
           if (d.shared_hashes >= min_shared) {
             if (check_collinear_neighbor(w_data, wa, wb, min_shared)) {
               union_unionfind(w_data->uf, wa, wb);

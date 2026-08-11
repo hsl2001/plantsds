@@ -238,8 +238,7 @@ void discover_and_compute(const uint64_t *all_hashes, WindowCoord *coords,
 void discover_compute_worker(void *data, long p, int tid);
 SegtraceDistResult calculate_window_dist(const uint64_t *all_hashes,
                                          const WindowCoord *wa,
-                                         const WindowCoord *wb,
-                                         uint32_t kmer_size);
+                                         const WindowCoord *wb);
 
 // 5. REGION CLUSTERING & OUTPUT
 void build_duplicate_regions(UnionFind *uf, size_t num_sketches,
