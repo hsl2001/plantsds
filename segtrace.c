@@ -80,7 +80,7 @@ int main(int argc, char **argv) {
 
   uint32_t def_kmer_size = 15;
   uint64_t def_scale = 16, def_hash_seed = 42;
-  size_t window_size = 1024, step_size = 0, min_bases = 0, flank_size = 512;
+  size_t window_size = 1024, step_size = 0, min_bases = 0, flank_size = 2048;
   const char *out_prefix = "segtrace";
   int n_threads = 8, filter_masked = 0;
 
@@ -528,7 +528,8 @@ void discover_compute_worker(void *data, long p, int tid) {
 
     if (run_len >= 2 && run_len <= MAX_KMER_FREQ) {
       for (size_t a = i; a < j; a++) {
-        size_t b_max = a + 1 + MAX_PAIR_COMPARISONS < j ? a + 1 + MAX_PAIR_COMPARISONS : j;
+        size_t b_max =
+            a + 1 + MAX_PAIR_COMPARISONS < j ? a + 1 + MAX_PAIR_COMPARISONS : j;
         for (size_t b_idx = a + 1; b_idx < b_max; b_idx++) {
           uint32_t wa = b->entries[a].window_id,
                    wb = b->entries[b_idx].window_id;
@@ -911,7 +912,9 @@ void process_subcluster(void *data, long s, int tid) {
       size_t run_len = j - i;
       if (run_len >= 2) {
         for (size_t a = i; a < j; a++) {
-          size_t b_max = a + 1 + MAX_PAIR_COMPARISONS < j ? a + 1 + MAX_PAIR_COMPARISONS : j;
+          size_t b_max = a + 1 + MAX_PAIR_COMPARISONS < j
+                             ? a + 1 + MAX_PAIR_COMPARISONS
+                             : j;
           for (size_t b = a + 1; b < b_max; b++) {
             uint32_t la = entries[a].local_idx, lb = entries[b].local_idx;
             if (la == lb)
