@@ -25,21 +25,21 @@ void print_usage(void) {
   fprintf(stderr,
           "Usage: segtrace [options] <genome1.fasta> [genome2.fasta ...]\n\n"
           "Options:\n"
-          "  -k INT    K-mer size for ntHash hashing [31]\n"
+          "  -k INT    K-mer size [15]\n"
           "  -w INT    Window size [1024]\n"
-          "  -s INT    Sketch scale factor [8]\n"
+          "  -s INT    Sketch scale factor [16]\n"
           "  -b INT    Minimum valid bases per window [window_size / 4]\n"
           "  -o STR    Output prefix [segtrace_output]\n"
           "  -p INT    Number of threads [8]\n"
-          "  -f INT    Flanking sequence size for subclustering [2048]\n"
+          "  -f INT    Flanking sequence size for subclustering [1024]\n"
           "  -m        Disable soft-masked sequence filtering\n"
           "  -h        Print this help message\n");
 }
 
 int main(int argc, char *argv[]) {
-  size_t window_size = 1024, step_size = 0, def_scale = 8, min_bases = 0,
-         flank_size = 2048;
-  uint32_t kmer_size = 31;
+  size_t window_size = 1024, step_size = 0, def_scale = 16, min_bases = 0,
+         flank_size = 1024;
+  uint32_t kmer_size = 15;
   int n_threads = 8, filter_masked = 1;
   const char *out_prefix = "segtrace_output";
 

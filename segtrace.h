@@ -55,7 +55,7 @@ extern "C" {
 #define STEP_FRAC 3
 #define MAX_COLLINEAR_LOOKAHEAD 16
 #define MIN_SD_LEN 1000
-#define MIN_CONTAINMENT 0.50
+#define MIN_CONTAINMENT 0.90
 
 #define BLOOM_SIZE_BITS (1 << 24)
 #define BLOOM_SIZE_BYTES (BLOOM_SIZE_BITS / 8)
