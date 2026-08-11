@@ -2,121 +2,153 @@
 """
 cmp_core.py - Core evaluation engine for Segmental Duplication (SD) analysis.
 
-Provides core dataset-agnostic evaluation algorithms:
-  1) Base-Pair (BP) level generic metrics calculation (BP sum, Recall, Precision, F1, Jaccard).
-  2) Reciprocal Overlap Fragment (Frag) pair-level evaluation engine.
-     Optimized with 2D spatial grid indexing for ultra-fast execution (< 0.2s)
-     and zero thread-lock overhead.
+and Base-Pair (BP) footprint calculations across datasets.
 """
 
 import os
-import collections
 
-def count_bed_bp(filepath):
-    """Calculates total base pairs in a BED file."""
-    total_bp = 0
-    if not os.path.exists(filepath):
-        return 0
-    with open(filepath) as f:
+def parse_bed_intervals(filepath):
+    """Parses any BED file into a list of unique (chrom, start, end) intervals."""
+    intervals = []
+    if not filepath or not os.path.exists(filepath):
+        return intervals
+    
+    with open(filepath, 'r') as f:
         for line in f:
             if line.startswith('#') or not line.strip():
                 continue
             parts = line.strip().split()
-            s, e = int(parts[1]), int(parts[2])
-            total_bp += max(0, e - s)
-    return total_bp
+            if len(parts) >= 3:
+                c1 = parts[0].split('-')[-1] if '-' in parts[0] and not parts[0].startswith('chr') else parts[0]
+                intervals.append((c1, int(parts[1]), int(parts[2])))
+            if len(parts) >= 12:  # SEDEF 12+ column pair second arm
+                c2 = parts[9].split('-')[-1] if '-' in parts[9] and not parts[9].startswith('chr') else parts[9]
+                intervals.append((c2, int(parts[10]), int(parts[11])))
+    return list(set(intervals))
 
-def calc_bp_metrics(st_bp, sd_bp, is_bp):
-    """
-    Computes Base-Pair (BP) level metrics.
-    Returns (bp_recall, bp_precision, bp_f1, bp_jaccard).
-    """
-    bp_recall = is_bp / sd_bp if sd_bp > 0 else 0.0
-    bp_precision = is_bp / st_bp if st_bp > 0 else 0.0
-    bp_f1 = 2 * bp_recall * bp_precision / (bp_recall + bp_precision) if (bp_recall + bp_precision) > 0 else 0.0
-    union_bp = st_bp + sd_bp - is_bp
-    bp_jaccard = is_bp / union_bp if union_bp > 0 else 0.0
-    return bp_recall, bp_precision, bp_f1, bp_jaccard
-
-def merge_fragments(frags):
-    by_c = collections.defaultdict(list)
-    for c, s, e in frags:
-        by_c[c].append([s, e])
+def merge_intervals_by_chrom(intervals):
+    """Merges overlapping intervals per chromosome for footprint calculations."""
+    by_chrom = {}
+    for c, s, e in intervals:
+        by_chrom.setdefault(c, []).append([s, e])
+    
     merged = {}
-    for c, ints in by_c.items():
+    for c, ints in by_chrom.items():
         ints.sort()
         m = [list(ints[0])]
         for curr in ints[1:]:
-            if curr[0] <= m[-1][1]: m[-1][1] = max(m[-1][1], curr[1])
-            else: m.append(list(curr))
+            if curr[0] <= m[-1][1]:
+                m[-1][1] = max(m[-1][1], curr[1])
+            else:
+                m.append(list(curr))
         merged[c] = m
     return merged
 
-def _calc_coverage(query_m, ref_m, threshold=0.5):
-    matched = 0
-    total = 0
-    for c, q_ints in query_m.items():
-        if c not in ref_m:
-            total += len(q_ints)
-            continue
-        r_ints = ref_m[c]
-        for qs, qe in q_ints:
-            total += 1
-            ql = qe - qs
-            if ql <= 0: continue
-            overlap = 0
-            for rs, re in r_ints:
-                if re <= qs: continue
-                if rs >= qe: break
-                overlap += max(0, min(qe, re) - max(qs, rs))
-            if overlap / ql >= threshold:
-                matched += 1
-    return matched, total
+def calc_bp_metrics(pred_intervals, ref_intervals):
+    """Computes Base-Pair (BP) level footprint overlap metrics."""
+    p_m = merge_intervals_by_chrom(pred_intervals)
+    r_m = merge_intervals_by_chrom(ref_intervals)
 
-def calc_frag_metrics(ref_pairs, target_pairs, threshold=0.5, bin_size=None):
-    """
-    Evaluates fragments using merged footprint coverage, ignoring pair matching.
-    Calculates if a predicted fragment overlaps > 50% with truth fragments, and vice-versa.
-    """
-    if not ref_pairs or not target_pairs:
-        return 0.0, 0.0, 0.0, 0, 0, 0
-
-    ref_frags = list(set([f for p in ref_pairs for f in p]))
-    tgt_frags = list(set([f for p in target_pairs for f in p]))
-
-    r_m = merge_fragments(ref_frags)
-    t_m = merge_fragments(tgt_frags)
-
-    r_match, r_total = _calc_coverage(r_m, t_m, threshold)
-    p_match, p_total = _calc_coverage(t_m, r_m, threshold)
-
-    Sn = r_match / r_total if r_total > 0 else 0.0
-    Pr = p_match / p_total if p_total > 0 else 0.0
-    f1 = 2 * Sn * Pr / (Sn + Pr) if (Sn + Pr) > 0 else 0.0
-    return Sn, Pr, f1, r_match, p_match, r_total
-
-def calc_frag_metrics_from_clusters(sedef_pairs, segtrace_clusters, threshold=0.5, bin_size=None):
-    """
-    Same as above but extracts target fragments directly from cluster dictionary.
-    """
-    ref_frags = list(set([f for p in sedef_pairs for f in p]))
+    p_bp = sum(e - s for ints in p_m.values() for s, e in ints)
+    r_bp = sum(e - s for ints in r_m.values() for s, e in ints)
     
-    tgt_frags_raw = []
-    for cid, regions in segtrace_clusters.items():
-        for (c, s, e, subid) in regions:
-            tgt_frags_raw.append((c, s, e))
-    tgt_frags = list(set(tgt_frags_raw))
+    is_bp = 0
+    common_chroms = set(p_m.keys()).intersection(r_m.keys())
+    for c in common_chroms:
+        p_list, r_list = p_m[c], r_m[c]
+        i = j = 0
+        while i < len(p_list) and j < len(r_list):
+            overlap = max(0, min(p_list[i][1], r_list[j][1]) - max(p_list[i][0], r_list[j][0]))
+            is_bp += overlap
+            if p_list[i][1] < r_list[j][1]:
+                i += 1
+            else:
+                j += 1
 
-    if not ref_frags or not tgt_frags:
-        return 0.0, 0.0, 0.0, 0, 0, 0
+    bp_rec = is_bp / r_bp if r_bp > 0 else 0.0
+    bp_prec = is_bp / p_bp if p_bp > 0 else 0.0
+    bp_f1 = 2 * bp_rec * bp_prec / (bp_rec + bp_prec) if (bp_rec + bp_prec) > 0 else 0.0
+    union_bp = p_bp + r_bp - is_bp
+    bp_jaccard = is_bp / union_bp if union_bp > 0 else 0.0
 
-    r_m = merge_fragments(ref_frags)
-    t_m = merge_fragments(tgt_frags)
+    return {
+        'pred_bp': p_bp,
+        'ref_bp': r_bp,
+        'is_bp': is_bp,
+        'pred_unique_bp': p_bp - is_bp,
+        'ref_unique_bp': r_bp - is_bp,
+        'recall': bp_rec,
+        'precision': bp_prec,
+        'f1': bp_f1,
+        'jaccard': bp_jaccard
+    }
 
-    r_match, r_total = _calc_coverage(r_m, t_m, threshold)
-    p_match, p_total = _calc_coverage(t_m, r_m, threshold)
+def eval_reciprocal_overlap(pred_intervals, ref_intervals, fraction=0.5):
+    """
+    Evaluates intervals using reciprocal fraction overlap (bedtools intersect -f <fraction> -r).
+    Calculates TP, FP, FN, Recall, Precision, and F1.
+    """
+    p_by_c = {}
+    for c, s, e in pred_intervals:
+        p_by_c.setdefault(c, []).append((s, e))
+        
+    r_by_c = {}
+    for c, s, e in ref_intervals:
+        r_by_c.setdefault(c, []).append((s, e))
 
-    Sn = r_match / r_total if r_total > 0 else 0.0
-    Pr = p_match / p_total if p_total > 0 else 0.0
-    f1 = 2 * Sn * Pr / (Sn + Pr) if (Sn + Pr) > 0 else 0.0
-    return Pr, Sn, f1, p_match, r_match, p_total
+    # TP & FN: Matched Reference Intervals
+    tp = 0
+    total_ref = len(ref_intervals)
+    for c, s_r, e_r in ref_intervals:
+        len_r = e_r - s_r
+        if len_r <= 0 or c not in p_by_c:
+            continue
+        matched = False
+        for s_p, e_p in p_by_c[c]:
+            len_p = e_p - s_p
+            if len_p <= 0:
+                continue
+            ov = max(0, min(e_r, e_p) - max(s_r, s_p))
+            if (ov / len_r >= fraction) and (ov / len_p >= fraction):
+                matched = True
+                break
+        if matched:
+            tp += 1
+
+    fn = total_ref - tp
+
+    # Matched Predictions & FP
+    matched_pred = 0
+    total_pred = len(pred_intervals)
+    for c, s_p, e_p in pred_intervals:
+        len_p = e_p - s_p
+        if len_p <= 0 or c not in r_by_c:
+            continue
+        matched = False
+        for s_r, e_r in r_by_c[c]:
+            len_r = e_r - s_r
+            if len_r <= 0:
+                continue
+            ov = max(0, min(e_r, e_p) - max(s_r, s_p))
+            if (ov / len_r >= fraction) and (ov / len_p >= fraction):
+                matched = True
+                break
+        if matched:
+            matched_pred += 1
+
+    fp = total_pred - matched_pred
+
+    recall = tp / total_ref if total_ref > 0 else 0.0
+    precision = matched_pred / total_pred if total_pred > 0 else 0.0
+    f1 = 2 * recall * precision / (recall + precision) if (recall + precision) > 0 else 0.0
+
+    return {
+        'recall': recall,
+        'precision': precision,
+        'f1': f1,
+        'tp': tp,
+        'fp': fp,
+        'fn': fn,
+        'total_ref': total_ref,
+        'total_pred': total_pred
+    }
