@@ -79,8 +79,6 @@ typedef struct {
 } SegtraceSketch;
 
 typedef struct {
-  double containment;
-  double distance;
   size_t shared_hashes;
 } SegtraceDistResult;
 

@@ -463,13 +463,26 @@ SegtraceDistResult calculate_window_dist(const uint64_t *all_hashes,
   return calculate_segtrace_dist(&sa, &sb, kmer_size);
 }
 
+static inline int find_window_by_idx(DiscoverComputeData *w, uint32_t curr_idx,
+                                     uint32_t target_win_idx, int dir) {
+  long long idx = (long long)curr_idx + dir;
+  uint32_t seq_id = w->coords[curr_idx].seq_id;
+  int max_scan = 16;
+  while (idx >= 0 && idx < (long long)w->n_windows && max_scan-- > 0) {
+    if (w->coords[idx].seq_id != seq_id)
+      break;
+    if (w->coords[idx].window_idx == target_win_idx)
+      return (int)idx;
+    idx += dir;
+  }
+  return -1;
+}
+
 static inline int check_collinear_neighbor(DiscoverComputeData *w, uint32_t wa,
                                            uint32_t wb, size_t min_shared) {
   const int dir_a[] = {1, -1, 1, -1};
   const int dir_b[] = {1, -1, -1, 1};
 
-  uint32_t seq_a = w->coords[wa].seq_id;
-  uint32_t seq_b = w->coords[wb].seq_id;
   uint32_t win_a = w->coords[wa].window_idx;
   uint32_t win_b = w->coords[wb].window_idx;
 
@@ -480,16 +493,10 @@ static inline int check_collinear_neighbor(DiscoverComputeData *w, uint32_t wa,
         uint32_t target_win_a = win_a + dir_a[d] * step_a;
         uint32_t target_win_b = win_b + dir_b[d] * step_b;
 
-        long long next_a = (long long)wa + dir_a[d] * step_a;
-        long long next_b = (long long)wb + dir_b[d] * step_b;
+        int next_a = find_window_by_idx(w, wa, target_win_a, dir_a[d]);
+        int next_b = find_window_by_idx(w, wb, target_win_b, dir_b[d]);
 
-        if (next_a >= 0 && next_a < (long long)w->n_windows && next_b >= 0 &&
-            next_b < (long long)w->n_windows &&
-            w->coords[next_a].seq_id == seq_a &&
-            w->coords[next_b].seq_id == seq_b &&
-            w->coords[next_a].window_idx == target_win_a &&
-            w->coords[next_b].window_idx == target_win_b) {
-
+        if (next_a >= 0 && next_b >= 0) {
           if (w->coords[next_a].sketch_size > 0 &&
               w->coords[next_b].sketch_size > 0) {
             SegtraceDistResult res =
@@ -633,10 +640,14 @@ static int compare_dup_region_by_pos(const void *a, const void *b) {
 static int compare_dup_region_by_cluster(const void *a, const void *b) {
   const SegtraceDupRegion *ra = (const SegtraceDupRegion *)a,
                           *rb = (const SegtraceDupRegion *)b;
-  uint32_t ca = (uint32_t)strtoul(ra->cluster_id, NULL, 10);
-  uint32_t cb = (uint32_t)strtoul(rb->cluster_id, NULL, 10);
-  if (ca != cb)
-    return CMP(ca, cb);
+  int c_cluster = strcmp(ra->cluster_id, rb->cluster_id);
+  if (c_cluster != 0) {
+    uint32_t ca = (uint32_t)strtoul(ra->cluster_id, NULL, 10);
+    uint32_t cb = (uint32_t)strtoul(rb->cluster_id, NULL, 10);
+    if (ca != 0 && cb != 0 && ca != cb)
+      return CMP(ca, cb);
+    return c_cluster;
+  }
   int c_chr = strcmp(ra->chrom, rb->chrom);
   if (c_chr != 0)
     return c_chr;
@@ -692,6 +703,8 @@ static void find_chrom_range(const SegtraceDupRegion *regions, size_t n,
       high = mid;
   }
   *first = low;
+
+  low = 0;
   high = n;
   while (low < high) {
     size_t mid = low + (high - low) / 2;
@@ -749,18 +762,16 @@ void extract_flankings_worker(void *data, long f, int tid) {
       if (left_len + right_len == 0)
         continue;
 
-      uint8_t *flank_seq = malloc(left_len + right_len);
-      if (left_len > 0)
-        memcpy(flank_seq, ks->seq.s + left_start, left_len);
-      if (right_len > 0)
-        memcpy(flank_seq + left_len, ks->seq.s + end_clamped, right_len);
-
       HashPool pool;
       init_hash_pool(&pool, UINT64_MAX / w->scale);
-      extract_hash(w->r, &pool, flank_seq, left_len + right_len);
+      if (left_len > 0)
+        extract_hash(w->r, &pool, (const uint8_t *)(ks->seq.s + left_start),
+                     left_len);
+      if (right_len > 0)
+        extract_hash(w->r, &pool, (const uint8_t *)(ks->seq.s + end_clamped),
+                     right_len);
       finalize_hash_pool(&pool, &w->regions[i].flank_sketch.hashes,
                          &w->regions[i].flank_sketch.sketch_size);
-      free(flank_seq);
     }
   }
   kseq_destroy(ks);
@@ -1048,7 +1059,8 @@ void finalize_hash_pool(HashPool *pool, uint64_t **out_hashes,
 SegtraceDistResult calculate_segtrace_dist(const SegtraceSketch *ref,
                                            const SegtraceSketch *query,
                                            uint32_t kmer_size) {
-  SegtraceDistResult res = {0.0, 1.0, 0};
+  (void)kmer_size;
+  SegtraceDistResult res = {0};
   if (!ref || !query || ref->sketch_size == 0 || query->sketch_size == 0)
     return res;
 
@@ -1065,10 +1077,6 @@ SegtraceDistResult calculate_segtrace_dist(const SegtraceSketch *ref,
     }
   }
   res.shared_hashes = shared;
-  size_t min_sz = ref->sketch_size < query->sketch_size ? ref->sketch_size
-                                                        : query->sketch_size;
-  res.containment = (double)shared / (double)min_sz;
-  res.distance = 1.0 - pow(res.containment, 1.0 / (double)kmer_size);
   return res;
 }
 
