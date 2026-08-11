@@ -518,9 +518,11 @@ static inline int check_collinear_neighbor(DiscoverComputeData *w, uint32_t wa,
 
           if (w->coords[next_a].sketch_size > 0 &&
               w->coords[next_b].sketch_size > 0) {
-            if (calculate_window_dist(w->all_hashes, &w->coords[next_a],
-                                      &w->coords[next_b], w->kmer_size)
-                    .shared_hashes >= min_shared)
+            SegtraceDistResult d =
+                calculate_window_dist(w->all_hashes, &w->coords[next_a],
+                                      &w->coords[next_b], w->kmer_size);
+            if (d.shared_hashes >= min_shared &&
+                d.containment >= MIN_CONTAINMENT)
               return 1;
           }
         }
@@ -585,7 +587,8 @@ void discover_compute_worker(void *data, long p, int tid) {
           SegtraceDistResult d =
               calculate_window_dist(w_data->all_hashes, &w_data->coords[wa],
                                     &w_data->coords[wb], w_data->kmer_size);
-          if (d.shared_hashes >= min_shared) {
+          if (d.shared_hashes >= min_shared &&
+              d.containment >= MIN_CONTAINMENT) {
             if (check_collinear_neighbor(w_data, wa, wb, min_shared)) {
               union_unionfind(w_data->uf, wa, wb);
             }
