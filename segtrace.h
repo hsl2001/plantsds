@@ -28,7 +28,12 @@ extern "C" {
       (cap) = (cap) ? (cap) : 16;                                              \
       while ((cap) < (req_cap))                                                \
         (cap) *= 2;                                                            \
-      (arr) = realloc((arr), (cap) * sizeof(*(arr)));                          \
+      void *tmp_da_ptr = realloc((arr), (cap) * sizeof(*(arr)));               \
+      if (!tmp_da_ptr) {                                                       \
+        fprintf(stderr, "[ERROR] Out of memory in DA_RESERVE\n");              \
+        exit(1);                                                               \
+      }                                                                        \
+      (arr) = tmp_da_ptr;                                                      \
     }                                                                          \
   } while (0)
 

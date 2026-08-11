@@ -721,10 +721,19 @@ void extract_flankings_worker(void *data, long f, int tid) {
     for (size_t i = first; i < last; i++) {
       size_t start = w->regions[i].start, end = w->regions[i].end,
              flank_size = w->flank_size;
-      size_t left_start = start > flank_size ? start - flank_size : 0;
-      size_t right_end =
-          end + flank_size > ks->seq.l ? ks->seq.l : end + flank_size;
-      size_t left_len = start - left_start, right_len = right_end - end;
+      size_t seq_len = ks->seq.l;
+      size_t start_clamped = start > seq_len ? seq_len : start;
+      size_t end_clamped = end > seq_len ? seq_len : end;
+      if (end_clamped < start_clamped)
+        end_clamped = start_clamped;
+
+      size_t left_start =
+          start_clamped > flank_size ? start_clamped - flank_size : 0;
+      size_t right_end = end_clamped + flank_size > seq_len
+                             ? seq_len
+                             : end_clamped + flank_size;
+      size_t left_len = start_clamped - left_start;
+      size_t right_len = right_end > end_clamped ? right_end - end_clamped : 0;
 
       free(w->regions[i].flank_sketch.hashes);
       w->regions[i].flank_sketch.hashes = NULL;
@@ -737,7 +746,7 @@ void extract_flankings_worker(void *data, long f, int tid) {
       if (left_len > 0)
         memcpy(flank_seq, ks->seq.s + left_start, left_len);
       if (right_len > 0)
-        memcpy(flank_seq + left_len, ks->seq.s + end, right_len);
+        memcpy(flank_seq + left_len, ks->seq.s + end_clamped, right_len);
 
       HashPool pool;
       init_hash_pool(&pool, UINT64_MAX / w->scale);
@@ -996,6 +1005,12 @@ __attribute__((hot)) void extract_hash(const Segtrace *r, HashPool *pool,
       valid_len++;
     } else {
       int8_t b_out = r->base_lookup[seq[i - k]];
+      if (b_out < 0 || b_out > 3) {
+        valid_len = 0;
+        f_hash = 0;
+        r_hash = 0;
+        continue;
+      }
       int8_t b_in = b;
       f_hash = rol64(f_hash, 1) ^ rol64(NTHASH_H[b_out], k) ^ NTHASH_H[b_in];
       r_hash = ror64(r_hash, 1) ^ ror64(NTHASH_H[b_out ^ 3], 1) ^
