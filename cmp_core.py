@@ -2,10 +2,12 @@
 """
 cmp_core.py - Core evaluation engine for Segmental Duplication (SD) analysis.
 
+Provides high-speed binary-search accelerated fragment overlap evaluation (TP, FP, FN, Recall, Precision, F1)
 and Base-Pair (BP) footprint calculations across datasets.
 """
 
 import os
+import bisect
 
 def parse_bed_intervals(filepath):
     """Parses any BED file into a list of unique (chrom, start, end) intervals."""
@@ -88,7 +90,7 @@ def calc_bp_metrics(pred_intervals, ref_intervals):
 
 def eval_fragment_overlap(pred_intervals, ref_intervals, fraction=0.5):
     """
-    Evaluates fragment intervals:
+    Evaluates fragment intervals using binary-search accelerated indexing (O(N log N)):
     - Recall (Sensitivity): Fraction of reference intervals covered >= fraction (ov / len_r >= fraction).
     - Precision: Fraction of predicted intervals valid SD sequence (ov / len_p >= fraction).
     Calculates TP, FP, FN, Recall, Precision, and F1.
@@ -101,15 +103,33 @@ def eval_fragment_overlap(pred_intervals, ref_intervals, fraction=0.5):
     for c, s, e in ref_intervals:
         r_by_c.setdefault(c, []).append((s, e))
 
+    p_sorted = {}
+    p_starts = {}
+    for c, ints in p_by_c.items():
+        sorted_ints = sorted(ints, key=lambda x: x[0])
+        p_sorted[c] = sorted_ints
+        p_starts[c] = [x[0] for x in sorted_ints]
+
+    r_sorted = {}
+    r_starts = {}
+    for c, ints in r_by_c.items():
+        sorted_ints = sorted(ints, key=lambda x: x[0])
+        r_sorted[c] = sorted_ints
+        r_starts[c] = [x[0] for x in sorted_ints]
+
     # TP & FN: Reference Intervals covered >= fraction by any prediction
     tp = 0
     total_ref = len(ref_intervals)
     for c, s_r, e_r in ref_intervals:
         len_r = e_r - s_r
-        if len_r <= 0 or c not in p_by_c:
+        if len_r <= 0 or c not in p_sorted:
             continue
         matched = False
-        for s_p, e_p in p_by_c[c]:
+        idx_end = bisect.bisect_right(p_starts[c], e_r)
+        for k in range(idx_end - 1, -1, -1):
+            s_p, e_p = p_sorted[c][k]
+            if e_p <= s_r:
+                continue
             ov = max(0, min(e_r, e_p) - max(s_r, s_p))
             if ov / len_r >= fraction:
                 matched = True
@@ -124,10 +144,14 @@ def eval_fragment_overlap(pred_intervals, ref_intervals, fraction=0.5):
     total_pred = len(pred_intervals)
     for c, s_p, e_p in pred_intervals:
         len_p = e_p - s_p
-        if len_p <= 0 or c not in r_by_c:
+        if len_p <= 0 or c not in r_sorted:
             continue
         matched = False
-        for s_r, e_r in r_by_c[c]:
+        idx_end = bisect.bisect_right(r_starts[c], e_p)
+        for k in range(idx_end - 1, -1, -1):
+            s_r, e_r = r_sorted[c][k]
+            if e_r <= s_p:
+                continue
             ov = max(0, min(e_r, e_p) - max(s_r, s_p))
             if ov / len_p >= fraction:
                 matched = True
