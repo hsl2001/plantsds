@@ -44,8 +44,9 @@ extern "C" {
 #define ABS_DIFF(a, b) ((a) > (b) ? (a) - (b) : (b) - (a))
 
 #define NUM_PARTITIONS 512
-#define MAX_KMER_FREQ 8196
+#define MAX_KMER_FREQ 128
 #define MAX_PAIR_COMPARISONS 64
+#define MAX_COLLINEAR_STEP 25
 
 #define BLOOM_SIZE_BITS (1 << 24)
 #define BLOOM_SIZE_BYTES (BLOOM_SIZE_BITS / 8)
@@ -238,7 +239,6 @@ SegtraceDistResult calculate_window_dist(const uint64_t *all_hashes,
 
 // 5. REGION CLUSTERING & OUTPUT
 void build_duplicate_regions(UnionFind *uf, size_t num_sketches,
-                             size_t window_size, int num_files, char **files,
                              GenomeSeqLen *seq_lens, WindowCoord *coords,
                              SegtraceDupRegion **out_regions,
                              size_t *out_n_regions);

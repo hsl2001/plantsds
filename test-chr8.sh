@@ -1,0 +1,1 @@
+make clean && make && ./segtrace -o data/t2t_chm13v2.0_chr8_sd_f1 data/t2t_chm13v2.0_chr8.fna.gz && python3 cmp_human.py --segtrace data/t2t_chm13v2.0_chr8_sd_f1.dup.bed --sedef data/t2t_chm13v2.0_chr8_SD.bed
