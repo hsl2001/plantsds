@@ -196,24 +196,53 @@ int main(int argc, char **argv) {
 static void seq_chunk_worker(void *data, long i, int tid) {
   (void)tid;
   SeqChunkJob *job = &((SeqChunkJob *)data)[i];
+
+  size_t chunk_len = job->chunk_end_idx - job->chunk_start_idx;
+  PosHashPool chunk_pool = {NULL, 0, 0};
+  extract_hash_chunk(job->r, &chunk_pool, job->seq_ptr + job->chunk_start_idx,
+                     chunk_len, UINT64_MAX / job->scale);
+
   uint32_t current_window_idx =
       (uint32_t)(job->chunk_start_idx / job->step_size);
+  size_t p_start = 0, p_end = 0;
 
   for (size_t idx = job->chunk_start_idx;
        idx + job->window_size <= job->chunk_end_idx;
        idx += job->step_size, current_window_idx++) {
+
+    size_t w_start = idx - job->chunk_start_idx;
+    size_t w_end = w_start + job->window_size;
+    size_t min_i = w_start + job->r->hash_window - 1;
+    size_t max_i = w_end;
+
+    while (p_start < chunk_pool.size && chunk_pool.entries[p_start].pos < min_i)
+      p_start++;
+    while (p_end < chunk_pool.size && chunk_pool.entries[p_end].pos < max_i)
+      p_end++;
+
     size_t valid_bases = 0;
     for (size_t j = 0; j < job->window_size; j++) {
       if (job->base_lookup[job->seq_ptr[idx + j]] >= 0)
         valid_bases++;
     }
+
     size_t sketch_size = 0;
     uint64_t *hashes = NULL;
     if (valid_bases >= job->min_bases) {
-      HashPool pool;
-      init_hash_pool(&pool, UINT64_MAX / job->scale);
-      extract_hash(job->r, &pool, job->seq_ptr + idx, job->window_size);
-      finalize_hash_pool(&pool, &hashes, &sketch_size);
+      size_t count = p_end - p_start;
+      if (count > 0) {
+        uint64_t *tmp_hashes = malloc(count * sizeof(uint64_t));
+        for (size_t k = 0; k < count; k++)
+          tmp_hashes[k] = chunk_pool.entries[p_start + k].hash;
+        qsort(tmp_hashes, count, sizeof(uint64_t), compare_uint64);
+        size_t unique_count = 0;
+        for (size_t k = 0; k < count; k++) {
+          if (k == 0 || tmp_hashes[k] != tmp_hashes[k - 1])
+            tmp_hashes[unique_count++] = tmp_hashes[k];
+        }
+        hashes = realloc(tmp_hashes, unique_count * sizeof(uint64_t));
+        sketch_size = unique_count;
+      }
     }
 
     DA_RESERVE(job->coords, job->cap_coords, job->num_coords + 1);
@@ -232,8 +261,11 @@ static void seq_chunk_worker(void *data, long i, int tid) {
 
     wc->sketch_offset = h_idx;
     wc->sketch_size = (uint32_t)sketch_size;
-    free(hashes);
+    if (hashes)
+      free(hashes);
   }
+  if (chunk_pool.entries)
+    free(chunk_pool.entries);
 }
 
 static void process_and_gather_jobs(StreamWorkerData *worker, SeqChunkJob *jobs,
@@ -382,51 +414,13 @@ void merge_global_data(StreamWorkerData *workers, int num_files,
                        WindowCoord **out_coords, size_t *out_num_sketches,
                        GenomeSeqLen **out_seq_lens, size_t *out_num_seqs) {
   (void)out_prefix;
-  size_t total_hashes = 0, total_sketches = 0, total_seqs = 0;
   (void)num_files;
-  for (int i = 0; i < 1; i++) {
-    total_hashes += workers[i].num_all_hashes;
-    total_sketches += workers[i].num_sketches;
-    total_seqs += workers[i].num_seqs;
-  }
 
-  uint64_t *all_hashes =
-      total_hashes ? malloc(total_hashes * sizeof(uint64_t)) : NULL;
-  WindowCoord *coords =
-      total_sketches ? malloc(total_sketches * sizeof(WindowCoord)) : NULL;
-  GenomeSeqLen *seq_lens =
-      total_seqs ? malloc(total_seqs * sizeof(GenomeSeqLen)) : NULL;
-  size_t g_hash_offset = 0, g_sketch_offset = 0, g_seq_offset = 0;
-
-  for (int i = 0; i < 1; i++) {
-    StreamWorkerData *w = &workers[i];
-    if (w->num_all_hashes > 0)
-      memcpy(all_hashes + g_hash_offset, w->all_hashes,
-             w->num_all_hashes * sizeof(uint64_t));
-    if (w->num_seqs > 0)
-      memcpy(seq_lens + g_seq_offset, w->seq_lens,
-             w->num_seqs * sizeof(GenomeSeqLen));
-
-    for (size_t j = 0; j < w->num_sketches; j++) {
-      WindowCoord c = w->coords[j];
-      c.sketch_offset += g_hash_offset;
-      c.seq_id += g_seq_offset;
-      coords[g_sketch_offset + j] = c;
-    }
-
-    g_hash_offset += w->num_all_hashes;
-    g_sketch_offset += w->num_sketches;
-    g_seq_offset += w->num_seqs;
-    free(w->all_hashes);
-    free(w->coords);
-    free(w->seq_lens);
-  }
-
-  *out_all_hashes = all_hashes;
-  *out_coords = coords;
-  *out_num_sketches = total_sketches;
-  *out_seq_lens = seq_lens;
-  *out_num_seqs = total_seqs;
+  *out_all_hashes = workers[0].all_hashes;
+  *out_coords = workers[0].coords;
+  *out_num_sketches = workers[0].num_sketches;
+  *out_seq_lens = workers[0].seq_lens;
+  *out_num_seqs = workers[0].num_seqs;
 }
 
 // ==============================================================
@@ -461,8 +455,21 @@ void discover_and_compute(const uint64_t *all_hashes, WindowCoord *coords,
       size_t p = (size_t)(val / part_size);
       if (p >= NUM_PARTITIONS)
         p = NUM_PARTITIONS - 1;
-      DA_PUSH(w.buckets[p].entries, w.buckets[p].size, w.buckets[p].cap,
-              ((HashWindowEntry){val, (uint32_t)win}));
+
+      PartitionBucket *b = &w.buckets[p];
+      size_t rem = b->size % BUCKET_BLOCK_SIZE;
+      if (rem == 0) {
+        HashBlock *nb = malloc(sizeof(HashBlock));
+        nb->next = NULL;
+        if (!b->head) {
+          b->head = b->tail = nb;
+        } else {
+          b->tail->next = nb;
+          b->tail = nb;
+        }
+      }
+      b->tail->entries[rem] = (HashWindowEntry){val, (uint32_t)win};
+      b->size++;
     }
   }
 
@@ -470,8 +477,14 @@ void discover_and_compute(const uint64_t *all_hashes, WindowCoord *coords,
 
   for (int t = 0; t < n_threads; t++)
     free(w.t_bloom[t]);
-  for (size_t p = 0; p < NUM_PARTITIONS; p++)
-    free(w.buckets[p].entries);
+  for (size_t p = 0; p < NUM_PARTITIONS; p++) {
+    HashBlock *curr = w.buckets[p].head;
+    while (curr) {
+      HashBlock *next = curr->next;
+      free(curr);
+      curr = next;
+    }
+  }
   free(w.buckets);
   free(w.t_bloom);
 }
@@ -523,14 +536,25 @@ void discover_compute_worker(void *data, long p, int tid) {
   if (b->size == 0)
     return;
 
-  qsort(b->entries, b->size, sizeof(HashWindowEntry), compare_hash_entry);
+  HashWindowEntry *flat_entries = malloc(b->size * sizeof(HashWindowEntry));
+  size_t idx = 0;
+  HashBlock *curr = b->head;
+  while (curr) {
+    size_t count = (b->size - idx > BUCKET_BLOCK_SIZE) ? BUCKET_BLOCK_SIZE
+                                                       : (b->size - idx);
+    memcpy(flat_entries + idx, curr->entries, count * sizeof(HashWindowEntry));
+    idx += count;
+    curr = curr->next;
+  }
+
+  qsort(flat_entries, b->size, sizeof(HashWindowEntry), compare_hash_entry);
   memset(w_data->t_bloom[tid], 0, BLOOM_SIZE_BYTES);
 
   double p_kmer = pow(0.90, (double)w_data->kmer_size);
   size_t i = 0;
   while (i < b->size) {
     size_t j = i + 1;
-    while (j < b->size && b->entries[j].hash == b->entries[i].hash)
+    while (j < b->size && flat_entries[j].hash == flat_entries[i].hash)
       j++;
     size_t run_len = j - i;
 
@@ -539,8 +563,8 @@ void discover_compute_worker(void *data, long p, int tid) {
         size_t b_max =
             a + 1 + MAX_PAIR_COMPARISONS < j ? a + 1 + MAX_PAIR_COMPARISONS : j;
         for (size_t b_idx = a + 1; b_idx < b_max; b_idx++) {
-          uint32_t wa = b->entries[a].window_id,
-                   wb = b->entries[b_idx].window_id;
+          uint32_t wa = flat_entries[a].window_id,
+                   wb = flat_entries[b_idx].window_id;
           if (w_data->coords[wa].seq_id == w_data->coords[wb].seq_id &&
               ABS_DIFF(w_data->coords[wa].start, w_data->coords[wb].start) <
                   w_data->window_size)
@@ -571,6 +595,7 @@ void discover_compute_worker(void *data, long p, int tid) {
     }
     i = j;
   }
+  free(flat_entries);
 }
 
 // ==============================================================
@@ -1024,6 +1049,48 @@ __attribute__((hot)) void extract_hash(const Segtrace *r, HashPool *pool,
     if (valid_len >= k) {
       uint64_t canonical = (f_hash < r_hash) ? f_hash : r_hash;
       insert_hash_pool(pool, mix_hash(canonical, r->hash_seed));
+    }
+  }
+}
+
+__attribute__((hot)) void extract_hash_chunk(const Segtrace *r,
+                                             PosHashPool *pool,
+                                             const uint8_t *seq, size_t len,
+                                             uint64_t threshold) {
+  uint32_t k = r->hash_window;
+  if (len < k)
+    return;
+  uint64_t f_hash = 0, r_hash = 0;
+  size_t valid_len = 0;
+
+  for (size_t i = 0; i < len; i++) {
+    int8_t b = r->base_lookup[seq[i]];
+    if (b < 0) {
+      valid_len = 0;
+      f_hash = 0;
+      r_hash = 0;
+      continue;
+    }
+    if (valid_len < k) {
+      int8_t b_rc = b ^ 3;
+      f_hash ^= rol64(NTHASH_H[b], k - 1 - (uint32_t)valid_len);
+      r_hash ^= rol64(NTHASH_H[b_rc], (uint32_t)valid_len);
+      valid_len++;
+    } else {
+      int8_t b_out = r->base_lookup[seq[i - k]];
+      int8_t b_in = b;
+      f_hash = rol64(f_hash, 1) ^ rol64(NTHASH_H[b_out], k) ^ NTHASH_H[b_in];
+      r_hash = ror64(r_hash, 1) ^ ror64(NTHASH_H[b_out ^ 3], 1) ^
+               rol64(NTHASH_H[b_in ^ 3], k - 1);
+    }
+
+    if (valid_len >= k) {
+      uint64_t canonical = (f_hash < r_hash) ? f_hash : r_hash;
+      uint64_t h = mix_hash(canonical, r->hash_seed);
+      if (h < threshold) {
+        DA_PUSH(pool->entries, pool->size, pool->cap,
+                ((PosHash){(uint32_t)i, h}));
+      }
     }
   }
 }

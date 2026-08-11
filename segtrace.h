@@ -113,6 +113,17 @@ typedef struct {
 } HashPool;
 
 typedef struct {
+  uint32_t pos;
+  uint64_t hash;
+} PosHash;
+
+typedef struct {
+  PosHash *entries;
+  size_t size;
+  size_t cap;
+} PosHashPool;
+
+typedef struct {
   uint32_t seq_id;
   size_t start;
   size_t end;
@@ -197,10 +208,17 @@ typedef struct {
   uint32_t window_id;
 } HashWindowEntry;
 
+#define BUCKET_BLOCK_SIZE 1024
+
+typedef struct HashBlock {
+  HashWindowEntry entries[BUCKET_BLOCK_SIZE];
+  struct HashBlock *next;
+} HashBlock;
+
 typedef struct {
-  HashWindowEntry *entries;
+  HashBlock *head;
+  HashBlock *tail;
   size_t size;
-  size_t cap;
 } PartitionBucket;
 
 typedef struct {
@@ -264,6 +282,8 @@ void write_dup_bed(const char *out_prefix, SegtraceDupRegion *dup_regions,
 void init_segtrace(Segtrace *r, size_t hash_window, int filter_masked);
 void extract_hash(const Segtrace *r, HashPool *pool, const uint8_t *seq,
                   size_t len);
+void extract_hash_chunk(const Segtrace *r, PosHashPool *pool,
+                        const uint8_t *seq, size_t len, uint64_t threshold);
 void init_hash_pool(HashPool *pool, uint64_t threshold);
 void insert_hash_pool(HashPool *pool, uint64_t h);
 void finalize_hash_pool(HashPool *pool, uint64_t **out_hashes,
