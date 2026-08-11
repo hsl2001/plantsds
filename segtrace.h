@@ -48,6 +48,7 @@ extern "C" {
 #define MAX_PAIR_COMPARISONS 64
 #define MAX_COLLINEAR_LOOOKAHEAD 25
 #define MIN_SD_LEN 1000
+#define MERGE_COEFF 8
 
 #define BLOOM_SIZE_BITS (1 << 24)
 #define BLOOM_SIZE_BYTES (BLOOM_SIZE_BITS / 8)
@@ -243,7 +244,8 @@ void build_duplicate_regions(UnionFind *uf, size_t num_sketches,
                              GenomeSeqLen *seq_lens, WindowCoord *coords,
                              SegtraceDupRegion **out_regions,
                              size_t *out_n_regions);
-size_t merge_dup_regions(SegtraceDupRegion *regions, size_t n);
+size_t merge_dup_regions(SegtraceDupRegion *regions, size_t n,
+                         size_t window_size);
 void extract_flankings(char **files, int num_files, const Segtrace *r,
                        uint64_t scale, SegtraceDupRegion *regions,
                        size_t n_regions, int n_threads, size_t flank_size);

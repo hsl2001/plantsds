@@ -162,7 +162,7 @@ int main(int argc, char **argv) {
   free(coords);
   coords = NULL;
 
-  size_t n_merged = merge_dup_regions(dup_regions, n_dup_regions);
+  size_t n_merged = merge_dup_regions(dup_regions, n_dup_regions, window_size);
 
   fprintf(stderr,
           "[INFO] Extracting flanking sequences for sub-clustering...\n");
@@ -638,7 +638,8 @@ static int compare_dup_region_by_cluster(const void *a, const void *b) {
   return CMP(ra->end, rb->end);
 }
 
-size_t merge_dup_regions(SegtraceDupRegion *regions, size_t n) {
+size_t merge_dup_regions(SegtraceDupRegion *regions, size_t n,
+                         size_t window_size) {
   if (n <= 1)
     return n;
   qsort(regions, n, sizeof(SegtraceDupRegion), compare_dup_region_by_cluster);
@@ -647,7 +648,7 @@ size_t merge_dup_regions(SegtraceDupRegion *regions, size_t n) {
   for (size_t i = 1; i < n; i++) {
     if (strcmp(regions[i].cluster_id, regions[out].cluster_id) == 0 &&
         strcmp(regions[i].chrom, regions[out].chrom) == 0 &&
-        regions[i].start <= regions[out].end + 8192) {
+        regions[i].start <= regions[out].end + MERGE_COEFF * window_size) {
       if (regions[i].end > regions[out].end)
         regions[out].end = regions[i].end;
       if (regions[i].window_idx > regions[out].window_idx)
