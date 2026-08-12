@@ -49,6 +49,7 @@ extern "C" {
 #define ABS_DIFF(a, b) ((a) > (b) ? (a) - (b) : (b) - (a))
 
 #define NUM_PARTITIONS 512
+#define BATCH_PARTITIONS 16
 #define MAX_KMER_FREQ 256
 #define MAX_PAIR_COMPARISONS 64
 #define MAX_COLLINEAR_LOOOKAHEAD 8
@@ -75,7 +76,7 @@ typedef struct {
 
 typedef struct {
   size_t sketch_size;
-  uint64_t *hashes;
+  uint32_t *hashes;
 } SegtraceSketch;
 
 typedef struct {
@@ -90,10 +91,10 @@ typedef struct {
 } UnionFind;
 
 typedef struct {
-  char *chrom;
+  uint32_t seq_id;
   size_t start;
   size_t end;
-  char *cluster_id;
+  uint32_t cluster_id;
   uint32_t subcluster_id;
   SegtraceSketch flank_sketch;
   uint32_t window_idx;
@@ -105,17 +106,16 @@ typedef struct {
 typedef struct {
   size_t size;
   size_t cap;
-  uint64_t hash_threshold;
-  uint64_t *hashes;
+  uint32_t hash_threshold;
+  uint32_t *hashes;
 } HashPool;
 
 typedef struct {
   uint32_t seq_id;
-  size_t start;
-  size_t end;
-  size_t sketch_offset;
-  uint32_t sketch_size;
+  uint32_t sketch_offset;
   uint32_t window_idx;
+  uint16_t sketch_size;
+  uint16_t flags;
 } WindowCoord;
 
 typedef struct {
@@ -129,7 +129,7 @@ typedef struct {
   size_t window_size;
   size_t step_size;
   size_t min_bases;
-  uint64_t *all_hashes;
+  uint32_t *all_hashes;
   size_t num_all_hashes;
   size_t cap_all_hashes;
   WindowCoord *coords;
@@ -147,6 +147,8 @@ typedef struct {
   SegtraceDupRegion *regions;
   size_t n_regions;
   size_t flank_size;
+  const GenomeSeqLen *seq_lens;
+  size_t num_seqs;
 } FlankingWorkerData;
 
 typedef struct {
@@ -181,7 +183,7 @@ typedef struct {
   size_t seq_len;
   size_t chunk_start_idx;
   size_t chunk_end_idx;
-  uint64_t *hashes;
+  uint32_t *hashes;
   size_t num_hashes;
   size_t cap_hashes;
   WindowCoord *coords;
@@ -190,7 +192,7 @@ typedef struct {
 } SeqChunkJob;
 
 typedef struct {
-  uint64_t hash;
+  uint32_t hash;
   uint32_t window_id;
 } HashWindowEntry;
 
@@ -201,14 +203,16 @@ typedef struct {
 } PartitionBucket;
 
 typedef struct {
-  const uint64_t *all_hashes;
+  const uint32_t *all_hashes;
   WindowCoord *coords;
   size_t n_windows;
   size_t window_size;
+  size_t step_size;
   uint32_t kmer_size;
   UnionFind *uf;
   PartitionBucket *buckets;
   uint8_t **t_bloom;
+  size_t batch_start;
 } DiscoverComputeData;
 
 extern const int8_t BASE_LOOKUP[256];
@@ -227,43 +231,45 @@ StreamWorkerData *extract_all_windows(char **files, int num_files,
                                       size_t window_size, size_t step_size,
                                       size_t min_bases, int n_threads);
 void merge_global_data(StreamWorkerData *workers, int num_files,
-                       const char *out_prefix, uint64_t **out_all_hashes,
+                       const char *out_prefix, uint32_t **out_all_hashes,
                        WindowCoord **out_coords, size_t *out_num_sketches,
                        GenomeSeqLen **out_seq_lens, size_t *out_num_seqs);
 
 // 4. DISCOVERY & DISTANCE CALCULATION
-void discover_and_compute(const uint64_t *all_hashes, WindowCoord *coords,
-                          size_t n_windows, size_t window_size, int n_threads,
-                          uint32_t kmer_size, UnionFind *uf);
+void discover_and_compute(const uint32_t *all_hashes, WindowCoord *coords,
+                          size_t n_windows, size_t window_size, size_t step_size,
+                          int n_threads, uint32_t kmer_size, UnionFind *uf);
 void discover_compute_worker(void *data, long p, int tid);
-SegtraceDistResult calculate_window_dist(const uint64_t *all_hashes,
+SegtraceDistResult calculate_window_dist(const uint32_t *all_hashes,
                                          const WindowCoord *wa,
                                          const WindowCoord *wb);
 
 // 5. REGION CLUSTERING & OUTPUT
 void build_duplicate_regions(UnionFind *uf, size_t num_sketches,
-                             GenomeSeqLen *seq_lens, WindowCoord *coords,
+                             WindowCoord *coords, size_t step_size,
+                             size_t window_size,
                              SegtraceDupRegion **out_regions,
                              size_t *out_n_regions);
 size_t merge_dup_regions(SegtraceDupRegion *regions, size_t n,
                          size_t window_size);
 void extract_flankings(char **files, int num_files, const Segtrace *r,
                        uint64_t scale, SegtraceDupRegion *regions,
-                       size_t n_regions, int n_threads, size_t flank_size);
+                       size_t n_regions, int n_threads, size_t flank_size,
+                       const GenomeSeqLen *seq_lens, size_t num_seqs);
 void extract_flankings_worker(void *data, long f, int tid);
 void perform_subclustering(SegtraceDupRegion *regions, size_t n_merged,
                            int n_threads, uint32_t kmer_size);
 void process_subcluster(void *data, long i, int tid);
 void write_dup_bed(const char *out_prefix, SegtraceDupRegion *dup_regions,
-                   size_t n_merged);
+                   size_t n_merged, const GenomeSeqLen *seq_lens);
 
 // 6. CORE ALGORITHMS
 void init_segtrace(Segtrace *r, size_t hash_window, int filter_masked);
 void extract_hash(const Segtrace *r, HashPool *pool, const uint8_t *seq,
                   size_t len);
-void init_hash_pool(HashPool *pool, uint64_t threshold);
-void insert_hash_pool(HashPool *pool, uint64_t h);
-void finalize_hash_pool(HashPool *pool, uint64_t **out_hashes,
+void init_hash_pool(HashPool *pool, uint32_t threshold);
+void insert_hash_pool(HashPool *pool, uint32_t h);
+void finalize_hash_pool(HashPool *pool, uint32_t **out_hashes,
                         size_t *out_size);
 SegtraceDistResult calculate_segtrace_dist(const SegtraceSketch *ref,
                                            const SegtraceSketch *query);
@@ -274,10 +280,10 @@ void free_unionfind(UnionFind *uf);
 
 // 7. UTILITIES
 void get_basename(const char *filename, char *basename, size_t size);
-uint64_t mix_hash(uint64_t hash_value, uint64_t seed);
+uint32_t mix_hash(uint64_t hash_value, uint64_t seed);
 uint64_t encode_pair(uint32_t a, uint32_t b);
 int bloom_test_and_set(uint8_t *bloom, uint64_t key, uint32_t mask);
-int compare_uint64(const void *a, const void *b);
+int compare_uint32(const void *a, const void *b);
 int compare_hash_entry(const void *a, const void *b);
 
 #ifdef __cplusplus
