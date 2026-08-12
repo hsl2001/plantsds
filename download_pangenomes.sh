@@ -120,50 +120,6 @@ except Exception:
     done
 }
 
-# 7. ARABIDOPSIS (Arabidopsis thaliana) - GitHub / Edmond
-download_arabidopsis() {
-    log "=== Downloading Arabidopsis 69 Pangenome ==="
-    local DIR="$BASE_DIR/arabidopsis/assemblies"
-    mkdir -p "$DIR" && cd "$DIR"
-    # Download from Edmond Dataverse 10.17617/3.AEOJBL
-    python3 -c "
-import urllib.request, json
-url = 'https://edmond.mpg.de/api/datasets/:persistentId/?persistentId=doi:10.17617/3.AEOJBL'
-try:
-    d = json.loads(urllib.request.urlopen(url).read())
-    for f in d['data']['latestVersion']['files']:
-        print(f\"https://edmond.mpg.de/api/access/datafile/{f['dataFile']['id']}\t{f['dataFile']['filename']}\")
-except Exception:
-    pass
-" | while read -r link key; do
-        if [ -n "$link" ] && [ -n "$key" ]; then
-            run_wget -c "$link" -O "$key" || true
-        fi
-    done
-}
-
-# 8. RICE (Oryza sativa) - Figshare / ENA
-download_rice() {
-    log "=== Downloading Rice 149 Pangenome ==="
-    local DIR="$BASE_DIR/rice/assemblies"
-    mkdir -p "$DIR" && cd "$DIR"
-    # Download from Figshare API 25697817
-    python3 -c "
-import urllib.request, json
-url = 'https://api.figshare.com/v2/articles/25697817/files'
-try:
-    d = json.loads(urllib.request.urlopen(url).read())
-    for f in d:
-        print(f\"{f['download_url']}\t{f['name']}\")
-except Exception:
-    pass
-" | while read -r link key; do
-        if [ -n "$link" ] && [ -n "$key" ]; then
-            run_wget -c "$link" -O "$key" || true
-        fi
-    done
-}
-
 main() {
     for arg in "$@"; do
         if [[ "$arg" == "--dry-run" ]]; then
@@ -178,8 +134,6 @@ main() {
     download_marchantia
     download_grapevine
     download_citrus
-    download_arabidopsis
-    download_rice
     log "All downloads initiated/completed."
 }
 
