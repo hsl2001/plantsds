@@ -133,12 +133,11 @@ ctx.check_hostname = False
 ctx.verify_mode = ssl.CERT_NONE
 
 art_id = '${article_id}'
-url = f'https://api.figshare.com/v2/articles/{art_id}'
+url = f'https://api.figshare.com/v2/articles/{art_id}/files?page_size=1000'
 req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'})
 try:
     with urllib.request.urlopen(req, context=ctx, timeout=20) as r:
-        data = json.loads(r.read().decode('utf-8'))
-        files = data.get('files', [])
+        files = json.loads(r.read().decode('utf-8'))
         for f in files:
             link = f.get('download_url')
             name = f.get('name')
@@ -152,39 +151,41 @@ except Exception as e:
 # 3. Download assemblies from NCBI BioProject via Assembly Database API
 download_ncbi_bioproject() {
     local bioproject="$1"
-    log "Fetching NCBI Assembly database entries for BioProject ${bioproject}..."
+    log "Fetching NCBI Assembly database entries for BioProject/Organism ${bioproject}..."
     while read -r link key || [ -n "$link" ]; do
         if [ -n "$link" ] && [ -n "$key" ]; then
             run_wget -c "$link" -O "$key" || true
         fi
     done < <(python3 -c "
-import urllib.request, json, ssl, sys, time
+import urllib.request, json, ssl, sys, time, urllib.parse
 ctx = ssl.create_default_context()
 ctx.check_hostname = False
 ctx.verify_mode = ssl.CERT_NONE
 
 bioprj = '${bioproject}'
-url = f'https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi?db=assembly&term={bioprj}[BioProject]&retmode=json'
+term_enc = urllib.parse.quote(f'{bioprj}[BioProject]')
+url = f'https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi?db=assembly&term={term_enc}&retmode=json'
 req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'})
 try:
     with urllib.request.urlopen(req, context=ctx, timeout=20) as r:
         data = json.loads(r.read().decode('utf-8'))
         id_list = data.get('esearchresult', {}).get('idlist', [])
         if not id_list:
-            url_fallback = f'https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi?db=assembly&term={bioprj}&retmode=json'
-            req_fb = urllib.request.Request(url_fallback, headers={'User-Agent': 'Mozilla/5.0'})
+            term_fb = urllib.parse.quote(f'{bioprj}[Organism]') if not bioprj.startswith('PRJ') else urllib.parse.quote(bioprj)
+            url_fb = f'https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi?db=assembly&term={term_fb}&retmode=json'
+            req_fb = urllib.request.Request(url_fb, headers={'User-Agent': 'Mozilla/5.0'})
             with urllib.request.urlopen(req_fb, context=ctx, timeout=10) as r_fb:
                 data_fb = json.loads(r_fb.read().decode('utf-8'))
                 id_list = data_fb.get('esearchresult', {}).get('idlist', [])
         if id_list:
             time.sleep(0.4)
-            ids_str = ','.join(id_list)
+            ids_str = ','.join(id_list[:50])
             sum_url = f'https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi?db=assembly&id={ids_str}&retmode=json'
             req2 = urllib.request.Request(sum_url, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'})
             with urllib.request.urlopen(req2, context=ctx, timeout=20) as r2:
                 sdata = json.loads(r2.read().decode('utf-8'))
                 result = sdata.get('result', {})
-                for aid in id_list:
+                for aid in id_list[:50]:
                     doc = result.get(aid, {})
                     ftp = doc.get('ftppath_genbank') or doc.get('ftppath_refseq')
                     acc = doc.get('assemblyaccession') or doc.get('assemblyname')
@@ -297,8 +298,8 @@ download_potato() {
     local DIR="$BASE_DIR/potato/assemblies"
     mkdir -p "$DIR" && cd "$DIR"
     
-    download_zenodo_record "7894982"
     download_ncbi_bioproject "PRJNA731597"
+    download_ncbi_bioproject "Solanum tuberosum"
     end_module
 }
 
@@ -308,8 +309,8 @@ download_eggplant() {
     local DIR="$BASE_DIR/eggplant/assemblies"
     mkdir -p "$DIR" && cd "$DIR"
     
-    download_zenodo_record "5523914"
     download_ncbi_bioproject "PRJNA612792"
+    download_ncbi_bioproject "Solanum melongena"
     end_module
 }
 
@@ -376,7 +377,7 @@ download_marchantia() {
     run_wget -c "https://marchantia.info/download/marchantia_pangenome.tar.gz" || true
     run_tar_if_exists "marchantia_pangenome.tar.gz" -xzf marchantia_pangenome.tar.gz
     run_wget -c "https://marchantia.info/download/m_polymorpha_v6.fa.gz" || true
-    download_zenodo_record "1021402"
+    download_ncbi_bioproject "Marchantia polymorpha"
     end_module
 }
 
