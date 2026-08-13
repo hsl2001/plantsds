@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 # download_pangenomes.sh
-# Comprehensive Downloader for All Investigated Plant Pangenomes (13 Projects)
+# Comprehensive Downloader for Investigated Plant Pangenomes (11 Projects)
 # With Enhanced Dry-Run Validation & .fa* / Genome File Matching Verification
 # =============================================================================
 set -euo pipefail
@@ -151,7 +151,7 @@ except Exception as e:
 # 3. Download assemblies from NCBI BioProject via Assembly Database API
 download_ncbi_bioproject() {
     local bioproject="$1"
-    log "Fetching NCBI Assembly database entries for BioProject/Organism ${bioproject}..."
+    log "Fetching NCBI Assembly database entries for ${bioproject}..."
     while read -r link key || [ -n "$link" ]; do
         if [ -n "$link" ] && [ -n "$key" ]; then
             run_wget -c "$link" -O "$key" || true
@@ -163,38 +163,45 @@ ctx.check_hostname = False
 ctx.verify_mode = ssl.CERT_NONE
 
 bioprj = '${bioproject}'
-term_enc = urllib.parse.quote(f'{bioprj}[BioProject]')
-url = f'https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi?db=assembly&term={term_enc}&retmode=json'
-req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'})
-try:
-    with urllib.request.urlopen(req, context=ctx, timeout=20) as r:
-        data = json.loads(r.read().decode('utf-8'))
-        id_list = data.get('esearchresult', {}).get('idlist', [])
-        if not id_list:
-            term_fb = urllib.parse.quote(f'{bioprj}[Organism]') if not bioprj.startswith('PRJ') else urllib.parse.quote(bioprj)
-            url_fb = f'https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi?db=assembly&term={term_fb}&retmode=json'
-            req_fb = urllib.request.Request(url_fb, headers={'User-Agent': 'Mozilla/5.0'})
-            with urllib.request.urlopen(req_fb, context=ctx, timeout=10) as r_fb:
-                data_fb = json.loads(r_fb.read().decode('utf-8'))
-                id_list = data_fb.get('esearchresult', {}).get('idlist', [])
-        if id_list:
-            time.sleep(0.4)
-            ids_str = ','.join(id_list[:50])
-            sum_url = f'https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi?db=assembly&id={ids_str}&retmode=json'
-            req2 = urllib.request.Request(sum_url, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'})
-            with urllib.request.urlopen(req2, context=ctx, timeout=20) as r2:
-                sdata = json.loads(r2.read().decode('utf-8'))
-                result = sdata.get('result', {})
-                for aid in id_list[:50]:
-                    doc = result.get(aid, {})
-                    ftp = doc.get('ftppath_genbank') or doc.get('ftppath_refseq')
-                    acc = doc.get('assemblyaccession') or doc.get('assemblyname')
-                    if ftp:
-                        basename = ftp.split('/')[-1]
-                        fa_url = f'{ftp}/{basename}_genomic.fna.gz'
-                        print(f'{fa_url}\t{acc}.fna.gz')
-except Exception as e:
-    sys.stderr.write(f'Error fetching NCBI {bioprj}: {e}\n')
+terms_to_try = [
+    urllib.parse.quote_plus(bioprj, safe='[]'),
+    urllib.parse.quote_plus(f'{bioprj}[BioProject]', safe='[]'),
+    urllib.parse.quote_plus(f'{bioprj}[Organism]', safe='[]')
+]
+
+id_list = []
+for term in terms_to_try:
+    url = f'https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi?db=assembly&term={term}&retmode=json'
+    req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'})
+    try:
+        with urllib.request.urlopen(req, context=ctx, timeout=15) as r:
+            data = json.loads(r.read().decode('utf-8'))
+            ids = data.get('esearchresult', {}).get('idlist', [])
+            if ids:
+                id_list = ids
+                break
+    except Exception:
+        pass
+
+if id_list:
+    time.sleep(0.4)
+    ids_str = ','.join(id_list[:50])
+    sum_url = f'https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi?db=assembly&id={ids_str}&retmode=json'
+    req2 = urllib.request.Request(sum_url, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'})
+    try:
+        with urllib.request.urlopen(req2, context=ctx, timeout=20) as r2:
+            sdata = json.loads(r2.read().decode('utf-8'))
+            result = sdata.get('result', {})
+            for aid in id_list[:50]:
+                doc = result.get(aid, {})
+                ftp = doc.get('ftppath_genbank') or doc.get('ftppath_refseq')
+                acc = doc.get('assemblyaccession') or doc.get('assemblyname')
+                if ftp:
+                    basename = ftp.split('/')[-1]
+                    fa_url = f'{ftp}/{basename}_genomic.fna.gz'
+                    print(f'{fa_url}\t{acc}.fna.gz')
+    except Exception as e:
+        sys.stderr.write(f'Error fetching NCBI summary for {bioprj}: {e}\n')
 ")
 }
 
@@ -227,30 +234,9 @@ except Exception as e:
 ")
 }
 
-# 1. RICE SUPER-PANGENOME (Oryza genus - 16 species)
-download_rice_super() {
-    start_module "[1/13] Oryza Genus Super-Pangenome"
-    local DIR="$BASE_DIR/rice_super/assemblies"
-    mkdir -p "$DIR" && cd "$DIR"
-    download_figshare_article "24251543"
-    end_module
-}
-
-# 2. ASIAN RICE INVERSION INDEX (Oryza sativa)
-download_rice_inversion() {
-    start_module "[2/13] Asian Rice Inversion Pangenome (PRJNA597070 / PRJNA605110)"
-    local DIR="$BASE_DIR/rice_inversion/assemblies"
-    mkdir -p "$DIR" && cd "$DIR"
-    
-    run_curl -s "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi?db=sra&term=PRJNA597070&retmode=json" -o ncbi_sra_list.json || true
-    download_ncbi_bioproject "PRJNA597070"
-    download_ncbi_bioproject "PRJNA605110"
-    end_module
-}
-
-# 3. MAIZE NAM & T2T PANGENOME (Zea mays)
+# 1. MAIZE NAM & T2T PANGENOME (Zea mays)
 download_maize() {
-    start_module "[3/13] Maize NAM/T2T Pangenome (PRJNA639775 & PRJNA751841)"
+    start_module "[1/11] Maize NAM/T2T Pangenome (PRJNA639775 & PRJNA751841)"
     local DIR="$BASE_DIR/maize/assemblies"
     mkdir -p "$DIR" && cd "$DIR"
     
@@ -259,9 +245,9 @@ download_maize() {
     end_module
 }
 
-# 4. WHEAT 10+ PANGENOME (Triticum aestivum)
+# 2. WHEAT 10+ PANGENOME (Triticum aestivum)
 download_wheat() {
-    start_module "[4/13] Wheat 10+ Pangenome (Ensembl Plants FTP)"
+    start_module "[2/11] Wheat 10+ Pangenome (Ensembl Plants FTP)"
     local DIR="$BASE_DIR/wheat/assemblies"
     mkdir -p "$DIR" && cd "$DIR"
     
@@ -269,9 +255,9 @@ download_wheat() {
     end_module
 }
 
-# 5. NORTH AMERICAN WILD GRAPE SUPER-PANGENOME (Vitis spp.)
+# 3. NORTH AMERICAN WILD GRAPE SUPER-PANGENOME (Vitis spp.)
 download_wild_grape() {
-    start_module "[5/13] Wild Grape Super-Pangenome (Zenodo 10846425 / 10851548 / PRJNA1018808)"
+    start_module "[3/11] Wild Grape Super-Pangenome (Zenodo 10846425 / 10851548 / PRJNA1018808)"
     local DIR="$BASE_DIR/wild_grape/assemblies"
     mkdir -p "$DIR" && cd "$DIR"
     
@@ -281,9 +267,9 @@ download_wild_grape() {
     end_module
 }
 
-# 6. RAPESEED STRUCTURAL VARIATION PANGENOME (Brassica napus)
+# 4. RAPESEED STRUCTURAL VARIATION PANGENOME (Brassica napus)
 download_rapeseed() {
-    start_module "[6/13] Rapeseed SV Pangenome (Ensembl Plants FTP & Zenodo)"
+    start_module "[4/11] Rapeseed SV Pangenome (Ensembl Plants FTP & Zenodo)"
     local DIR="$BASE_DIR/rapeseed/assemblies"
     mkdir -p "$DIR" && cd "$DIR"
     
@@ -292,9 +278,9 @@ download_rapeseed() {
     end_module
 }
 
-# 7. POTATO PANGENOME (Solanum tuberosum)
+# 5. POTATO PANGENOME (Solanum tuberosum)
 download_potato() {
-    start_module "[7/13] Potato Tetraploid Pangenome (Zenodo 7894982 & NCBI)"
+    start_module "[5/11] Potato Tetraploid Pangenome (Zenodo 7894982 & NCBI)"
     local DIR="$BASE_DIR/potato/assemblies"
     mkdir -p "$DIR" && cd "$DIR"
     
@@ -303,9 +289,9 @@ download_potato() {
     end_module
 }
 
-# 8. EGGPLANT PANGENOME (Solanum melongena)
+# 6. EGGPLANT PANGENOME (Solanum melongena)
 download_eggplant() {
-    start_module "[8/13] Eggplant Pangenome (Zenodo 5523914 & PRJNA612792)"
+    start_module "[6/11] Eggplant Pangenome (Zenodo 5523914 & PRJNA612792)"
     local DIR="$BASE_DIR/eggplant/assemblies"
     mkdir -p "$DIR" && cd "$DIR"
     
@@ -314,9 +300,9 @@ download_eggplant() {
     end_module
 }
 
-# 9. TEA PLANT HAPLOTYPE PANGENOME (Camellia sinensis)
+# 7. TEA PLANT HAPLOTYPE PANGENOME (Camellia sinensis)
 download_tea() {
-    start_module "[9/13] Tea Plant Haplotype Pangenome (Zenodo 17174024)"
+    start_module "[7/11] Tea Plant Haplotype Pangenome (Zenodo 17174024)"
     local DIR="$BASE_DIR/tea_plant/assemblies"
     mkdir -p "$DIR" && cd "$DIR"
     
@@ -324,9 +310,9 @@ download_tea() {
     end_module
 }
 
-# 10. WATERMELON SUPER-PANGENOME (Citrullus lanatus)
+# 8. WATERMELON SUPER-PANGENOME (Citrullus lanatus)
 download_watermelon() {
-    start_module "[10/13] Watermelon Super-Pangenome (CuGenDBv2)"
+    start_module "[8/11] Watermelon Super-Pangenome (CuGenDBv2)"
     local DIR="$BASE_DIR/watermelon/assemblies"
     mkdir -p "$DIR" && cd "$DIR"
     
@@ -358,9 +344,9 @@ except Exception as e:
     end_module
 }
 
-# 11. TOMATO T2T SUPER-PANGENOME (Solanum lycopersicum)
+# 9. TOMATO T2T SUPER-PANGENOME (Solanum lycopersicum)
 download_tomato() {
-    start_module "[11/13] Tomato T2T Super-Pangenome (Zenodo 17878268)"
+    start_module "[9/11] Tomato T2T Super-Pangenome (Zenodo 17878268)"
     local DIR="$BASE_DIR/tomato/assemblies"
     mkdir -p "$DIR" && cd "$DIR"
     
@@ -368,9 +354,9 @@ download_tomato() {
     end_module
 }
 
-# 12. MARCHANTIA PANGENOME (Marchantia polymorpha)
+# 10. MARCHANTIA PANGENOME (Marchantia polymorpha)
 download_marchantia() {
-    start_module "[12/13] Marchantia Pangenome (Marchantia.info / Zenodo 1021402)"
+    start_module "[10/11] Marchantia Pangenome (Marchantia.info / Zenodo 1021402)"
     local DIR="$BASE_DIR/marchantia/assemblies"
     mkdir -p "$DIR" && cd "$DIR"
     
@@ -381,9 +367,9 @@ download_marchantia() {
     end_module
 }
 
-# 13. CITRUS PANGENOME (Citrus spp.)
+# 11. CITRUS PANGENOME (Citrus spp.)
 download_citrus() {
-    start_module "[13/13] Citrus Pangenome (HZAU DB)"
+    start_module "[11/11] Citrus Pangenome (HZAU DB)"
     local DIR="$BASE_DIR/citrus/assemblies"
     mkdir -p "$DIR" && cd "$DIR"
     
@@ -414,9 +400,7 @@ main() {
         fi
     done
 
-    log "Starting execution for all 13 plant pangenome download modules..."
-    download_rice_super
-    download_rice_inversion
+    log "Starting execution for all 11 plant pangenome download modules..."
     download_maize
     download_wheat
     download_wild_grape
@@ -448,10 +432,10 @@ main() {
             log "DRY-RUN VALIDATION ERROR: One or more modules have 0 FASTA/genome files matched!"
             exit 1
         else
-            log "DRY-RUN VALIDATION SUCCESSFUL: All 13 modules have valid FASTA/genome downloads queued!"
+            log "DRY-RUN VALIDATION SUCCESSFUL: All 11 modules have valid FASTA/genome downloads queued!"
         fi
     else
-        log "All 13 plant pangenome download tasks completed/initiated successfully."
+        log "All 11 plant pangenome download tasks completed/initiated successfully."
     fi
 }
 
