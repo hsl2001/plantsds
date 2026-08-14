@@ -127,9 +127,14 @@ def sim_run_sedef(fasta_path, true_pairs, true_intervals, threads=8):
         shutil.rmtree(sedef_out_dir, ignore_errors=True)
 
         t0 = time.perf_counter()
-        subprocess.run([sedef_sh, "-o", sedef_out_dir, "-f", "-j", str(threads), os.path.abspath(fasta_path)],
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env, check=True)
+        res = subprocess.run([sedef_sh, "-o", sedef_out_dir, "-f", "-j", str(threads), os.path.abspath(fasta_path)],
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env, text=True)
         t_elapsed = time.perf_counter() - t0
+
+        if res.returncode != 0:
+            err_msg = res.stderr.strip() or res.stdout.strip()
+            print(f"[WARNING] SEDEF returned non-zero exit status {res.returncode}: {err_msg.splitlines()[-1] if err_msg else 'Unknown error'}")
+            return None
 
         final_bed = os.path.join(sedef_out_dir, "final.bed")
         if os.path.exists(final_bed):
