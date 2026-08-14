@@ -28,6 +28,12 @@ from cmp_core import (
     evaluate_frag_pairs_fast
 )
 
+# Register ./sedef to PATH
+sedef_local_dir = os.path.abspath("./sedef")
+if os.path.isdir(sedef_local_dir):
+    os.environ["PATH"] = f"{sedef_local_dir}:{os.environ.get('PATH', '')}"
+
+
 def sim_generate_genome(chrom_sizes, num_dups=100, min_dup_len=1000, max_dup_len=10_000,
                         ortholog_rate=0.0, flank_len=500, out_fasta="sim.fa"):
     """Generates synthetic chromosomes with segmental duplications."""
