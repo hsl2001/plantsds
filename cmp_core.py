@@ -178,3 +178,182 @@ def eval_fragment_overlap(pred_intervals, ref_intervals, fraction=0.5):
 
 # Backwards compatibility alias
 eval_reciprocal_overlap = eval_fragment_overlap
+
+def load_segtrace_pairs(in_path, use_subclusters=True):
+    """
+    Loads paired SD regions from Segtrace .dup.bed file based on cluster_id and subcluster_id.
+    If use_subclusters is True, pairs sharing the same non-zero subcluster_id (same insertion locus)
+    are filtered out.
+    """
+    clusters = {}
+    if not in_path or not os.path.exists(in_path):
+        return []
+    with open(in_path, 'r') as fin:
+        for line in fin:
+            if line.startswith('#') or not line.strip():
+                continue
+            parts = line.strip().split()
+            if len(parts) >= 4:
+                chrom = parts[0].split('-')[-1] if '-' in parts[0] and not parts[0].startswith('chr') else parts[0]
+                start, end, cid = int(parts[1]), int(parts[2]), parts[3]
+                subid = parts[4] if len(parts) >= 5 else "0"
+                clusters.setdefault(cid, []).append((chrom, start, end, subid))
+
+    pairs = []
+    for cid, locs in clusters.items():
+        n = len(locs)
+        for i in range(n):
+            for j in range(i + 1, n):
+                c1, s1, e1, sub1 = locs[i]
+                c2, s2, e2, sub2 = locs[j]
+                if use_subclusters and sub1 == sub2 and sub1 != "0":
+                    continue
+                if c1 == c2 and max(s1, s2) < min(e1, e2):
+                    continue
+                pairs.append(((c1, s1, e1), (c2, s2, e2)))
+    return pairs
+
+def load_bedpe_pairs(in_path):
+    """Loads paired SD regions from BEDPE file (SEDEF, BISER, etc.)."""
+    pairs = []
+    if not in_path or not os.path.exists(in_path):
+        return pairs
+    with open(in_path, 'r') as fin:
+        for line in fin:
+            if line.startswith('#') or not line.strip():
+                continue
+            parts = line.strip().split()
+            if len(parts) >= 6:
+                try:
+                    c1 = parts[0].split('-')[-1] if '-' in parts[0] and not parts[0].startswith('chr') else parts[0]
+                    s1, e1 = int(parts[1]), int(parts[2])
+                    
+                    # Standard BEDPE: cols 0-2 (chr1, start1, end1), cols 3-5 (chr2, start2, end2)
+                    try:
+                        s2, e2 = int(parts[4]), int(parts[5])
+                        c2 = parts[3].split('-')[-1] if '-' in parts[3] and not parts[3].startswith('chr') else parts[3]
+                    except ValueError:
+                        # Fallback for other formats like chr:start-end in parts[3] or 12-col UCSC format
+                        if ':' in parts[3] and '-' in parts[3]:
+                            c2_raw, span = parts[3].split(':', 1)
+                            c2 = c2_raw.split('-')[-1] if '-' in c2_raw and not c2_raw.startswith('chr') else c2_raw
+                            s2_str, e2_str = span.split('-', 1)
+                            s2, e2 = int(s2_str), int(e2_str)
+                        elif len(parts) >= 12:
+                            c2 = parts[9].split('-')[-1] if '-' in parts[9] and not parts[9].startswith('chr') else parts[9]
+                            s2, e2 = int(parts[10]), int(parts[11])
+                        else:
+                            continue
+                    pairs.append(((c1, s1, e1), (c2, s2, e2)))
+                except (ValueError, IndexError):
+                    continue
+    return pairs
+
+def evaluate_frag_pairs_fast(ref_pairs, target_pairs, threshold=0.5):
+    """
+    High-speed binary-search accelerated pairwise fragment overlap evaluation (O(N log M)).
+    Evaluates reciprocal overlap (>= threshold) on both arms in direct and cross orientations.
+    """
+    if not ref_pairs or not target_pairs:
+        total_ref = len(ref_pairs) if ref_pairs else 0
+        total_tgt = len(target_pairs) if target_pairs else 0
+        return {
+            'recall': 0.0,
+            'precision': 0.0,
+            'f1': 0.0,
+            'tp': 0,
+            'fp': total_tgt,
+            'fn': total_ref,
+            'total_ref': total_ref,
+            'total_pred': total_tgt
+        }
+
+    target_by_chrom = {}
+    for t_idx, ((c1, s1, e1), (c2, s2, e2)) in enumerate(target_pairs):
+        key = (c1, c2) if c1 <= c2 else (c2, c1)
+        if key not in target_by_chrom:
+            target_by_chrom[key] = []
+        if c1 <= c2:
+            target_by_chrom[key].append(((s1, e1), (s2, e2), t_idx))
+        else:
+            target_by_chrom[key].append(((s2, e2), (s1, e1), t_idx))
+
+    target_index = {}
+    for key, t_list in target_by_chrom.items():
+        t_list.sort(key=lambda item: item[0][0])
+        x1_starts = [item[0][0] for item in t_list]
+        target_index[key] = (t_list, x1_starts)
+
+    matched_ref = set()
+    matched_target = set()
+
+    for r_idx, ((c1, s1, e1), (c2, s2, e2)) in enumerate(ref_pairs):
+        key = (c1, c2) if c1 <= c2 else (c2, c1)
+        if key not in target_index:
+            continue
+
+        if c1 <= c2:
+            r1_s, r1_e, r2_s, r2_e = s1, e1, s2, e2
+        else:
+            r1_s, r1_e, r2_s, r2_e = s2, e2, s1, e1
+
+        Lt1 = float(r1_e - r1_s)
+        Lt2 = float(r2_e - r2_s)
+        if Lt1 <= 0 or Lt2 <= 0:
+            continue
+
+        t_list, x1_starts = target_index[key]
+        limit_idx = bisect.bisect_left(x1_starts, r1_e)
+
+        for i in range(limit_idx):
+            (x1, y1), (x2, y2), t_orig_idx = t_list[i]
+            if y1 <= r1_s:
+                continue
+
+            Lp1 = float(y1 - x1)
+            Lp2 = float(y2 - x2)
+            if Lp1 <= 0 or Lp2 <= 0:
+                continue
+
+            # Direct orientation
+            o1 = max(0.0, min(r1_e, y1) - max(r1_s, x1))
+            o2 = max(0.0, min(r2_e, y2) - max(r2_s, x2))
+
+            if (o1 / Lt1 >= threshold and o1 / Lp1 >= threshold and
+                o2 / Lt2 >= threshold and o2 / Lp2 >= threshold):
+                matched_ref.add(r_idx)
+                matched_target.add(t_orig_idx)
+                continue
+
+            # Cross orientation (for intra-chromosomal or symmetric)
+            o12 = max(0.0, min(r1_e, y2) - max(r1_s, x2))
+            o21 = max(0.0, min(r2_e, y1) - max(r2_s, x1))
+
+            if (o12 / Lt1 >= threshold and o12 / Lp2 >= threshold and
+                o21 / Lt2 >= threshold and o21 / Lp1 >= threshold):
+                matched_ref.add(r_idx)
+                matched_target.add(t_orig_idx)
+
+    total_ref = len(ref_pairs)
+    total_target = len(target_pairs)
+
+    tp = len(matched_ref)
+    fn = total_ref - tp
+    matched_pred = len(matched_target)
+    fp = total_target - matched_pred
+
+    recall = tp / total_ref if total_ref > 0 else 0.0
+    precision = matched_pred / total_target if total_target > 0 else 0.0
+    f1 = 2 * recall * precision / (recall + precision) if (recall + precision) > 0 else 0.0
+
+    return {
+        'recall': recall,
+        'precision': precision,
+        'f1': f1,
+        'tp': tp,
+        'fp': fp,
+        'fn': fn,
+        'total_ref': total_ref,
+        'total_pred': total_target
+    }
+
