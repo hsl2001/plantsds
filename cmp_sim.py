@@ -12,7 +12,6 @@ Features:
 import random
 import subprocess
 import os
-import sys
 import time
 import shutil
 import argparse
@@ -223,7 +222,7 @@ def main():
     parser.add_argument("--no-plot", action='store_true', help="Disable plotting")
     args = parser.parse_args()
 
-    genome_sizes = args.genome_sizes if args.genome_sizes else ([args.genome_size] if args.genome_size else [10_000_000, 20_000_000, 30_000_000, 40_000_000, 50_000_000])
+    genome_sizes = args.genome_sizes if args.genome_sizes else ([args.genome_size] if args.genome_size else [10_000_000, 20_000_000, 50_000_000, 100_000_000, 200_000_000, 500_000_000])
     reps = max(1, args.reps)
 
     biser_avail = not args.no_biser and (shutil.which("biser") is not None or os.path.isfile(os.path.expanduser("~/.local/bin/biser")))
