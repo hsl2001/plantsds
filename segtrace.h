@@ -55,6 +55,7 @@ extern "C" {
 #define MAX_COLLINEAR_LOOOKAHEAD 8
 #define MIN_SD_LEN 1000
 #define MERGE_COEFF 10
+#define ALLOW_SINGLE_COPY_PER_GENOME 1
 
 #define BLOOM_SIZE_BITS (1 << 24)
 #define BLOOM_SIZE_BYTES (BLOOM_SIZE_BITS / 8)
@@ -237,8 +238,9 @@ void merge_global_data(StreamWorkerData *workers, int num_files,
 
 // 4. DISCOVERY & DISTANCE CALCULATION
 void discover_and_compute(const uint32_t *all_hashes, WindowCoord *coords,
-                          size_t n_windows, size_t window_size, size_t step_size,
-                          int n_threads, uint32_t kmer_size, UnionFind *uf);
+                          size_t n_windows, size_t window_size,
+                          size_t step_size, int n_threads, uint32_t kmer_size,
+                          UnionFind *uf);
 void discover_compute_worker(void *data, long p, int tid);
 SegtraceDistResult calculate_window_dist(const uint32_t *all_hashes,
                                          const WindowCoord *wa,

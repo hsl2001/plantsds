@@ -361,8 +361,9 @@ void merge_global_data(StreamWorkerData *workers, int num_files,
 // ==============================================================
 
 void discover_and_compute(const uint32_t *all_hashes, WindowCoord *coords,
-                          size_t n_windows, size_t window_size, size_t step_size,
-                          int n_threads, uint32_t kmer_size, UnionFind *uf) {
+                          size_t n_windows, size_t window_size,
+                          size_t step_size, int n_threads, uint32_t kmer_size,
+                          UnionFind *uf) {
   DiscoverComputeData w = {.all_hashes = all_hashes,
                            .coords = coords,
                            .n_windows = n_windows,
@@ -497,8 +498,10 @@ void discover_compute_worker(void *data, long idx, int tid) {
         for (size_t b_idx = a + 1; b_idx < b_max; b_idx++) {
           uint32_t wa = b->entries[a].window_id,
                    wb = b->entries[b_idx].window_id;
-          size_t start_wa = (size_t)w_data->coords[wa].window_idx * w_data->step_size;
-          size_t start_wb = (size_t)w_data->coords[wb].window_idx * w_data->step_size;
+          size_t start_wa =
+              (size_t)w_data->coords[wa].window_idx * w_data->step_size;
+          size_t start_wb =
+              (size_t)w_data->coords[wb].window_idx * w_data->step_size;
 
           if (w_data->coords[wa].seq_id == w_data->coords[wb].seq_id &&
               ABS_DIFF(start_wa, start_wb) < w_data->window_size)
@@ -628,7 +631,26 @@ size_t merge_dup_regions(SegtraceDupRegion *regions, size_t n,
         regions[out] = regions[i];
     }
   }
-  return out + 1;
+  size_t n_merged = out + 1;
+
+  size_t valid = 0;
+  for (size_t i = 0; i < n_merged; i++) {
+    int cnt = 0;
+    for (size_t j = 0; j < n_merged; j++) {
+      if (regions[i].cluster_id == regions[j].cluster_id
+#if !ALLOW_SINGLE_COPY_PER_GENOME
+          && regions[i].seq_id == regions[j].seq_id
+#endif
+      )
+        cnt++;
+    }
+    if (cnt >= 2) {
+      if (valid != i)
+        regions[valid] = regions[i];
+      valid++;
+    }
+  }
+  return valid;
 }
 
 void extract_flankings(char **files, int num_files, const Segtrace *r,
@@ -637,13 +659,13 @@ void extract_flankings(char **files, int num_files, const Segtrace *r,
                        const GenomeSeqLen *seq_lens, size_t num_seqs) {
   qsort(regions, n_regions, sizeof(SegtraceDupRegion),
         compare_dup_region_by_pos);
-  FlankingWorkerData w = {files, r, scale, regions, n_regions, flank_size, seq_lens, num_seqs};
+  FlankingWorkerData w = {files,     r,          scale,    regions,
+                          n_regions, flank_size, seq_lens, num_seqs};
   kt_for(n_threads, extract_flankings_worker, &w, num_files);
 }
 
 static void find_seq_id_range(const SegtraceDupRegion *regions, size_t n,
-                              uint32_t seq_id, size_t *first,
-                              size_t *last) {
+                              uint32_t seq_id, size_t *first, size_t *last) {
   size_t low = 0, high = n;
   while (low < high) {
     size_t mid = low + (high - low) / 2;
@@ -752,8 +774,7 @@ void perform_subclustering(SegtraceDupRegion *regions, size_t n_merged,
   size_t i = 0;
   while (i < n_merged) {
     size_t j = i + 1;
-    while (j < n_merged &&
-           regions[i].cluster_id == regions[j].cluster_id)
+    while (j < n_merged && regions[i].cluster_id == regions[j].cluster_id)
       j++;
     DA_PUSH(spans, n_spans, cap_spans, ((ClusterSpan){i, j - i}));
     i = j;
@@ -907,9 +928,8 @@ void write_dup_bed(const char *out_prefix, SegtraceDupRegion *dup_regions,
     if (dup_regions[k].end - dup_regions[k].start >= MIN_SD_LEN) {
       uint32_t seq_i = dup_regions[k].seq_id;
       fprintf(out_bed, "%s-%s\t%zu\t%zu\t%u\t%u\n", seq_lens[seq_i].genome,
-              seq_lens[seq_i].seq, dup_regions[k].start,
-              dup_regions[k].end, dup_regions[k].cluster_id,
-              dup_regions[k].subcluster_id);
+              seq_lens[seq_i].seq, dup_regions[k].start, dup_regions[k].end,
+              dup_regions[k].cluster_id, dup_regions[k].subcluster_id);
     }
   }
   fclose(out_bed);
