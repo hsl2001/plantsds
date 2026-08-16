@@ -4,12 +4,12 @@
 # Distributed across node02 and node03
 # ==============================================================================
 
-WORKDIR="$(pwd)"
-mkdir -p ~/log
+# WORKDIR="$(pwd)"
+# mkdir -p ~/log
 
 # PBS Node & PPN configuration
-NODE02="nodes=node02:ppn=128"
-NODE03="nodes=node03:ppn=128"
+# NODE02="nodes=node02:ppn=128"
+# NODE03="nodes=node03:ppn=128"
 
 # ------------------------------------------------------------------------------
 # 1. Maize (Zea mays NAM/T2T Pangenome) -> node02
@@ -64,4 +64,7 @@ NODE03="nodes=node03:ppn=128"
 # ------------------------------------------------------------------------------
 # 11. Citrus (Citrus spp. Pangenome) -> node02
 # ------------------------------------------------------------------------------
-echo "cd ${WORKDIR}; ./time ./segtrace -p 128 -o CITRUS ${WORKDIR}/pangenome_data/citrus/assemblies/*.genome.fa ${WORKDIR}/pangenome_data/citrus/assemblies/*.chromosome.fa" | qsub -N Citrus -l ${NODE02} -v WORKDIR=${WORKDIR} -j oe -o ~/log/CITRUS-Vv.log
+# echo "cd ${WORKDIR}; ./time ./segtrace -p 128 -o CITRUS ${WORKDIR}/pangenome_data/citrus/assemblies/*.genome.fa ${WORKDIR}/pangenome_data/citrus/assemblies/*.chromosome.fa" | qsub -N Citrus -l ${NODE02} -v WORKDIR=${WORKDIR} -j oe -o ~/log/CITRUS-Vv.log
+
+
+echo "cd `pwd`; ./time ./segtrace -p 128 -o AT-70 upload_genome/*.fasta" | qsub -N segtrace -l nodes=node02:ppn=128 -v WORKDIR=`pwd` -j oe -o ~/log/segtrace.log
