@@ -631,26 +631,7 @@ size_t merge_dup_regions(SegtraceDupRegion *regions, size_t n,
         regions[out] = regions[i];
     }
   }
-  size_t n_merged = out + 1;
-
-  size_t valid = 0;
-  for (size_t i = 0; i < n_merged; i++) {
-    int cnt = 0;
-    for (size_t j = 0; j < n_merged; j++) {
-      if (regions[i].cluster_id == regions[j].cluster_id
-#if !ALLOW_SINGLE_COPY_PER_GENOME
-          && regions[i].seq_id == regions[j].seq_id
-#endif
-      )
-        cnt++;
-    }
-    if (cnt >= 2) {
-      if (valid != i)
-        regions[valid] = regions[i];
-      valid++;
-    }
-  }
-  return valid;
+  return out + 1;
 }
 
 void extract_flankings(char **files, int num_files, const Segtrace *r,
