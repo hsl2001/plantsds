@@ -1,8 +1,0 @@
-resolve segdup problem
-1. 클러스터 ID가 달라도 병합 가능하되, orphan 미발생 최소 패치 적용 [DONE]
-=> commit 13e37c24d8466413b156667176b17125bb6e5762 코드 기반 롤백 적용 완료.
-=> merge_dup_regions() 내 Union-Find 기반 전역 cluster_id 통합을 통해 서로 다른 클러스터 병합 후에도 Orphan 세그먼트 0개 보장.
-2. min_copy / max_copy 판정을 원시 윈도우 단위가 아닌 독립 Locus 단위로 변경 [DONE]
-=> build_duplicate_regions()의 원시 윈도우 사전 제한 제거.
-=> merge_dup_regions()의 영역 병합 완료 후 실제 독립 병합 Locus 개수(cnt) 기준으로 min_copy ~ max_copy 검사하도록 최소 수정 완료.
-=> 평가 결과: Recall 99.54%, Precision 78.75%, F1-Score 87.93%, Fragment F1-Score 94.06% 달성.

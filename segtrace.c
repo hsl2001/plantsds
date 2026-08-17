@@ -3,13 +3,11 @@
 #include <zlib.h>
 
 #include "klib/ketopt.h"
-#include "klib/khash.h"
 #include "klib/kseq.h"
 #include "segtrace.h"
 
 /* Reader initialization */
 KSEQ_INIT(gzFile, gzread)
-KHASH_MAP_INIT_STR(genome_map, uint32_t)
 
 /* 2-bit nucleotide encoding: A = 00, C = 01, G = 10, T = 11. Soft-masked
  * (lowercase) = -1 */
@@ -59,6 +57,8 @@ void print_usage(void) {
          "  -t: step size in bp (default: 0 [auto: 33%% of window size])\n"
          "  -b: minimum valid bases per window (default: 0 [auto: 25%% of "
          "window size])\n"
+         "  -c: minimum copies per genome/file to report (default: 2 "
+         "[1=duplication map, >=3=polyploid])\n"
          "  -m: do not filter soft-masked bases (treat lowercase a/c/g/t as "
          "valid)\n"
          "  -o: output file prefix (default: segtrace)\n"
@@ -80,13 +80,14 @@ int main(int argc, char **argv) {
 
   uint32_t def_kmer_size = 17;
   uint64_t def_scale = 16, def_hash_seed = 42;
-  size_t window_size = 1024, step_size = 0, min_bases = 0, flank_size = 256;
+  size_t window_size = 1024, step_size = 0, min_bases = 0;
+  uint32_t min_copies = 2;
   const char *out_prefix = "segtrace";
   int n_threads = 8, filter_masked = 1;
 
   ketopt_t opt = KETOPT_INIT;
   int c;
-  while ((c = ketopt(&opt, argc, argv, 1, "k:s:e:w:t:b:d:o:p:D:mh", 0)) >= 0) {
+  while ((c = ketopt(&opt, argc, argv, 1, "k:s:w:t:b:c:o:p:mh", 0)) >= 0) {
     if (c == 'h') {
       print_usage();
       return 0;
@@ -100,6 +101,8 @@ int main(int argc, char **argv) {
       step_size = (size_t)strtoull(opt.arg, NULL, 10);
     else if (c == 'b')
       min_bases = (size_t)strtoull(opt.arg, NULL, 10);
+    else if (c == 'c')
+      min_copies = (uint32_t)atoi(opt.arg);
     else if (c == 'o')
       out_prefix = opt.arg;
     else if (c == 'p')
@@ -109,6 +112,8 @@ int main(int argc, char **argv) {
     else
       return 1;
   }
+  if (min_copies < 1)
+    min_copies = 1;
   if (step_size == 0)
     step_size = window_size / 3;
   if (min_bases == 0)
@@ -125,64 +130,126 @@ int main(int argc, char **argv) {
   init_segtrace(&r, def_kmer_size, filter_masked);
   r.hash_seed = def_hash_seed;
 
-  uint32_t *all_hashes = NULL;
-  WindowCoord *coords = NULL;
-  size_t num_sketches = 0, num_seqs = 0;
-  GenomeSeqLen *seq_lens = NULL;
-
-  StreamWorkerData *workers =
+  GlobalWindows gw =
       extract_all_windows(files, num_files, &r, def_scale, window_size,
                           step_size, min_bases, n_threads);
-  merge_global_data(workers, num_files, out_prefix, &all_hashes, &coords,
-                    &num_sketches, &seq_lens, &num_seqs);
-  free(workers);
 
   UnionFind uf;
-  init_unionfind(&uf, num_sketches);
+  init_unionfind(&uf, gw.num_sketches);
 
   fprintf(stderr,
           "[segtrace] Discovering candidates and computing distances...\n");
-  discover_and_compute(all_hashes, coords, num_sketches, window_size, step_size,
-                       n_threads, r.hash_window, &uf);
+  discover_and_compute(gw.all_hashes, gw.coords, gw.num_sketches, window_size,
+                       step_size, n_threads, r.hash_window, &uf);
 
   SegtraceDupRegion *dup_regions = NULL;
   size_t n_dup_regions = 0;
-  build_duplicate_regions(&uf, num_sketches, coords, step_size, window_size,
-                          &dup_regions, &n_dup_regions);
+  build_duplicate_regions(&uf, gw.num_sketches, gw.coords, gw.seq_lens,
+                          step_size, window_size, &dup_regions, &n_dup_regions);
 
   free_unionfind(&uf);
-  free(all_hashes);
-  all_hashes = NULL;
-  free(coords);
-  coords = NULL;
+  free(gw.all_hashes);
+  gw.all_hashes = NULL;
+  free(gw.coords);
+  gw.coords = NULL;
 
   size_t n_merged = merge_dup_regions(dup_regions, n_dup_regions, window_size);
+  size_t n_filtered =
+      filter_regions_by_copy_count(dup_regions, n_merged, min_copies);
 
-  fprintf(stderr,
-          "[INFO] Extracting flanking sequences for sub-clustering...\n");
-  extract_flankings(files, num_files, &r, def_scale, dup_regions, n_merged,
-                    n_threads, flank_size, seq_lens, num_seqs);
+  size_t min_sd_len = window_size < MIN_SD_LEN ? window_size : MIN_SD_LEN;
+  write_dup_bed(out_prefix, dup_regions, n_filtered, gw.seq_lens, min_sd_len);
 
-  fprintf(stderr, "[INFO] Sub-clustering based on flanking similarities...\n");
-  perform_subclustering(dup_regions, n_merged, n_threads, r.hash_window);
-
-  write_dup_bed(out_prefix, dup_regions, n_merged, seq_lens);
-
-  for (size_t i = 0; i < n_merged; i++) {
-    free(dup_regions[i].flank_sketch.hashes);
-  }
   free(dup_regions);
-  for (size_t i = 0; i < num_seqs; i++) {
-    free(seq_lens[i].genome);
-    free(seq_lens[i].seq);
+  for (size_t i = 0; i < gw.num_seqs; i++) {
+    free(gw.seq_lens[i].genome);
+    free(gw.seq_lens[i].seq);
   }
-  free(seq_lens);
+  free(gw.seq_lens);
   return 0;
 }
 
 // ==============================================================
-// SECTION 2: WINDOW EXTRACTION & FASTA STREAMING
+// SECTION 2: ROLLING NTHASH & WINDOW EXTRACTION
 // ==============================================================
+
+static inline uint64_t rol64(uint64_t v, unsigned int n) {
+  n &= 63;
+  return (v << n) | (v >> ((64 - n) & 63));
+}
+
+static inline uint64_t ror64(uint64_t v, unsigned int n) {
+  n &= 63;
+  return (v >> n) | (v << ((64 - n) & 63));
+}
+
+static const uint64_t NTHASH_H[4] = {
+    0x3c8bf4f53c8bf4f5ULL, // A
+    0x04c903a704c903a7ULL, // C
+    0x2b8104c92b8104c9ULL, // G
+    0x2e0600d3fd09e083ULL  // T
+};
+
+static inline void extract_hash_direct(const Segtrace *r, uint32_t *out_hashes,
+                                       size_t *out_size, uint32_t threshold,
+                                       const uint8_t *seq, size_t len) {
+  uint32_t k = r->hash_window;
+  if (len < k) {
+    *out_size = 0;
+    return;
+  }
+
+  uint64_t f_hash = 0, r_hash = 0;
+  size_t valid_len = 0;
+  size_t count = 0;
+
+  for (size_t i = 0; i < len; i++) {
+    int8_t b = r->base_lookup[seq[i]];
+    if (b < 0) {
+      valid_len = 0;
+      f_hash = 0;
+      r_hash = 0;
+      continue;
+    }
+
+    if (valid_len < k) {
+      int8_t b_rc = b ^ 3;
+      f_hash ^= rol64(NTHASH_H[b], k - 1 - (uint32_t)valid_len);
+      r_hash ^= rol64(NTHASH_H[b_rc], (uint32_t)valid_len);
+      valid_len++;
+    } else {
+      int8_t b_out = r->base_lookup[seq[i - k]];
+      if (b_out < 0 || b_out > 3) {
+        valid_len = 0;
+        f_hash = 0;
+        r_hash = 0;
+        continue;
+      }
+      f_hash = rol64(f_hash, 1) ^ rol64(NTHASH_H[b_out], k) ^ NTHASH_H[b];
+      r_hash = ror64(r_hash, 1) ^ ror64(NTHASH_H[b_out ^ 3], 1) ^
+               rol64(NTHASH_H[b ^ 3], k - 1);
+    }
+
+    if (valid_len >= k) {
+      uint64_t canonical = (f_hash < r_hash) ? f_hash : r_hash;
+      uint32_t h = mix_hash(canonical, r->hash_seed);
+      if (h < threshold && count < 2048) {
+        out_hashes[count++] = h;
+      }
+    }
+  }
+
+  if (count > 1) {
+    qsort(out_hashes, count, sizeof(uint32_t), compare_uint32);
+    size_t u = 0;
+    for (size_t i = 0; i < count; i++) {
+      if (i == 0 || out_hashes[i] != out_hashes[i - 1])
+        out_hashes[u++] = out_hashes[i];
+    }
+    count = u;
+  }
+  *out_size = count;
+}
 
 static void seq_chunk_worker(void *data, long i, int tid) {
   (void)tid;
@@ -190,54 +257,63 @@ static void seq_chunk_worker(void *data, long i, int tid) {
   uint32_t current_window_idx =
       (uint32_t)(job->chunk_start_idx / job->step_size);
 
-  for (size_t idx = job->chunk_start_idx;
-       idx + job->window_size <= job->chunk_end_idx &&
-       idx + job->window_size <= job->seq_len;
+  uint32_t local_hashes[2048];
+
+  size_t idx = job->chunk_start_idx;
+  if (idx + job->window_size > job->chunk_end_idx ||
+      idx + job->window_size > job->seq_len)
+    return;
+
+  size_t valid_bases = 0;
+  for (size_t j = 0; j < job->window_size; j++) {
+    if (job->base_lookup[job->seq_ptr[idx + j]] >= 0)
+      valid_bases++;
+  }
+
+  for (; idx + job->window_size <= job->chunk_end_idx &&
+         idx + job->window_size <= job->seq_len;
        idx += job->step_size, current_window_idx++) {
-    size_t valid_bases = 0;
-    for (size_t j = 0; j < job->window_size; j++) {
-      if (job->base_lookup[job->seq_ptr[idx + j]] >= 0)
-        valid_bases++;
-    }
+
     size_t sketch_size = 0;
-    uint32_t *hashes = NULL;
     if (valid_bases >= job->min_bases) {
-      HashPool pool;
-      init_hash_pool(&pool, UINT32_MAX / job->scale);
-      extract_hash(job->r, &pool, job->seq_ptr + idx, job->window_size);
-      finalize_hash_pool(&pool, &hashes, &sketch_size);
+      extract_hash_direct(job->r, local_hashes, &sketch_size, job->threshold,
+                          job->seq_ptr + idx, job->window_size);
     }
 
     DA_RESERVE(job->coords, job->cap_coords, job->num_coords + 1);
     WindowCoord *wc = &job->coords[job->num_coords++];
     wc->seq_id = job->seq_id;
-    wc->sketch_offset = 0;
     wc->window_idx = current_window_idx;
     wc->sketch_size = (uint16_t)sketch_size;
-    wc->flags = 0;
 
     size_t h_idx = job->num_hashes;
     if (sketch_size > 0) {
       DA_RESERVE(job->hashes, job->cap_hashes, job->num_hashes + sketch_size);
-      memcpy(job->hashes + h_idx, hashes, sketch_size * sizeof(uint32_t));
+      memcpy(job->hashes + h_idx, local_hashes, sketch_size * sizeof(uint32_t));
       job->num_hashes += sketch_size;
     }
-
     wc->sketch_offset = (uint32_t)h_idx;
-    free(hashes);
+
+    size_t next_idx = idx + job->step_size;
+    if (next_idx + job->window_size <= job->chunk_end_idx &&
+        next_idx + job->window_size <= job->seq_len) {
+      for (size_t k = 0; k < job->step_size; k++) {
+        if (job->base_lookup[job->seq_ptr[idx + k]] >= 0)
+          valid_bases--;
+        if (job->base_lookup[job->seq_ptr[idx + job->window_size + k]] >= 0)
+          valid_bases++;
+      }
+    }
   }
 }
 
-StreamWorkerData *extract_all_windows(char **files, int num_files,
-                                      const Segtrace *r, uint64_t scale,
-                                      size_t window_size, size_t step_size,
-                                      size_t min_bases, int n_threads) {
+GlobalWindows extract_all_windows(char **files, int num_files,
+                                  const Segtrace *r, uint64_t scale,
+                                  size_t window_size, size_t step_size,
+                                  size_t min_bases, int n_threads) {
   fprintf(stderr, "[segtrace] Extracting windows across genomes...\n");
-  StreamWorkerData *workers = calloc(1, sizeof(StreamWorkerData));
-  if (!workers) {
-    fprintf(stderr, "[ERROR] Memory allocation failed\n");
-    exit(1);
-  }
+  GlobalWindows gw = {0};
+  uint32_t threshold = (uint32_t)(UINT32_MAX / scale);
 
   for (int f = 0; f < num_files; f++) {
     char bname[256];
@@ -259,14 +335,20 @@ StreamWorkerData *extract_all_windows(char **files, int num_files,
       if (len < window_size)
         continue;
 
-      DA_RESERVE(workers[0].seq_lens, workers[0].cap_seqs,
-                 workers[0].num_seqs + 1);
-      workers[0].seq_lens[workers[0].num_seqs].genome = strdup(bname);
-      workers[0].seq_lens[workers[0].num_seqs].seq = strdup(ks->name.s);
-      uint32_t seq_id = (uint32_t)workers[0].num_seqs++;
+      DA_RESERVE(gw.seq_lens, gw.cap_seqs, gw.num_seqs + 1);
+      gw.seq_lens[gw.num_seqs].genome = strdup(bname);
+      gw.seq_lens[gw.num_seqs].seq = strdup(ks->name.s);
+      gw.seq_lens[gw.num_seqs].file_id = (uint32_t)f;
+      uint32_t seq_id = (uint32_t)gw.num_seqs++;
 
-      uint8_t *seq_copy = malloc(len + 1);
-      memcpy(seq_copy, ks->seq.s, len + 1);
+      uint8_t *seq_ptr = (uint8_t *)ks->seq.s;
+
+      size_t est_windows =
+          (len >= window_size) ? ((len - window_size) / step_size + 1) : 0;
+      DA_RESERVE(gw.coords, gw.cap_sketches,
+                 gw.num_sketches + est_windows + 16);
+      DA_RESERVE(gw.all_hashes, gw.cap_all_hashes,
+                 gw.num_all_hashes + (est_windows + 16) * 96);
 
       size_t chunk_size = len / (n_threads * 4);
       if (chunk_size < 100000)
@@ -284,12 +366,12 @@ StreamWorkerData *extract_all_windows(char **files, int num_files,
         DA_RESERVE(jobs, cap_jobs, num_jobs + 1);
         jobs[num_jobs++] = (SeqChunkJob){.r = r,
                                          .base_lookup = r->base_lookup,
-                                         .scale = scale,
+                                         .threshold = threshold,
                                          .window_size = window_size,
                                          .step_size = step_size,
                                          .min_bases = min_bases,
                                          .seq_id = seq_id,
-                                         .seq_ptr = seq_copy,
+                                         .seq_ptr = seq_ptr,
                                          .seq_len = len,
                                          .chunk_start_idx = c_start,
                                          .chunk_end_idx = c_end,
@@ -306,170 +388,109 @@ StreamWorkerData *extract_all_windows(char **files, int num_files,
       for (size_t j = 0; j < num_jobs; j++) {
         SeqChunkJob *job = &jobs[j];
         if (job->num_coords > 0) {
-          size_t base_h_offset = workers[0].num_all_hashes;
-          DA_RESERVE(workers[0].all_hashes, workers[0].cap_all_hashes,
-                     workers[0].num_all_hashes + job->num_hashes);
-          memcpy(workers[0].all_hashes + base_h_offset, job->hashes,
+          size_t base_h_offset = gw.num_all_hashes;
+          memcpy(gw.all_hashes + base_h_offset, job->hashes,
                  job->num_hashes * sizeof(uint32_t));
-          workers[0].num_all_hashes += job->num_hashes;
+          gw.num_all_hashes += job->num_hashes;
 
-          size_t base_c_offset = workers[0].num_sketches;
-          DA_RESERVE(workers[0].coords, workers[0].cap_sketches,
-                     workers[0].num_sketches + job->num_coords);
-
+          size_t base_c_offset = gw.num_sketches;
           for (size_t k = 0; k < job->num_coords; k++) {
             WindowCoord wc = job->coords[k];
             wc.sketch_offset += (uint32_t)base_h_offset;
-            workers[0].coords[base_c_offset + k] = wc;
+            gw.coords[base_c_offset + k] = wc;
           }
-          workers[0].num_sketches += job->num_coords;
+          gw.num_sketches += job->num_coords;
         }
         free(job->hashes);
         free(job->coords);
       }
       free(jobs);
-      free(seq_copy);
     }
     kseq_destroy(ks);
     gzclose(fp);
   }
-  return workers;
-}
-
-void merge_global_data(StreamWorkerData *workers, int num_files,
-                       const char *out_prefix, uint32_t **out_all_hashes,
-                       WindowCoord **out_coords, size_t *out_num_sketches,
-                       GenomeSeqLen **out_seq_lens, size_t *out_num_seqs) {
-  (void)out_prefix;
-  (void)num_files;
-  size_t total_sketches = workers[0].num_sketches;
-  size_t total_seqs = workers[0].num_seqs;
-
-  *out_all_hashes = workers[0].all_hashes;
-  *out_coords = workers[0].coords;
-  *out_num_sketches = total_sketches;
-  *out_seq_lens = workers[0].seq_lens;
-  *out_num_seqs = total_seqs;
-
-  workers[0].all_hashes = NULL;
-  workers[0].coords = NULL;
-  workers[0].seq_lens = NULL;
+  return gw;
 }
 
 // ==============================================================
 // SECTION 3: CANDIDATE DISCOVERY & DISTANCE COMPUTATION
 // ==============================================================
 
-void discover_and_compute(const uint32_t *all_hashes, WindowCoord *coords,
-                          size_t n_windows, size_t window_size,
-                          size_t step_size, int n_threads, uint32_t kmer_size,
-                          UnionFind *uf) {
-  DiscoverComputeData w = {.all_hashes = all_hashes,
-                           .coords = coords,
-                           .n_windows = n_windows,
-                           .window_size = window_size,
-                           .step_size = step_size,
-                           .kmer_size = kmer_size,
-                           .uf = uf,
-                           .buckets =
-                               calloc(NUM_PARTITIONS, sizeof(PartitionBucket)),
-                           .t_bloom = malloc(n_threads * sizeof(uint8_t *))};
-  if (!w.buckets || !w.t_bloom) {
-    fprintf(stderr, "[ERROR] Memory allocation failed\n");
-    exit(1);
+static inline size_t calculate_sketch_dist_fast(const uint32_t *a, size_t n_a,
+                                                const uint32_t *b, size_t n_b) {
+  size_t i = 0, j = 0, shared = 0;
+  while (i < n_a && j < n_b) {
+    uint32_t va = a[i], vb = b[j];
+    shared += (va == vb);
+    i += (va <= vb);
+    j += (va >= vb);
   }
-  for (int t = 0; t < n_threads; t++)
-    w.t_bloom[t] = calloc(BLOOM_SIZE_BYTES, 1);
-
-  uint32_t part_size = UINT32_MAX / NUM_PARTITIONS;
-
-  for (size_t batch_start = 0; batch_start < NUM_PARTITIONS;
-       batch_start += BATCH_PARTITIONS) {
-    size_t batch_end = batch_start + BATCH_PARTITIONS;
-    if (batch_end > NUM_PARTITIONS)
-      batch_end = NUM_PARTITIONS;
-
-    w.batch_start = batch_start;
-    size_t batch_count = batch_end - batch_start;
-
-    for (size_t p = batch_start; p < batch_end; p++) {
-      w.buckets[p].size = 0;
-      w.buckets[p].cap = 0;
-      w.buckets[p].entries = NULL;
-    }
-
-    for (size_t win = 0; win < n_windows; win++) {
-      const uint32_t *h = all_hashes + coords[win].sketch_offset;
-      size_t sz = coords[win].sketch_size;
-      for (size_t k = 0; k < sz; k++) {
-        uint32_t val = h[k];
-        size_t p = (size_t)(val / part_size);
-        if (p >= NUM_PARTITIONS)
-          p = NUM_PARTITIONS - 1;
-        if (p >= batch_start && p < batch_end) {
-          DA_PUSH(w.buckets[p].entries, w.buckets[p].size, w.buckets[p].cap,
-                  ((HashWindowEntry){val, (uint32_t)win}));
-        }
-      }
-    }
-
-    kt_for(n_threads, discover_compute_worker, &w, (long)batch_count);
-
-    for (size_t p = batch_start; p < batch_end; p++) {
-      free(w.buckets[p].entries);
-      w.buckets[p].entries = NULL;
-      w.buckets[p].size = 0;
-      w.buckets[p].cap = 0;
-    }
-  }
-
-  for (int t = 0; t < n_threads; t++)
-    free(w.t_bloom[t]);
-  free(w.buckets);
-  free(w.t_bloom);
+  return shared;
 }
 
-SegtraceDistResult calculate_window_dist(const uint32_t *all_hashes,
-                                         const WindowCoord *wa,
-                                         const WindowCoord *wb) {
-  SegtraceSketch sa = {.sketch_size = wa->sketch_size,
-                       .hashes = (uint32_t *)(all_hashes + wa->sketch_offset)};
-  SegtraceSketch sb = {.sketch_size = wb->sketch_size,
-                       .hashes = (uint32_t *)(all_hashes + wb->sketch_offset)};
-  return calculate_segtrace_dist(&sa, &sb);
+static inline size_t calculate_window_dist(const uint32_t *all_hashes,
+                                           const WindowCoord *wa,
+                                           const WindowCoord *wb) {
+  if (wa->sketch_size == 0 || wb->sketch_size == 0)
+    return 0;
+  return calculate_sketch_dist_fast(
+      all_hashes + wa->sketch_offset, wa->sketch_size,
+      all_hashes + wb->sketch_offset, wb->sketch_size);
 }
 
 static inline int check_collinear_neighbor(DiscoverComputeData *w, uint32_t wa,
                                            uint32_t wb, size_t min_shared) {
+  uint32_t seq_a = w->coords[wa].seq_id;
+  uint32_t seq_b = w->coords[wb].seq_id;
+  long long n_win = (long long)w->n_windows;
+
   const int dir_a[] = {1, -1, 1, -1};
   const int dir_b[] = {1, -1, -1, 1};
 
-  uint32_t seq_a = w->coords[wa].seq_id;
-  uint32_t seq_b = w->coords[wb].seq_id;
-
+  // Pass 1: Exact diagonals
   for (int d = 0; d < 4; d++) {
-    for (int step_a = 1; step_a <= MAX_COLLINEAR_LOOOKAHEAD; step_a++) {
-      for (int step_b = 1; step_b <= MAX_COLLINEAR_LOOOKAHEAD; step_b++) {
+    int da = dir_a[d], db = dir_b[d];
+    for (int step = 1; step <= MAX_COLLINEAR_LOOKAHEAD; step++) {
+      long long next_a = (long long)wa + da * step;
+      long long next_b = (long long)wb + db * step;
+      if (next_a >= 0 && next_a < n_win && next_b >= 0 && next_b < n_win &&
+          w->coords[next_a].seq_id == seq_a &&
+          w->coords[next_b].seq_id == seq_b) {
+        if (w->coords[next_a].sketch_size > 0 &&
+            w->coords[next_b].sketch_size > 0) {
+          size_t shared = calculate_window_dist(
+              w->all_hashes, &w->coords[next_a], &w->coords[next_b]);
+          if (shared >= min_shared)
+            return 1;
+        }
+      }
+    }
+  }
 
-        long long next_a = (long long)wa + (long long)dir_a[d] * step_a;
-        long long next_b = (long long)wb + (long long)dir_b[d] * step_b;
-
-        if (next_a >= 0 && next_a < (long long)w->n_windows && next_b >= 0 &&
-            next_b < (long long)w->n_windows &&
+  // Pass 2: Gapped / Indel lookahead
+  for (int d = 0; d < 4; d++) {
+    int da = dir_a[d], db = dir_b[d];
+    for (int step_a = 1; step_a <= MAX_COLLINEAR_LOOKAHEAD; step_a++) {
+      for (int step_b = 1; step_b <= MAX_COLLINEAR_LOOKAHEAD; step_b++) {
+        if (step_a == step_b)
+          continue;
+        long long next_a = (long long)wa + da * step_a;
+        long long next_b = (long long)wb + db * step_b;
+        if (next_a >= 0 && next_a < n_win && next_b >= 0 && next_b < n_win &&
             w->coords[next_a].seq_id == seq_a &&
             w->coords[next_b].seq_id == seq_b) {
-
           if (w->coords[next_a].sketch_size > 0 &&
               w->coords[next_b].sketch_size > 0) {
-            SegtraceDistResult res = calculate_window_dist(
+            size_t shared = calculate_window_dist(
                 w->all_hashes, &w->coords[next_a], &w->coords[next_b]);
-            if (res.shared_hashes >= min_shared)
+            if (shared >= min_shared)
               return 1;
           }
         }
       }
     }
   }
+
   return 0;
 }
 
@@ -481,9 +502,8 @@ void discover_compute_worker(void *data, long idx, int tid) {
     return;
 
   qsort(b->entries, b->size, sizeof(HashWindowEntry), compare_hash_entry);
-  memset(w_data->t_bloom[tid], 0, BLOOM_SIZE_BYTES);
 
-  double p_kmer = pow(0.90, (double)w_data->kmer_size);
+  double p_kmer = w_data->p_kmer;
   size_t i = 0;
   while (i < b->size) {
     size_t j = i + 1;
@@ -519,11 +539,12 @@ void discover_compute_worker(void *data, long idx, int tid) {
           if (min_shared < 2)
             min_shared = 2;
 
-          SegtraceDistResult d = calculate_window_dist(
+          size_t shared = calculate_window_dist(
               w_data->all_hashes, &w_data->coords[wa], &w_data->coords[wb]);
-          if (d.shared_hashes >= min_shared) {
+          if (shared >= min_shared) {
             if (check_collinear_neighbor(w_data, wa, wb, min_shared)) {
-              union_unionfind(w_data->uf, wa, wb);
+              DA_PUSH(w_data->t_pairs[tid], w_data->t_n_pairs[tid],
+                      w_data->t_cap_pairs[tid], ((CandidatePair){wa, wb}));
             }
           }
         }
@@ -533,16 +554,110 @@ void discover_compute_worker(void *data, long idx, int tid) {
   }
 }
 
+void discover_and_compute(const uint32_t *all_hashes, const WindowCoord *coords,
+                          size_t n_windows, size_t window_size,
+                          size_t step_size, int n_threads, uint32_t kmer_size,
+                          UnionFind *uf) {
+  DiscoverComputeData w = {
+      .all_hashes = all_hashes,
+      .coords = coords,
+      .n_windows = n_windows,
+      .window_size = window_size,
+      .step_size = step_size,
+      .kmer_size = kmer_size,
+      .p_kmer = pow(0.90, (double)kmer_size),
+      .buckets = calloc(NUM_PARTITIONS, sizeof(PartitionBucket)),
+      .t_bloom = malloc(n_threads * sizeof(uint8_t *)),
+      .t_pairs = calloc(n_threads, sizeof(CandidatePair *)),
+      .t_n_pairs = calloc(n_threads, sizeof(size_t)),
+      .t_cap_pairs = calloc(n_threads, sizeof(size_t))};
+
+  if (!w.buckets || !w.t_bloom || !w.t_pairs) {
+    fprintf(stderr, "[ERROR] Memory allocation failed\n");
+    exit(1);
+  }
+  for (int t = 0; t < n_threads; t++)
+    w.t_bloom[t] = calloc(BLOOM_SIZE_BYTES, 1);
+
+  uint32_t part_size = (uint32_t)(UINT32_MAX / NUM_PARTITIONS);
+  uint16_t *win_curr_pos = calloc(n_windows, sizeof(uint16_t));
+
+  for (size_t batch_start = 0; batch_start < NUM_PARTITIONS;
+       batch_start += BATCH_PARTITIONS) {
+    size_t batch_end = batch_start + BATCH_PARTITIONS;
+    if (batch_end > NUM_PARTITIONS)
+      batch_end = NUM_PARTITIONS;
+
+    w.batch_start = batch_start;
+    size_t batch_count = batch_end - batch_start;
+    uint32_t max_hash = (batch_end < NUM_PARTITIONS)
+                            ? (uint32_t)(batch_end * part_size)
+                            : UINT32_MAX;
+
+    for (size_t p = batch_start; p < batch_end; p++) {
+      w.buckets[p].size = 0;
+      w.buckets[p].cap = 0;
+      w.buckets[p].entries = NULL;
+    }
+
+    for (size_t win = 0; win < n_windows; win++) {
+      uint32_t off = coords[win].sketch_offset;
+      uint16_t sz = coords[win].sketch_size;
+      uint16_t pos = win_curr_pos[win];
+
+      while (pos < sz) {
+        uint32_t val = all_hashes[off + pos];
+        if (val >= max_hash)
+          break;
+        size_t p = (size_t)(val / part_size);
+        if (p >= NUM_PARTITIONS)
+          p = NUM_PARTITIONS - 1;
+        DA_PUSH(w.buckets[p].entries, w.buckets[p].size, w.buckets[p].cap,
+                ((HashWindowEntry){val, (uint32_t)win}));
+        pos++;
+      }
+      win_curr_pos[win] = pos;
+    }
+
+    kt_for(n_threads, discover_compute_worker, &w, (long)batch_count);
+
+    for (int t = 0; t < n_threads; t++) {
+      for (size_t k = 0; k < w.t_n_pairs[t]; k++) {
+        union_unionfind(uf, w.t_pairs[t][k].a, w.t_pairs[t][k].b);
+      }
+      w.t_n_pairs[t] = 0;
+    }
+
+    for (size_t p = batch_start; p < batch_end; p++) {
+      free(w.buckets[p].entries);
+      w.buckets[p].entries = NULL;
+      w.buckets[p].size = 0;
+      w.buckets[p].cap = 0;
+    }
+  }
+
+  free(win_curr_pos);
+  for (int t = 0; t < n_threads; t++) {
+    free(w.t_bloom[t]);
+    free(w.t_pairs[t]);
+  }
+  free(w.buckets);
+  free(w.t_bloom);
+  free(w.t_pairs);
+  free(w.t_n_pairs);
+  free(w.t_cap_pairs);
+}
+
 // ==============================================================
-// SECTION 4: CLUSTERING, LOCUS MERGING & FLANKING SUBCLUSTERING
+// SECTION 4: CLUSTERING, LOCUS MERGING & COPY FILTERING
 // ==============================================================
 
 void build_duplicate_regions(UnionFind *uf, size_t num_sketches,
-                             WindowCoord *coords, size_t step_size,
+                             const WindowCoord *coords,
+                             const GenomeSeqLen *seq_lens, size_t step_size,
                              size_t window_size,
                              SegtraceDupRegion **out_regions,
                              size_t *out_n_regions) {
-
   uint32_t *comp_size = calloc(num_sketches, sizeof(uint32_t));
   for (size_t i = 0; i < num_sketches; i++) {
     comp_size[find_unionfind(uf, (uint32_t)i)]++;
@@ -563,9 +678,8 @@ void build_duplicate_regions(UnionFind *uf, size_t num_sketches,
   for (size_t i = 0; i < num_sketches; i++) {
     uint32_t root_i = find_unionfind(uf, (uint32_t)i);
     uint32_t cid = cluster_map[root_i];
-    if (cid == 0) {
+    if (cid == 0)
       continue;
-    }
 
     uint32_t seq_i = coords[i].seq_id;
     size_t start = (size_t)coords[i].window_idx * step_size;
@@ -573,12 +687,10 @@ void build_duplicate_regions(UnionFind *uf, size_t num_sketches,
 
     DA_PUSH(dup_regions, n_dup_regions, cap_dup_regions,
             ((SegtraceDupRegion){.seq_id = seq_i,
+                                 .file_id = seq_lens[seq_i].file_id,
                                  .start = start,
                                  .end = end,
-                                 .cluster_id = cid,
-                                 .subcluster_id = 0,
-                                 .flank_sketch = {0},
-                                 .window_idx = coords[i].window_idx}));
+                                 .cluster_id = cid}));
   }
 
   free(comp_size);
@@ -588,21 +700,13 @@ void build_duplicate_regions(UnionFind *uf, size_t num_sketches,
   *out_n_regions = n_dup_regions;
 }
 
-static int compare_dup_region_by_pos(const void *a, const void *b) {
-  const SegtraceDupRegion *ra = (const SegtraceDupRegion *)a,
-                          *rb = (const SegtraceDupRegion *)b;
-  if (ra->seq_id != rb->seq_id)
-    return CMP(ra->seq_id, rb->seq_id);
-  if (ra->start != rb->start)
-    return CMP(ra->start, rb->start);
-  return CMP(ra->end, rb->end);
-}
-
-static int compare_dup_region_by_cluster(const void *a, const void *b) {
+static int compare_dup_region_by_cluster_file(const void *a, const void *b) {
   const SegtraceDupRegion *ra = (const SegtraceDupRegion *)a,
                           *rb = (const SegtraceDupRegion *)b;
   if (ra->cluster_id != rb->cluster_id)
     return CMP(ra->cluster_id, rb->cluster_id);
+  if (ra->file_id != rb->file_id)
+    return CMP(ra->file_id, rb->file_id);
   if (ra->seq_id != rb->seq_id)
     return CMP(ra->seq_id, rb->seq_id);
   if (ra->start != rb->start)
@@ -614,17 +718,17 @@ size_t merge_dup_regions(SegtraceDupRegion *regions, size_t n,
                          size_t window_size) {
   if (n <= 1)
     return n;
-  qsort(regions, n, sizeof(SegtraceDupRegion), compare_dup_region_by_cluster);
+  qsort(regions, n, sizeof(SegtraceDupRegion),
+        compare_dup_region_by_cluster_file);
 
   size_t out = 0;
   for (size_t i = 1; i < n; i++) {
     if (regions[i].cluster_id == regions[out].cluster_id &&
+        regions[i].file_id == regions[out].file_id &&
         regions[i].seq_id == regions[out].seq_id &&
         regions[i].start <= regions[out].end + MERGE_COEFF * window_size) {
       if (regions[i].end > regions[out].end)
         regions[out].end = regions[i].end;
-      if (regions[i].window_idx > regions[out].window_idx)
-        regions[out].window_idx = regions[i].window_idx;
     } else {
       out++;
       if (out != i)
@@ -634,267 +738,35 @@ size_t merge_dup_regions(SegtraceDupRegion *regions, size_t n,
   return out + 1;
 }
 
-void extract_flankings(char **files, int num_files, const Segtrace *r,
-                       uint64_t scale, SegtraceDupRegion *regions,
-                       size_t n_regions, int n_threads, size_t flank_size,
-                       const GenomeSeqLen *seq_lens, size_t num_seqs) {
-  qsort(regions, n_regions, sizeof(SegtraceDupRegion),
-        compare_dup_region_by_pos);
-  FlankingWorkerData w = {files,     r,          scale,    regions,
-                          n_regions, flank_size, seq_lens, num_seqs};
-  kt_for(n_threads, extract_flankings_worker, &w, num_files);
-}
+size_t filter_regions_by_copy_count(SegtraceDupRegion *regions, size_t n,
+                                    uint32_t min_copies) {
+  if (n == 0 || min_copies <= 1)
+    return n;
 
-static void find_seq_id_range(const SegtraceDupRegion *regions, size_t n,
-                              uint32_t seq_id, size_t *first, size_t *last) {
-  size_t low = 0, high = n;
-  while (low < high) {
-    size_t mid = low + (high - low) / 2;
-    if (regions[mid].seq_id < seq_id)
-      low = mid + 1;
-    else
-      high = mid;
-  }
-  *first = low;
-
-  low = 0;
-  high = n;
-  while (low < high) {
-    size_t mid = low + (high - low) / 2;
-    if (regions[mid].seq_id <= seq_id)
-      low = mid + 1;
-    else
-      high = mid;
-  }
-  *last = low;
-}
-
-void extract_flankings_worker(void *data, long f, int tid) {
-  (void)tid;
-  FlankingWorkerData *w = (FlankingWorkerData *)data;
-
-  char bname[256];
-  get_basename(w->files[f], bname, sizeof(bname));
-  gzFile fp = gzopen(w->files[f], "r");
-  if (!fp)
-    return;
-  kseq_t *ks = kseq_init(fp);
-  if (!ks) {
-    gzclose(fp);
-    return;
-  }
-
-  while (kseq_read(ks) >= 0) {
-    int found_seq = 0;
-    uint32_t target_seq_id = 0;
-    for (size_t s = 0; s < w->num_seqs; s++) {
-      if (strcmp(w->seq_lens[s].genome, bname) == 0 &&
-          strcmp(w->seq_lens[s].seq, ks->name.s) == 0) {
-        target_seq_id = (uint32_t)s;
-        found_seq = 1;
-        break;
-      }
-    }
-    if (!found_seq)
-      continue;
-
-    size_t first, last;
-    find_seq_id_range(w->regions, w->n_regions, target_seq_id, &first, &last);
-
-    for (size_t i = first; i < last; i++) {
-      size_t start = w->regions[i].start, end = w->regions[i].end,
-             flank_size = w->flank_size;
-      size_t seq_len = ks->seq.l;
-      size_t start_clamped = start > seq_len ? seq_len : start;
-      size_t end_clamped = end > seq_len ? seq_len : end;
-      if (end_clamped < start_clamped)
-        end_clamped = start_clamped;
-
-      size_t left_start =
-          start_clamped > flank_size ? start_clamped - flank_size : 0;
-      size_t right_end = end_clamped + flank_size > seq_len
-                             ? seq_len
-                             : end_clamped + flank_size;
-      size_t left_len = start_clamped - left_start;
-      size_t right_len = right_end > end_clamped ? right_end - end_clamped : 0;
-
-      free(w->regions[i].flank_sketch.hashes);
-      w->regions[i].flank_sketch.hashes = NULL;
-      w->regions[i].flank_sketch.sketch_size = 0;
-
-      if (left_len + right_len == 0)
-        continue;
-
-      HashPool pool;
-      init_hash_pool(&pool, UINT32_MAX / w->scale);
-      if (left_len > 0)
-        extract_hash(w->r, &pool, (const uint8_t *)(ks->seq.s + left_start),
-                     left_len);
-      if (right_len > 0)
-        extract_hash(w->r, &pool, (const uint8_t *)(ks->seq.s + end_clamped),
-                     right_len);
-      finalize_hash_pool(&pool, &w->regions[i].flank_sketch.hashes,
-                         &w->regions[i].flank_sketch.sketch_size);
-    }
-  }
-  kseq_destroy(ks);
-  gzclose(fp);
-}
-
-void perform_subclustering(SegtraceDupRegion *regions, size_t n_merged,
-                           int n_threads, uint32_t kmer_size) {
-  if (n_merged <= 1)
-    return;
-
-  qsort(regions, n_merged, sizeof(SegtraceDupRegion),
-        compare_dup_region_by_cluster);
-
-  ClusterSpan *spans = NULL;
-  size_t n_spans = 0, cap_spans = 0;
-
+  size_t out_count = 0;
   size_t i = 0;
-  while (i < n_merged) {
+  while (i < n) {
     size_t j = i + 1;
-    while (j < n_merged && regions[i].cluster_id == regions[j].cluster_id)
+    while (j < n && regions[j].cluster_id == regions[i].cluster_id &&
+           regions[j].file_id == regions[i].file_id) {
       j++;
-    DA_PUSH(spans, n_spans, cap_spans, ((ClusterSpan){i, j - i}));
-    i = j;
-  }
-
-  UnionFind sub_uf;
-  init_unionfind(&sub_uf, n_merged);
-
-  SubclusterData w = {.regions = regions,
-                      .n_merged = n_merged,
-                      .kmer_size = kmer_size,
-                      .spans = spans,
-                      .t_pairs = calloc(n_threads, sizeof(SubclusterPair *)),
-                      .t_n_pairs = calloc(n_threads, sizeof(size_t)),
-                      .t_cap_pairs = calloc(n_threads, sizeof(size_t)),
-                      .t_bloom = calloc(n_threads, sizeof(uint8_t *))};
-  for (int t = 0; t < n_threads; t++)
-    w.t_bloom[t] = calloc(SUBCLUSTER_BLOOM_SIZE_BYTES, 1);
-
-  kt_for(n_threads, process_subcluster, &w, n_spans);
-
-  for (int t = 0; t < n_threads; t++) {
-    for (size_t k = 0; k < w.t_n_pairs[t]; k++) {
-      union_unionfind(&sub_uf, w.t_pairs[t][k].i, w.t_pairs[t][k].j);
     }
-    if (w.t_pairs[t])
-      free(w.t_pairs[t]);
-    free(w.t_bloom[t]);
-  }
-  free(w.t_bloom);
-  free(w.t_pairs);
-  free(w.t_n_pairs);
-  free(w.t_cap_pairs);
-  free(spans);
-
-  uint32_t *mapping = calloc(n_merged, sizeof(uint32_t));
-  uint32_t current_id = 1;
-
-  for (size_t k = 0; k < n_merged; k++) {
-    uint32_t p = find_unionfind(&sub_uf, (uint32_t)k);
-    if (mapping[p] == 0)
-      mapping[p] = current_id++;
-    regions[k].subcluster_id = mapping[p];
-  }
-  free(mapping);
-  free_unionfind(&sub_uf);
-}
-
-static inline void check_and_eval_flank_pair(SubclusterData *w, int tid,
-                                             size_t ra, size_t rb,
-                                             double p_kmer) {
-  if (w->regions[ra].flank_sketch.sketch_size == 0 ||
-      w->regions[rb].flank_sketch.sketch_size == 0)
-    return;
-
-  size_t min_sz = w->regions[ra].flank_sketch.sketch_size <
-                          w->regions[rb].flank_sketch.sketch_size
-                      ? w->regions[ra].flank_sketch.sketch_size
-                      : w->regions[rb].flank_sketch.sketch_size;
-  size_t min_shared = (size_t)ceil((double)min_sz * p_kmer) * 2;
-  if (min_shared < 2)
-    min_shared = 2;
-
-  SegtraceDistResult d = calculate_segtrace_dist(&w->regions[ra].flank_sketch,
-                                                 &w->regions[rb].flank_sketch);
-  if (d.shared_hashes >= min_shared) {
-    DA_PUSH(w->t_pairs[tid], w->t_n_pairs[tid], w->t_cap_pairs[tid],
-            ((SubclusterPair){(uint32_t)ra, (uint32_t)rb}));
-  }
-}
-
-void process_subcluster(void *data, long s, int tid) {
-  SubclusterData *w = (SubclusterData *)data;
-  size_t start = w->spans[s].start, count = w->spans[s].count;
-  if (count <= 1)
-    return;
-
-  double p_kmer = pow(0.90, (double)w->kmer_size);
-
-  size_t total_flank_hashes = 0;
-  for (size_t a = 0; a < count; a++)
-    total_flank_hashes += w->regions[start + a].flank_sketch.sketch_size;
-  if (total_flank_hashes == 0)
-    return;
-
-  HashWindowEntry *entries =
-      malloc(total_flank_hashes * sizeof(HashWindowEntry));
-  if (!entries)
-    return;
-
-  size_t n_entries = 0;
-  for (size_t a = 0; a < count; a++) {
-    size_t ra = start + a;
-    const SegtraceSketch *sk = &w->regions[ra].flank_sketch;
-    for (size_t k = 0; k < sk->sketch_size; k++) {
-      entries[n_entries++] = (HashWindowEntry){sk->hashes[k], (uint32_t)a};
-    }
-  }
-
-  qsort(entries, n_entries, sizeof(HashWindowEntry), compare_hash_entry);
-  uint8_t *bloom = w->t_bloom[tid];
-  memset(bloom, 0, SUBCLUSTER_BLOOM_SIZE_BYTES);
-
-  size_t i = 0;
-  while (i < n_entries) {
-    size_t j = i + 1;
-    while (j < n_entries && entries[j].hash == entries[i].hash)
-      j++;
-    size_t run_len = j - i;
-    if (run_len >= 2) {
-      for (size_t a = i; a < j; a++) {
-        size_t b_max =
-            a + 1 + MAX_PAIR_COMPARISONS < j ? a + 1 + MAX_PAIR_COMPARISONS : j;
-        for (size_t b = a + 1; b < b_max; b++) {
-          uint32_t la = entries[a].window_id, lb = entries[b].window_id;
-          if (la == lb)
-            continue;
-          uint64_t pk = encode_pair(la, lb);
-          if (bloom_test_and_set(bloom, pk, SUBCLUSTER_BLOOM_MASK))
-            continue;
-          check_and_eval_flank_pair(w, tid, start + la, start + lb, p_kmer);
-        }
+    size_t copy_count = j - i;
+    if (copy_count >= min_copies) {
+      for (size_t k = i; k < j; k++) {
+        regions[out_count++] = regions[k];
       }
     }
     i = j;
   }
-  free(entries);
+  return out_count;
 }
 
-// ==============================================================
-// SECTION 5: REPORTING & FILE OUTPUT WRITERS
-// ==============================================================
-
-void write_dup_bed(const char *out_prefix, SegtraceDupRegion *dup_regions,
-                   size_t n_merged, const GenomeSeqLen *seq_lens) {
+void write_dup_bed(const char *out_prefix, const SegtraceDupRegion *dup_regions,
+                   size_t n_merged, const GenomeSeqLen *seq_lens,
+                   size_t min_sd_len) {
   if (n_merged == 0)
     return;
-  qsort(dup_regions, n_merged, sizeof(SegtraceDupRegion),
-        compare_dup_region_by_cluster);
 
   char path_buf[PATH_MAX];
   snprintf(path_buf, sizeof(path_buf), "%s.dup.bed", out_prefix);
@@ -904,38 +776,21 @@ void write_dup_bed(const char *out_prefix, SegtraceDupRegion *dup_regions,
     return;
   }
 
-  fprintf(out_bed, "#chrom\tstart\tend\tcluster_id\tsubcluster_id\n");
+  fprintf(out_bed, "#chrom\tstart\tend\tcluster_id\n");
   for (size_t k = 0; k < n_merged; k++) {
-    if (dup_regions[k].end - dup_regions[k].start >= MIN_SD_LEN) {
+    if (dup_regions[k].end - dup_regions[k].start >= min_sd_len) {
       uint32_t seq_i = dup_regions[k].seq_id;
-      fprintf(out_bed, "%s-%s\t%zu\t%zu\t%u\t%u\n", seq_lens[seq_i].genome,
+      fprintf(out_bed, "%s-%s\t%zu\t%zu\t%u\n", seq_lens[seq_i].genome,
               seq_lens[seq_i].seq, dup_regions[k].start, dup_regions[k].end,
-              dup_regions[k].cluster_id, dup_regions[k].subcluster_id);
+              dup_regions[k].cluster_id);
     }
   }
   fclose(out_bed);
 }
 
 // ==============================================================
-// SECTION 6: CORE ALGORITHMS & UTILITIES
+// SECTION 5: CORE ALGORITHMS & UTILITIES
 // ==============================================================
-
-static inline uint64_t rol64(uint64_t v, unsigned int n) {
-  n &= 63;
-  return (v << n) | (v >> ((64 - n) & 63));
-}
-
-static inline uint64_t ror64(uint64_t v, unsigned int n) {
-  n &= 63;
-  return (v >> n) | (v << ((64 - n) & 63));
-}
-
-static const uint64_t NTHASH_H[4] = {
-    0x3c8bf4f53c8bf4f5ULL, // A
-    0x04c903a704c903a7ULL, // C
-    0x2b8104c92b8104c9ULL, // G
-    0x2e0600d3fd09e083ULL  // T
-};
 
 void init_segtrace(Segtrace *r, size_t hash_window, int filter_masked) {
   r->hash_window = (uint32_t)hash_window;
@@ -943,125 +798,24 @@ void init_segtrace(Segtrace *r, size_t hash_window, int filter_masked) {
   r->base_lookup = filter_masked ? BASE_LOOKUP : BASE_LOOKUP_NO_MASK;
 }
 
-__attribute__((hot)) void extract_hash(const Segtrace *r, HashPool *pool,
-                                       const uint8_t *seq, size_t len) {
-  uint32_t k = r->hash_window;
-  if (len < k)
-    return;
-
-  uint64_t f_hash = 0, r_hash = 0;
-  size_t valid_len = 0;
-
-  for (size_t i = 0; i < len; i++) {
-    int8_t b = r->base_lookup[seq[i]];
-    if (b < 0) {
-      valid_len = 0;
-      f_hash = 0;
-      r_hash = 0;
-      continue;
-    }
-
-    if (valid_len < k) {
-      int8_t b_rc = b ^ 3;
-      f_hash ^= rol64(NTHASH_H[b], k - 1 - (uint32_t)valid_len);
-      r_hash ^= rol64(NTHASH_H[b_rc], (uint32_t)valid_len);
-      valid_len++;
-    } else {
-      int8_t b_out = r->base_lookup[seq[i - k]];
-      if (b_out < 0 || b_out > 3) {
-        valid_len = 0;
-        f_hash = 0;
-        r_hash = 0;
-        continue;
-      }
-      int8_t b_in = b;
-      f_hash = rol64(f_hash, 1) ^ rol64(NTHASH_H[b_out], k) ^ NTHASH_H[b_in];
-      r_hash = ror64(r_hash, 1) ^ ror64(NTHASH_H[b_out ^ 3], 1) ^
-               rol64(NTHASH_H[b_in ^ 3], k - 1);
-    }
-
-    if (valid_len >= k) {
-      uint64_t canonical = (f_hash < r_hash) ? f_hash : r_hash;
-      insert_hash_pool(pool, mix_hash(canonical, r->hash_seed));
-    }
-  }
-}
-
-void init_hash_pool(HashPool *pool, uint32_t threshold) {
-  pool->size = 0;
-  pool->cap = 16;
-  pool->hash_threshold = threshold;
-  pool->hashes = malloc(pool->cap * sizeof(uint32_t));
-}
-
-void insert_hash_pool(HashPool *pool, uint32_t h) {
-  if (h >= pool->hash_threshold)
-    return;
-  DA_PUSH(pool->hashes, pool->size, pool->cap, h);
-}
-
-void finalize_hash_pool(HashPool *pool, uint32_t **out_hashes,
-                        size_t *out_size) {
-  if (pool->size == 0) {
-    if (pool->hashes)
-      free(pool->hashes);
-    *out_hashes = NULL;
-    *out_size = 0;
-    return;
-  }
-  qsort(pool->hashes, pool->size, sizeof(uint32_t), compare_uint32);
-  size_t unique_count = 0;
-  for (size_t i = 0; i < pool->size; i++) {
-    if (i == 0 || pool->hashes[i] != pool->hashes[i - 1])
-      pool->hashes[unique_count++] = pool->hashes[i];
-  }
-  *out_hashes = realloc(pool->hashes, unique_count * sizeof(uint32_t));
-  *out_size = unique_count;
-}
-
-SegtraceDistResult calculate_segtrace_dist(const SegtraceSketch *ref,
-                                           const SegtraceSketch *query) {
-  SegtraceDistResult res = {0};
-  if (!ref || !query || ref->sketch_size == 0 || query->sketch_size == 0)
-    return res;
-
-  size_t i = 0, j = 0, shared = 0;
-  while (i < ref->sketch_size && j < query->sketch_size) {
-    if (ref->hashes[i] == query->hashes[j]) {
-      shared++;
-      i++;
-      j++;
-    } else if (ref->hashes[i] < query->hashes[j]) {
-      i++;
-    } else {
-      j++;
-    }
-  }
-  res.shared_hashes = shared;
-  return res;
-}
-
 void init_unionfind(UnionFind *uf, size_t n) {
   uf->n = n;
   uf->parent = malloc(n * sizeof(uint32_t));
   uf->rank = calloc(n, sizeof(uint8_t));
-  pthread_mutex_init(&uf->lock, NULL);
   for (size_t i = 0; i < n; i++)
     uf->parent[i] = (uint32_t)i;
 }
 
 uint32_t find_unionfind(UnionFind *uf, uint32_t x) {
-  /* Iterative path-splitting to avoid stack overflow on deep chains */
   while (uf->parent[x] != x) {
     uint32_t next = uf->parent[x];
-    uf->parent[x] = uf->parent[next]; /* path splitting */
+    uf->parent[x] = uf->parent[next];
     x = next;
   }
   return x;
 }
 
 void union_unionfind(UnionFind *uf, uint32_t a, uint32_t b) {
-  pthread_mutex_lock(&uf->lock);
   uint32_t root_a = find_unionfind(uf, a), root_b = find_unionfind(uf, b);
   if (root_a != root_b) {
     if (uf->rank[root_a] < uf->rank[root_b])
@@ -1073,7 +827,6 @@ void union_unionfind(UnionFind *uf, uint32_t a, uint32_t b) {
       uf->rank[root_a]++;
     }
   }
-  pthread_mutex_unlock(&uf->lock);
 }
 
 void free_unionfind(UnionFind *uf) {
@@ -1081,7 +834,6 @@ void free_unionfind(UnionFind *uf) {
     free(uf->parent);
   if (uf->rank)
     free(uf->rank);
-  pthread_mutex_destroy(&uf->lock);
   uf->parent = NULL;
   uf->rank = NULL;
   uf->n = 0;
