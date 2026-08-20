@@ -388,6 +388,10 @@ GlobalWindows extract_all_windows(char **files, int num_files,
       for (size_t j = 0; j < num_jobs; j++) {
         SeqChunkJob *job = &jobs[j];
         if (job->num_coords > 0) {
+          DA_RESERVE(gw.all_hashes, gw.cap_all_hashes,
+                     gw.num_all_hashes + job->num_hashes);
+          DA_RESERVE(gw.coords, gw.cap_sketches,
+                     gw.num_sketches + job->num_coords);
           size_t base_h_offset = gw.num_all_hashes;
           memcpy(gw.all_hashes + base_h_offset, job->hashes,
                  job->num_hashes * sizeof(uint32_t));

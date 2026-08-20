@@ -3,10 +3,10 @@ results/
 data/
 benchmark
 sedef*
-*bed*
 *.fa*
 *.png
 *.csv
 venv/
 *.gz
 __pycache__/
+plotting/
