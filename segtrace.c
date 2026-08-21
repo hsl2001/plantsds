@@ -622,6 +622,9 @@ void discover_and_compute(const uint32_t *all_hashes, const WindowCoord *coords,
       win_curr_pos[win] = pos;
     }
 
+    for (int t = 0; t < n_threads; t++)
+      memset(w.t_bloom[t], 0, BLOOM_SIZE_BYTES);
+
     kt_for(n_threads, discover_compute_worker, &w, (long)batch_count);
 
     for (int t = 0; t < n_threads; t++) {
