@@ -52,7 +52,7 @@ extern "C" {
 #define MAX_PAIR_COMPARISONS 2
 #define MAX_COLLINEAR_LOOKAHEAD 8
 #define MIN_SD_LEN 1000
-#define MERGE_COEFF 3
+#define MERGE_COEFF 1
 
 #define BLOOM_SIZE_BITS (1 << 26)
 #define BLOOM_SIZE_BYTES (BLOOM_SIZE_BITS / 8)
