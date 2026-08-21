@@ -47,7 +47,7 @@ extern "C" {
 #define ABS_DIFF(a, b) ((a) > (b) ? (a) - (b) : (b) - (a))
 
 #define NUM_PARTITIONS 1024
-#define BATCH_PARTITIONS 128
+#define BATCH_PARTITIONS 256
 #define MAX_KMER_FREQ 256
 #define MAX_PAIR_COMPARISONS 2
 #define MAX_COLLINEAR_LOOKAHEAD 8
