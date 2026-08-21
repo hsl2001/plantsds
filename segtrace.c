@@ -1,7 +1,6 @@
 #include <math.h>
 #include <stdio.h>
 #include <zlib.h>
-#include <malloc.h>
 
 #include "klib/ketopt.h"
 #include "klib/kseq.h"
@@ -60,15 +59,13 @@ void print_usage(void) {
          "window size])\n"
          "  -c: minimum copies per genome/file to report (default: 2 "
          "[1=duplication map, >=3=polyploid])\n"
-         "  -m: do not filter soft-masked bases (treat lowercase a/c/g/t as "
-         "valid)\n"
+         "  -m: filter soft-masked bases (treat lowercase a/c/g/t as valid)\n"
          "  -o: output file prefix (default: segtrace)\n"
          "  -p: number of threads (default: 8)\n"
          "  -h, --help: show this help message\n\n");
 }
 
 int main(int argc, char **argv) {
-  mallopt(M_ARENA_MAX, 2);
   if (argc < 2) {
     print_usage();
     return 1;
@@ -256,41 +253,49 @@ static inline void extract_hash_direct(const Segtrace *r, uint32_t *out_hashes,
 static void seq_chunk_worker(void *data, long i, int tid) {
   (void)tid;
   SeqChunkJob *job = &((SeqChunkJob *)data)[i];
-  size_t w_start = job->win_start_idx;
-  size_t w_end = job->win_end_idx;
-  if (w_start >= w_end)
-    return;
+  uint32_t current_window_idx =
+      (uint32_t)(job->chunk_start_idx / job->step_size);
 
   uint32_t local_hashes[2048];
-  size_t idx = w_start * job->step_size;
+
+  size_t idx = job->chunk_start_idx;
+  if (idx + job->window_size > job->chunk_end_idx ||
+      idx + job->window_size > job->seq_len)
+    return;
+
   size_t valid_bases = 0;
   for (size_t j = 0; j < job->window_size; j++) {
     if (job->base_lookup[job->seq_ptr[idx + j]] >= 0)
       valid_bases++;
   }
 
-  for (size_t win = w_start; win < w_end; win++) {
-    idx = win * job->step_size;
+  for (; idx + job->window_size <= job->chunk_end_idx &&
+         idx + job->window_size <= job->seq_len;
+       idx += job->step_size, current_window_idx++) {
+
     size_t sketch_size = 0;
     if (valid_bases >= job->min_bases) {
       extract_hash_direct(job->r, local_hashes, &sketch_size, job->threshold,
                           job->seq_ptr + idx, job->window_size);
     }
 
+    DA_RESERVE(job->coords, job->cap_coords, job->num_coords + 1);
     WindowCoord *wc = &job->coords[job->num_coords++];
     wc->seq_id = job->seq_id;
-    wc->window_idx = (uint32_t)win;
+    wc->window_idx = current_window_idx;
     wc->sketch_size = (uint16_t)sketch_size;
-    wc->sketch_offset = (uint32_t)job->num_hashes;
 
+    size_t h_idx = job->num_hashes;
     if (sketch_size > 0) {
       DA_RESERVE(job->hashes, job->cap_hashes, job->num_hashes + sketch_size);
-      memcpy(job->hashes + job->num_hashes, local_hashes,
-             sketch_size * sizeof(uint32_t));
+      memcpy(job->hashes + h_idx, local_hashes, sketch_size * sizeof(uint32_t));
       job->num_hashes += sketch_size;
     }
+    wc->sketch_offset = (uint32_t)h_idx;
 
-    if (win + 1 < w_end) {
+    size_t next_idx = idx + job->step_size;
+    if (next_idx + job->window_size <= job->chunk_end_idx &&
+        next_idx + job->window_size <= job->seq_len) {
       for (size_t k = 0; k < job->step_size; k++) {
         if (job->base_lookup[job->seq_ptr[idx + k]] >= 0)
           valid_bases--;
@@ -336,68 +341,60 @@ GlobalWindows extract_all_windows(char **files, int num_files,
       uint32_t seq_id = (uint32_t)gw.num_seqs++;
 
       uint8_t *seq_ptr = (uint8_t *)ks->seq.s;
-      size_t n_windows = (len - window_size) / step_size + 1;
 
-      size_t max_jobs = (size_t)n_threads * 2;
-      size_t num_jobs = n_windows < max_jobs ? n_windows : max_jobs;
-      if (num_jobs == 0)
-        num_jobs = 1;
+      size_t est_windows =
+          (len >= window_size) ? ((len - window_size) / step_size + 1) : 0;
+      DA_RESERVE(gw.coords, gw.cap_sketches,
+                 gw.num_sketches + est_windows + 16);
+      DA_RESERVE(gw.all_hashes, gw.cap_all_hashes,
+                 gw.num_all_hashes + (est_windows + 16) * 96);
 
-      SeqChunkJob *jobs = calloc(num_jobs, sizeof(SeqChunkJob));
+      size_t chunk_size = len / (n_threads * 4);
+      if (chunk_size < 100000)
+        chunk_size = 100000;
+      chunk_size = ((chunk_size + step_size - 1) / step_size) * step_size;
 
-      for (size_t j = 0; j < num_jobs; j++) {
-        size_t w_start = j * n_windows / num_jobs;
-        size_t w_end = (j + 1) * n_windows / num_jobs;
-        size_t job_windows = w_end - w_start;
+      size_t cap_jobs = 16, num_jobs = 0;
+      SeqChunkJob *jobs = malloc(cap_jobs * sizeof(SeqChunkJob));
 
-        jobs[j] = (SeqChunkJob){.r = r,
-                                .base_lookup = r->base_lookup,
-                                .threshold = threshold,
-                                .window_size = window_size,
-                                .step_size = step_size,
-                                .min_bases = min_bases,
-                                .seq_id = seq_id,
-                                .seq_ptr = seq_ptr,
-                                .seq_len = len,
-                                .win_start_idx = w_start,
-                                .win_end_idx = w_end,
-                                .hashes = malloc(job_windows * 64 * sizeof(uint32_t)),
-                                .num_hashes = 0,
-                                .cap_hashes = job_windows * 64,
-                                .coords = malloc(job_windows * sizeof(WindowCoord)),
-                                .num_coords = 0,
-                                .cap_coords = job_windows};
+      for (size_t c_start = 0; c_start < len; c_start += chunk_size) {
+        size_t c_end = c_start + chunk_size + window_size - step_size;
+        if (c_start + window_size > len)
+          break;
+
+        DA_RESERVE(jobs, cap_jobs, num_jobs + 1);
+        jobs[num_jobs++] = (SeqChunkJob){.r = r,
+                                         .base_lookup = r->base_lookup,
+                                         .threshold = threshold,
+                                         .window_size = window_size,
+                                         .step_size = step_size,
+                                         .min_bases = min_bases,
+                                         .seq_id = seq_id,
+                                         .seq_ptr = seq_ptr,
+                                         .seq_len = len,
+                                         .chunk_start_idx = c_start,
+                                         .chunk_end_idx = c_end,
+                                         .hashes = NULL,
+                                         .num_hashes = 0,
+                                         .cap_hashes = 0,
+                                         .coords = NULL,
+                                         .num_coords = 0,
+                                         .cap_coords = 0};
       }
 
-      kt_for(n_threads, seq_chunk_worker, jobs, (long)num_jobs);
-
-      size_t total_new_hashes = 0;
-      size_t total_new_coords = 0;
-      for (size_t j = 0; j < num_jobs; j++) {
-        total_new_hashes += jobs[j].num_hashes;
-        total_new_coords += jobs[j].num_coords;
-      }
-
-      size_t req_h = gw.num_all_hashes + total_new_hashes;
-      if (req_h > gw.cap_all_hashes) {
-        gw.cap_all_hashes = req_h;
-        gw.all_hashes = realloc(gw.all_hashes, gw.cap_all_hashes * sizeof(uint32_t));
-      }
-      size_t req_c = gw.num_sketches + total_new_coords;
-      if (req_c > gw.cap_sketches) {
-        gw.cap_sketches = req_c;
-        gw.coords = realloc(gw.coords, gw.cap_sketches * sizeof(WindowCoord));
-      }
+      kt_for(n_threads, seq_chunk_worker, jobs, num_jobs);
 
       for (size_t j = 0; j < num_jobs; j++) {
         SeqChunkJob *job = &jobs[j];
         if (job->num_coords > 0) {
+          DA_RESERVE(gw.all_hashes, gw.cap_all_hashes,
+                     gw.num_all_hashes + job->num_hashes);
+          DA_RESERVE(gw.coords, gw.cap_sketches,
+                     gw.num_sketches + job->num_coords);
           size_t base_h_offset = gw.num_all_hashes;
-          if (job->num_hashes > 0) {
-            memcpy(gw.all_hashes + base_h_offset, job->hashes,
-                   job->num_hashes * sizeof(uint32_t));
-            gw.num_all_hashes += job->num_hashes;
-          }
+          memcpy(gw.all_hashes + base_h_offset, job->hashes,
+                 job->num_hashes * sizeof(uint32_t));
+          gw.num_all_hashes += job->num_hashes;
 
           size_t base_c_offset = gw.num_sketches;
           for (size_t k = 0; k < job->num_coords; k++) {
@@ -453,27 +450,10 @@ static inline int check_collinear_neighbor(DiscoverComputeData *w, uint32_t wa,
   const int dir_a[] = {1, -1, 1, -1};
   const int dir_b[] = {1, -1, -1, 1};
 
-  // Fast check: direct adjacent neighbor (step = 1) across all 4 directions
-  for (int d = 0; d < 4; d++) {
-    long long next_a = (long long)wa + dir_a[d];
-    long long next_b = (long long)wb + dir_b[d];
-    if (next_a >= 0 && next_a < n_win && next_b >= 0 && next_b < n_win &&
-        w->coords[next_a].seq_id == seq_a &&
-        w->coords[next_b].seq_id == seq_b) {
-      if (w->coords[next_a].sketch_size > 0 &&
-          w->coords[next_b].sketch_size > 0) {
-        size_t shared = calculate_window_dist(
-            w->all_hashes, &w->coords[next_a], &w->coords[next_b]);
-        if (shared >= min_shared)
-          return 1;
-      }
-    }
-  }
-
-  // Deeper lookahead: step = 2..MAX_COLLINEAR_LOOKAHEAD
+  // Pass 1: Exact diagonals
   for (int d = 0; d < 4; d++) {
     int da = dir_a[d], db = dir_b[d];
-    for (int step = 2; step <= MAX_COLLINEAR_LOOKAHEAD; step++) {
+    for (int step = 1; step <= MAX_COLLINEAR_LOOKAHEAD; step++) {
       long long next_a = (long long)wa + da * step;
       long long next_b = (long long)wb + db * step;
       if (next_a >= 0 && next_a < n_win && next_b >= 0 && next_b < n_win &&
@@ -490,13 +470,12 @@ static inline int check_collinear_neighbor(DiscoverComputeData *w, uint32_t wa,
     }
   }
 
-  // Indel lookahead
+  // Pass 2: Gapped / Indel lookahead
   for (int d = 0; d < 4; d++) {
     int da = dir_a[d], db = dir_b[d];
     for (int step_a = 1; step_a <= MAX_COLLINEAR_LOOKAHEAD; step_a++) {
-      for (int delta = -1; delta <= 1; delta += 2) {
-        int step_b = step_a + delta;
-        if (step_b < 1 || step_b > MAX_COLLINEAR_LOOKAHEAD)
+      for (int step_b = 1; step_b <= MAX_COLLINEAR_LOOKAHEAD; step_b++) {
+        if (step_a == step_b)
           continue;
         long long next_a = (long long)wa + da * step_a;
         long long next_b = (long long)wb + db * step_b;
@@ -520,7 +499,8 @@ static inline int check_collinear_neighbor(DiscoverComputeData *w, uint32_t wa,
 
 void discover_compute_worker(void *data, long idx, int tid) {
   DiscoverComputeData *w_data = (DiscoverComputeData *)data;
-  PartitionBucket *b = &w_data->buckets[idx];
+  long p = (long)w_data->batch_start + idx;
+  PartitionBucket *b = &w_data->buckets[p];
   if (b->size == 0)
     return;
 
@@ -536,40 +516,34 @@ void discover_compute_worker(void *data, long idx, int tid) {
 
     if (run_len >= 2 && run_len <= MAX_KMER_FREQ) {
       for (size_t a = i; a < j; a++) {
-        uint32_t wa = b->entries[a].window_id;
-        const WindowCoord *coord_a = &w_data->coords[wa];
-        if (coord_a->sketch_size == 0)
-          continue;
-        size_t start_wa = (size_t)coord_a->window_idx * w_data->step_size;
-        uint32_t seq_a = coord_a->seq_id;
-        size_t sz_a = coord_a->sketch_size;
-        const uint32_t *ha = w_data->all_hashes + coord_a->sketch_offset;
-
         size_t b_max =
             a + 1 + MAX_PAIR_COMPARISONS < j ? a + 1 + MAX_PAIR_COMPARISONS : j;
         for (size_t b_idx = a + 1; b_idx < b_max; b_idx++) {
-          uint32_t wb = b->entries[b_idx].window_id;
-          const WindowCoord *coord_b = &w_data->coords[wb];
-          if (coord_b->sketch_size == 0)
-            continue;
+          uint32_t wa = b->entries[a].window_id,
+                   wb = b->entries[b_idx].window_id;
+          size_t start_wa =
+              (size_t)w_data->coords[wa].window_idx * w_data->step_size;
+          size_t start_wb =
+              (size_t)w_data->coords[wb].window_idx * w_data->step_size;
 
-          if (seq_a == coord_b->seq_id &&
-              ABS_DIFF(start_wa, (size_t)coord_b->window_idx * w_data->step_size) <
-                  w_data->window_size)
+          if (w_data->coords[wa].seq_id == w_data->coords[wb].seq_id &&
+              ABS_DIFF(start_wa, start_wb) < w_data->window_size)
             continue;
 
           uint64_t pk = encode_pair(wa, wb);
           if (bloom_test_and_set(w_data->t_bloom[tid], pk, BLOOM_MASK))
             continue;
 
-          size_t min_sz = sz_a < coord_b->sketch_size ? sz_a : coord_b->sketch_size;
+          size_t min_sz =
+              w_data->coords[wa].sketch_size < w_data->coords[wb].sketch_size
+                  ? w_data->coords[wa].sketch_size
+                  : w_data->coords[wb].sketch_size;
           size_t min_shared = (size_t)ceil((double)min_sz * p_kmer);
-          if (min_shared < MIN_SHARED_HASHES)
-            min_shared = MIN_SHARED_HASHES;
+          if (min_shared < 2)
+            min_shared = 2;
 
-          size_t shared = calculate_sketch_dist_fast(
-              ha, sz_a,
-              w_data->all_hashes + coord_b->sketch_offset, coord_b->sketch_size);
+          size_t shared = calculate_window_dist(
+              w_data->all_hashes, &w_data->coords[wa], &w_data->coords[wb]);
           if (shared >= min_shared) {
             if (check_collinear_neighbor(w_data, wa, wb, min_shared)) {
               DA_PUSH(w_data->t_pairs[tid], w_data->t_n_pairs[tid],
@@ -587,12 +561,6 @@ void discover_and_compute(const uint32_t *all_hashes, const WindowCoord *coords,
                           size_t n_windows, size_t window_size,
                           size_t step_size, int n_threads, uint32_t kmer_size,
                           UnionFind *uf) {
-  size_t batch_partitions = (size_t)n_threads * 8;
-  if (batch_partitions < 32)
-    batch_partitions = 32;
-  if (batch_partitions > NUM_PARTITIONS)
-    batch_partitions = NUM_PARTITIONS;
-
   DiscoverComputeData w = {
       .all_hashes = all_hashes,
       .coords = coords,
@@ -600,8 +568,8 @@ void discover_and_compute(const uint32_t *all_hashes, const WindowCoord *coords,
       .window_size = window_size,
       .step_size = step_size,
       .kmer_size = kmer_size,
-      .p_kmer = pow(MIN_SD_IDENTITY, (double)kmer_size),
-      .buckets = calloc(batch_partitions, sizeof(PartitionBucket)),
+      .p_kmer = pow(0.90, (double)kmer_size),
+      .buckets = calloc(NUM_PARTITIONS, sizeof(PartitionBucket)),
       .t_bloom = malloc(n_threads * sizeof(uint8_t *)),
       .t_pairs = calloc(n_threads, sizeof(CandidatePair *)),
       .t_n_pairs = calloc(n_threads, sizeof(size_t)),
@@ -614,19 +582,25 @@ void discover_and_compute(const uint32_t *all_hashes, const WindowCoord *coords,
   for (int t = 0; t < n_threads; t++)
     w.t_bloom[t] = calloc(BLOOM_SIZE_BYTES, 1);
 
+  uint32_t part_size = (uint32_t)(UINT32_MAX / NUM_PARTITIONS);
   uint16_t *win_curr_pos = calloc(n_windows, sizeof(uint16_t));
 
   for (size_t batch_start = 0; batch_start < NUM_PARTITIONS;
-       batch_start += batch_partitions) {
-    size_t batch_end = batch_start + batch_partitions;
+       batch_start += BATCH_PARTITIONS) {
+    size_t batch_end = batch_start + BATCH_PARTITIONS;
     if (batch_end > NUM_PARTITIONS)
       batch_end = NUM_PARTITIONS;
 
     w.batch_start = batch_start;
     size_t batch_count = batch_end - batch_start;
+    uint32_t max_hash = (batch_end < NUM_PARTITIONS)
+                            ? (uint32_t)(batch_end * part_size)
+                            : UINT32_MAX;
 
-    for (size_t i = 0; i < batch_partitions; i++) {
-      w.buckets[i].size = 0;
+    for (size_t p = batch_start; p < batch_end; p++) {
+      w.buckets[p].size = 0;
+      w.buckets[p].cap = 0;
+      w.buckets[p].entries = NULL;
     }
 
     for (size_t win = 0; win < n_windows; win++) {
@@ -636,15 +610,13 @@ void discover_and_compute(const uint32_t *all_hashes, const WindowCoord *coords,
 
       while (pos < sz) {
         uint32_t val = all_hashes[off + pos];
-        uint32_t p = (uint32_t)(((uint64_t)val * NUM_PARTITIONS) >> 32);
-        if (p >= batch_end)
+        if (val >= max_hash)
           break;
-        if (p >= batch_start) {
-          size_t p_rel = p - batch_start;
-          DA_PUSH(w.buckets[p_rel].entries, w.buckets[p_rel].size,
-                  w.buckets[p_rel].cap,
-                  ((HashWindowEntry){val, (uint32_t)win}));
-        }
+        size_t p = (size_t)(val / part_size);
+        if (p >= NUM_PARTITIONS)
+          p = NUM_PARTITIONS - 1;
+        DA_PUSH(w.buckets[p].entries, w.buckets[p].size, w.buckets[p].cap,
+                ((HashWindowEntry){val, (uint32_t)win}));
         pos++;
       }
       win_curr_pos[win] = pos;
@@ -656,22 +628,23 @@ void discover_and_compute(const uint32_t *all_hashes, const WindowCoord *coords,
       for (size_t k = 0; k < w.t_n_pairs[t]; k++) {
         union_unionfind(uf, w.t_pairs[t][k].a, w.t_pairs[t][k].b);
       }
-      free(w.t_pairs[t]);
-      w.t_pairs[t] = NULL;
       w.t_n_pairs[t] = 0;
-      w.t_cap_pairs[t] = 0;
+    }
+
+    for (size_t p = batch_start; p < batch_end; p++) {
+      free(w.buckets[p].entries);
+      w.buckets[p].entries = NULL;
+      w.buckets[p].size = 0;
+      w.buckets[p].cap = 0;
     }
   }
 
-  for (size_t i = 0; i < batch_partitions; i++) {
-    free(w.buckets[i].entries);
-  }
-  free(w.buckets);
   free(win_curr_pos);
   for (int t = 0; t < n_threads; t++) {
     free(w.t_bloom[t]);
     free(w.t_pairs[t]);
   }
+  free(w.buckets);
   free(w.t_bloom);
   free(w.t_pairs);
   free(w.t_n_pairs);

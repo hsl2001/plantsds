@@ -48,13 +48,11 @@ extern "C" {
 
 #define NUM_PARTITIONS 1024
 #define BATCH_PARTITIONS 128
-#define MAX_KMER_FREQ 128
-#define MAX_PAIR_COMPARISONS 32
-#define MAX_COLLINEAR_LOOKAHEAD 4
+#define MAX_KMER_FREQ 256
+#define MAX_PAIR_COMPARISONS 64
+#define MAX_COLLINEAR_LOOKAHEAD 8
 #define MIN_SD_LEN 1000
 #define MERGE_COEFF 2
-#define MIN_SD_IDENTITY 0.90
-#define MIN_SHARED_HASHES 3
 
 #define BLOOM_SIZE_BITS (1 << 24)
 #define BLOOM_SIZE_BYTES (BLOOM_SIZE_BITS / 8)
@@ -135,8 +133,8 @@ typedef struct {
   uint32_t seq_id;
   const uint8_t *seq_ptr;
   size_t seq_len;
-  size_t win_start_idx;
-  size_t win_end_idx;
+  size_t chunk_start_idx;
+  size_t chunk_end_idx;
   uint32_t *hashes;
   size_t num_hashes;
   size_t cap_hashes;
