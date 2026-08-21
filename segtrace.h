@@ -46,13 +46,15 @@ extern "C" {
 #define CMP(a, b) (((a) > (b)) - ((a) < (b)))
 #define ABS_DIFF(a, b) ((a) > (b) ? (a) - (b) : (b) - (a))
 
-#define NUM_PARTITIONS 512
-#define BATCH_PARTITIONS 32
-#define MAX_KMER_FREQ 256
-#define MAX_PAIR_COMPARISONS 64
-#define MAX_COLLINEAR_LOOKAHEAD 8
+#define NUM_PARTITIONS 1024
+#define BATCH_PARTITIONS 128
+#define MAX_KMER_FREQ 128
+#define MAX_PAIR_COMPARISONS 32
+#define MAX_COLLINEAR_LOOKAHEAD 4
 #define MIN_SD_LEN 1000
-#define MERGE_COEFF 10
+#define MERGE_COEFF 2
+#define MIN_SD_IDENTITY 0.90
+#define MIN_SHARED_HASHES 3
 
 #define BLOOM_SIZE_BITS (1 << 24)
 #define BLOOM_SIZE_BYTES (BLOOM_SIZE_BITS / 8)
