@@ -133,8 +133,8 @@ typedef struct {
   uint32_t seq_id;
   const uint8_t *seq_ptr;
   size_t seq_len;
-  size_t chunk_start_idx;
-  size_t chunk_end_idx;
+  size_t win_start_idx;
+  size_t win_end_idx;
   uint32_t *hashes;
   size_t num_hashes;
   size_t cap_hashes;

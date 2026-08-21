@@ -254,49 +254,41 @@ static inline void extract_hash_direct(const Segtrace *r, uint32_t *out_hashes,
 static void seq_chunk_worker(void *data, long i, int tid) {
   (void)tid;
   SeqChunkJob *job = &((SeqChunkJob *)data)[i];
-  uint32_t current_window_idx =
-      (uint32_t)(job->chunk_start_idx / job->step_size);
-
-  uint32_t local_hashes[2048];
-
-  size_t idx = job->chunk_start_idx;
-  if (idx + job->window_size > job->chunk_end_idx ||
-      idx + job->window_size > job->seq_len)
+  size_t w_start = job->win_start_idx;
+  size_t w_end = job->win_end_idx;
+  if (w_start >= w_end)
     return;
 
+  uint32_t local_hashes[2048];
+  size_t idx = w_start * job->step_size;
   size_t valid_bases = 0;
   for (size_t j = 0; j < job->window_size; j++) {
     if (job->base_lookup[job->seq_ptr[idx + j]] >= 0)
       valid_bases++;
   }
 
-  for (; idx + job->window_size <= job->chunk_end_idx &&
-         idx + job->window_size <= job->seq_len;
-       idx += job->step_size, current_window_idx++) {
-
+  for (size_t win = w_start; win < w_end; win++) {
+    idx = win * job->step_size;
     size_t sketch_size = 0;
     if (valid_bases >= job->min_bases) {
       extract_hash_direct(job->r, local_hashes, &sketch_size, job->threshold,
                           job->seq_ptr + idx, job->window_size);
     }
 
-    DA_RESERVE(job->coords, job->cap_coords, job->num_coords + 1);
     WindowCoord *wc = &job->coords[job->num_coords++];
     wc->seq_id = job->seq_id;
-    wc->window_idx = current_window_idx;
+    wc->window_idx = (uint32_t)win;
     wc->sketch_size = (uint16_t)sketch_size;
+    wc->sketch_offset = (uint32_t)job->num_hashes;
 
-    size_t h_idx = job->num_hashes;
     if (sketch_size > 0) {
       DA_RESERVE(job->hashes, job->cap_hashes, job->num_hashes + sketch_size);
-      memcpy(job->hashes + h_idx, local_hashes, sketch_size * sizeof(uint32_t));
+      memcpy(job->hashes + job->num_hashes, local_hashes,
+             sketch_size * sizeof(uint32_t));
       job->num_hashes += sketch_size;
     }
-    wc->sketch_offset = (uint32_t)h_idx;
 
-    size_t next_idx = idx + job->step_size;
-    if (next_idx + job->window_size <= job->chunk_end_idx &&
-        next_idx + job->window_size <= job->seq_len) {
+    if (win + 1 < w_end) {
       for (size_t k = 0; k < job->step_size; k++) {
         if (job->base_lookup[job->seq_ptr[idx + k]] >= 0)
           valid_bases--;
@@ -342,60 +334,62 @@ GlobalWindows extract_all_windows(char **files, int num_files,
       uint32_t seq_id = (uint32_t)gw.num_seqs++;
 
       uint8_t *seq_ptr = (uint8_t *)ks->seq.s;
+      size_t n_windows = (len - window_size) / step_size + 1;
 
-      size_t est_windows =
-          (len >= window_size) ? ((len - window_size) / step_size + 1) : 0;
-      DA_RESERVE(gw.coords, gw.cap_sketches,
-                 gw.num_sketches + est_windows + 16);
-      DA_RESERVE(gw.all_hashes, gw.cap_all_hashes,
-                 gw.num_all_hashes + (est_windows + 16) * 96);
+      size_t max_jobs = (size_t)n_threads * 8;
+      size_t num_jobs = n_windows < max_jobs ? n_windows : max_jobs;
+      if (num_jobs == 0)
+        num_jobs = 1;
 
-      size_t chunk_size = len / (n_threads * 4);
-      if (chunk_size < 100000)
-        chunk_size = 100000;
-      chunk_size = ((chunk_size + step_size - 1) / step_size) * step_size;
+      SeqChunkJob *jobs = calloc(num_jobs, sizeof(SeqChunkJob));
 
-      size_t cap_jobs = 16, num_jobs = 0;
-      SeqChunkJob *jobs = malloc(cap_jobs * sizeof(SeqChunkJob));
+      for (size_t j = 0; j < num_jobs; j++) {
+        size_t w_start = j * n_windows / num_jobs;
+        size_t w_end = (j + 1) * n_windows / num_jobs;
+        size_t job_windows = w_end - w_start;
 
-      for (size_t c_start = 0; c_start < len; c_start += chunk_size) {
-        size_t c_end = c_start + chunk_size + window_size - step_size;
-        if (c_start + window_size > len)
-          break;
-
-        DA_RESERVE(jobs, cap_jobs, num_jobs + 1);
-        jobs[num_jobs++] = (SeqChunkJob){.r = r,
-                                         .base_lookup = r->base_lookup,
-                                         .threshold = threshold,
-                                         .window_size = window_size,
-                                         .step_size = step_size,
-                                         .min_bases = min_bases,
-                                         .seq_id = seq_id,
-                                         .seq_ptr = seq_ptr,
-                                         .seq_len = len,
-                                         .chunk_start_idx = c_start,
-                                         .chunk_end_idx = c_end,
-                                         .hashes = NULL,
-                                         .num_hashes = 0,
-                                         .cap_hashes = 0,
-                                         .coords = NULL,
-                                         .num_coords = 0,
-                                         .cap_coords = 0};
+        jobs[j] = (SeqChunkJob){.r = r,
+                                .base_lookup = r->base_lookup,
+                                .threshold = threshold,
+                                .window_size = window_size,
+                                .step_size = step_size,
+                                .min_bases = min_bases,
+                                .seq_id = seq_id,
+                                .seq_ptr = seq_ptr,
+                                .seq_len = len,
+                                .win_start_idx = w_start,
+                                .win_end_idx = w_end,
+                                .hashes = malloc(job_windows * 64 * sizeof(uint32_t)),
+                                .num_hashes = 0,
+                                .cap_hashes = job_windows * 64,
+                                .coords = malloc(job_windows * sizeof(WindowCoord)),
+                                .num_coords = 0,
+                                .cap_coords = job_windows};
       }
 
-      kt_for(n_threads, seq_chunk_worker, jobs, num_jobs);
+      kt_for(n_threads, seq_chunk_worker, jobs, (long)num_jobs);
+
+      size_t total_new_hashes = 0;
+      size_t total_new_coords = 0;
+      for (size_t j = 0; j < num_jobs; j++) {
+        total_new_hashes += jobs[j].num_hashes;
+        total_new_coords += jobs[j].num_coords;
+      }
+
+      DA_RESERVE(gw.all_hashes, gw.cap_all_hashes,
+                 gw.num_all_hashes + total_new_hashes);
+      DA_RESERVE(gw.coords, gw.cap_sketches,
+                 gw.num_sketches + total_new_coords);
 
       for (size_t j = 0; j < num_jobs; j++) {
         SeqChunkJob *job = &jobs[j];
         if (job->num_coords > 0) {
-          DA_RESERVE(gw.all_hashes, gw.cap_all_hashes,
-                     gw.num_all_hashes + job->num_hashes);
-          DA_RESERVE(gw.coords, gw.cap_sketches,
-                     gw.num_sketches + job->num_coords);
           size_t base_h_offset = gw.num_all_hashes;
-          memcpy(gw.all_hashes + base_h_offset, job->hashes,
-                 job->num_hashes * sizeof(uint32_t));
-          gw.num_all_hashes += job->num_hashes;
+          if (job->num_hashes > 0) {
+            memcpy(gw.all_hashes + base_h_offset, job->hashes,
+                   job->num_hashes * sizeof(uint32_t));
+            gw.num_all_hashes += job->num_hashes;
+          }
 
           size_t base_c_offset = gw.num_sketches;
           for (size_t k = 0; k < job->num_coords; k++) {
