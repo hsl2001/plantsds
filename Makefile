@@ -6,13 +6,13 @@ SRCS = segtrace.c klib/kthread.c
 
 .PHONY: clean static
 
-$(TARGET): $(SRCS)
+$(TARGET): $(SRCS) segtrace.h
 	$(CC) $(CFLAGS) -o $(TARGET) $(SRCS) $(LDFLAGS)
 
-all: $(SRCS)
+all: $(SRCS) segtrace.h
 	$(CC) $(CFLAGS) -o $(TARGET) $(SRCS) $(LDFLAGS)
 
-static: $(SRCS)
+static: $(SRCS) segtrace.h
 	$(CC) $(CFLAGS) -static -o $(TARGET) $(SRCS) $(LDFLAGS)
 
 clean:

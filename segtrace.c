@@ -133,31 +133,30 @@ int main(int argc, char **argv) {
       extract_all_windows(files, num_files, &r, def_scale, window_size,
                           step_size, min_bases, n_threads);
 
-  UnionFind uf;
-  init_unionfind(&uf, gw.num_sketches);
-
   fprintf(stderr,
           "[segtrace] Discovering candidates and computing distances...\n");
-  discover_and_compute(gw.all_hashes, gw.coords, gw.num_sketches, window_size,
-                       step_size, n_threads, r.hash_window, &uf);
+    CandidateGraph graph =
+      discover_and_compute(gw.all_hashes, gw.coords, gw.num_sketches,
+                 window_size, step_size, n_threads, r.hash_window);
+
+    free(gw.all_hashes);
+    gw.all_hashes = NULL;
 
   SegtraceDupRegion *dup_regions = NULL;
   size_t n_dup_regions = 0;
-  build_duplicate_regions(&uf, gw.num_sketches, gw.coords, gw.seq_lens,
-                          step_size, window_size, &dup_regions, &n_dup_regions);
+    build_duplicate_loci(&graph, gw.num_sketches, gw.coords, gw.seq_lens,
+               step_size, window_size, &dup_regions, &n_dup_regions);
+    cluster_duplicate_loci(&graph, gw.coords, dup_regions, n_dup_regions);
+    free_candidate_graph(&graph);
 
-  free_unionfind(&uf);
-  free(gw.all_hashes);
-  gw.all_hashes = NULL;
   free(gw.coords);
   gw.coords = NULL;
 
-  size_t n_merged = merge_dup_regions(dup_regions, n_dup_regions, window_size);
   size_t n_filtered =
-      filter_regions_by_copy_count(dup_regions, n_merged, min_copies);
+      filter_regions_by_copy_count(dup_regions, n_dup_regions, min_copies);
 
   size_t min_sd_len = window_size < MIN_SD_LEN ? window_size : MIN_SD_LEN;
-  write_dup_bed(out_prefix, dup_regions, n_filtered, gw.seq_lens, min_sd_len);
+    write_dup_bed(out_prefix, dup_regions, n_filtered, gw.seq_lens, min_sd_len);
 
   free(dup_regions);
   for (size_t i = 0; i < gw.num_seqs; i++) {
@@ -440,8 +439,31 @@ static inline size_t calculate_window_dist(const uint32_t *all_hashes,
                                all_hashes + wb->sketch_offset, wb->sketch_size);
 }
 
+static inline int windows_overlap(const DiscoverComputeData *w, uint32_t wa,
+                                  uint32_t wb) {
+  if (w->coords[wa].seq_id != w->coords[wb].seq_id)
+    return 0;
+  size_t window_distance =
+      (size_t)ABS_DIFF(w->coords[wa].window_idx, w->coords[wb].window_idx);
+  return window_distance * w->step_size < w->window_size;
+}
+
+static inline size_t max_sketch_size(const DiscoverComputeData *w, uint32_t wa,
+                                     uint32_t wb) {
+  return w->coords[wa].sketch_size > w->coords[wb].sketch_size
+             ? w->coords[wa].sketch_size
+             : w->coords[wb].sketch_size;
+}
+
+static inline size_t required_shared(const DiscoverComputeData *w, uint32_t wa,
+                                     uint32_t wb) {
+  size_t max_size = max_sketch_size(w, wa, wb);
+  size_t min_shared = (size_t)ceil((double)max_size * w->p_kmer);
+  return min_shared < 3 ? 3 : min_shared;
+}
+
 static inline int check_collinear_neighbor(DiscoverComputeData *w, uint32_t wa,
-                                           uint32_t wb, size_t min_shared) {
+                                           uint32_t wb) {
   uint32_t seq_a = w->coords[wa].seq_id;
   uint32_t seq_b = w->coords[wb].seq_id;
   long long n_win = (long long)w->n_windows;
@@ -457,13 +479,16 @@ static inline int check_collinear_neighbor(DiscoverComputeData *w, uint32_t wa,
       long long next_b = (long long)wb + db * step;
       if (next_a >= 0 && next_a < n_win && next_b >= 0 && next_b < n_win &&
           w->coords[next_a].seq_id == seq_a &&
-          w->coords[next_b].seq_id == seq_b) {
+          w->coords[next_b].seq_id == seq_b &&
+          !windows_overlap(w, (uint32_t)next_a, (uint32_t)next_b)) {
         if (w->coords[next_a].sketch_size > 0 &&
             w->coords[next_b].sketch_size > 0) {
-          size_t shared = calculate_window_dist(
-              w->all_hashes, &w->coords[next_a], &w->coords[next_b]);
-          if (shared >= min_shared)
+          size_t min_shared = required_shared(
+              w, (uint32_t)next_a, (uint32_t)next_b);
+          if (calculate_window_dist(w->all_hashes, &w->coords[next_a],
+                        &w->coords[next_b]) >= min_shared) {
             return 1;
+            }
         }
       }
     }
@@ -480,13 +505,16 @@ static inline int check_collinear_neighbor(DiscoverComputeData *w, uint32_t wa,
         long long next_b = (long long)wb + db * step_b;
         if (next_a >= 0 && next_a < n_win && next_b >= 0 && next_b < n_win &&
             w->coords[next_a].seq_id == seq_a &&
-            w->coords[next_b].seq_id == seq_b) {
+            w->coords[next_b].seq_id == seq_b &&
+            !windows_overlap(w, (uint32_t)next_a, (uint32_t)next_b)) {
           if (w->coords[next_a].sketch_size > 0 &&
               w->coords[next_b].sketch_size > 0) {
-            size_t shared = calculate_window_dist(
-                w->all_hashes, &w->coords[next_a], &w->coords[next_b]);
-            if (shared >= min_shared)
+            size_t min_shared = required_shared(
+                w, (uint32_t)next_a, (uint32_t)next_b);
+            if (calculate_window_dist(w->all_hashes, &w->coords[next_a],
+                                      &w->coords[next_b]) >= min_shared) {
               return 1;
+            }
           }
         }
       }
@@ -505,7 +533,6 @@ void discover_compute_worker(void *data, long idx, int tid) {
 
   qsort(b->entries, b->size, sizeof(HashWindowEntry), compare_hash_entry);
 
-  double p_kmer = w_data->p_kmer;
   size_t i = 0;
   while (i < b->size) {
     size_t j = i + 1;
@@ -520,35 +547,30 @@ void discover_compute_worker(void *data, long idx, int tid) {
         for (size_t b_idx = a + 1; b_idx < b_max; b_idx++) {
           uint32_t wa = b->entries[a].window_id,
                    wb = b->entries[b_idx].window_id;
-          size_t start_wa =
-              (size_t)w_data->coords[wa].window_idx * w_data->step_size;
-          size_t start_wb =
-              (size_t)w_data->coords[wb].window_idx * w_data->step_size;
-
-          if (w_data->coords[wa].seq_id == w_data->coords[wb].seq_id &&
-              ABS_DIFF(start_wa, start_wb) < w_data->window_size)
+          if (windows_overlap(w_data, wa, wb))
             continue;
 
           uint64_t pk = encode_pair(wa, wb);
           if (bloom_test_and_set(w_data->t_bloom[tid], pk, BLOOM_MASK))
             continue;
 
-          size_t min_sz =
-              w_data->coords[wa].sketch_size < w_data->coords[wb].sketch_size
-                  ? w_data->coords[wa].sketch_size
-                  : w_data->coords[wb].sketch_size;
-          size_t min_shared = (size_t)ceil((double)min_sz * p_kmer);
-          if (min_shared < 2)
-            min_shared = 2;
+          size_t min_shared = required_shared(w_data, wa, wb);
 
           size_t shared = calculate_window_dist(
               w_data->all_hashes, &w_data->coords[wa], &w_data->coords[wb]);
-          if (shared >= min_shared) {
-            if (check_collinear_neighbor(w_data, wa, wb, min_shared)) {
-              DA_PUSH(w_data->t_pairs[tid], w_data->t_n_pairs[tid],
-                      w_data->t_cap_pairs[tid], ((CandidatePair){wa, wb}));
-            }
-          }
+          if (shared < min_shared ||
+              !check_collinear_neighbor(w_data, wa, wb))
+            continue;
+
+          size_t max_size = max_sketch_size(w_data, wa, wb);
+          uint32_t score =
+              (uint32_t)((shared * UINT8_MAX + max_size / 2) / max_size);
+          DA_PUSH(w_data->t_pairs[tid], w_data->t_n_pairs[tid],
+                  w_data->t_cap_pairs[tid],
+                  ((CandidatePair){
+                      wa | ((score & UINT32_C(0x0f))
+                            << CANDIDATE_SCORE_SHIFT),
+                      wb | ((score >> 4) << CANDIDATE_SCORE_SHIFT)}));
         }
       }
     }
@@ -556,10 +578,16 @@ void discover_compute_worker(void *data, long idx, int tid) {
   }
 }
 
-void discover_and_compute(const uint32_t *all_hashes, const WindowCoord *coords,
-                          size_t n_windows, size_t window_size,
-                          size_t step_size, int n_threads, uint32_t kmer_size,
-                          UnionFind *uf) {
+CandidateGraph discover_and_compute(const uint32_t *all_hashes,
+                                    const WindowCoord *coords,
+                                    size_t n_windows, size_t window_size,
+                                    size_t step_size, int n_threads,
+                                    uint32_t kmer_size) {
+  if (n_windows > (size_t)CANDIDATE_WINDOW_MASK + 1) {
+    fprintf(stderr, "[ERROR] Too many windows for candidate encoding\n");
+    exit(1);
+  }
+
   DiscoverComputeData w = {
       .all_hashes = all_hashes,
       .coords = coords,
@@ -623,13 +651,6 @@ void discover_and_compute(const uint32_t *all_hashes, const WindowCoord *coords,
 
     kt_for(n_threads, discover_compute_worker, &w, (long)batch_count);
 
-    for (int t = 0; t < n_threads; t++) {
-      for (size_t k = 0; k < w.t_n_pairs[t]; k++) {
-        union_unionfind(uf, w.t_pairs[t][k].a, w.t_pairs[t][k].b);
-      }
-      w.t_n_pairs[t] = 0;
-    }
-
     for (size_t p = batch_start; p < batch_end; p++) {
       free(w.buckets[p].entries);
       w.buckets[p].entries = NULL;
@@ -638,68 +659,84 @@ void discover_and_compute(const uint32_t *all_hashes, const WindowCoord *coords,
     }
   }
 
-  free(win_curr_pos);
-  for (int t = 0; t < n_threads; t++) {
+  for (int t = 0; t < n_threads; t++)
     free(w.t_bloom[t]);
-    free(w.t_pairs[t]);
-  }
   free(w.buckets);
   free(w.t_bloom);
-  free(w.t_pairs);
-  free(w.t_n_pairs);
   free(w.t_cap_pairs);
+  free(win_curr_pos);
+
+  return (CandidateGraph){
+      .pairs = w.t_pairs, .counts = w.t_n_pairs, .n_threads = n_threads};
 }
 
 // ==============================================================
 // SECTION 4: CLUSTERING, LOCUS MERGING & COPY FILTERING
 // ==============================================================
 
-void build_duplicate_regions(UnionFind *uf, size_t num_sketches,
-                             const WindowCoord *coords,
-                             const GenomeSeqLen *seq_lens, size_t step_size,
-                             size_t window_size,
-                             SegtraceDupRegion **out_regions,
-                             size_t *out_n_regions) {
-  uint32_t *comp_size = calloc(num_sketches, sizeof(uint32_t));
-  for (size_t i = 0; i < num_sketches; i++) {
-    comp_size[find_unionfind(uf, (uint32_t)i)]++;
-  }
+static inline uint32_t candidate_window_a(CandidatePair pair) {
+  return pair.a & CANDIDATE_WINDOW_MASK;
+}
 
-  uint32_t *cluster_map = calloc(num_sketches, sizeof(uint32_t));
-  uint32_t next_cluster_id = 1;
-  for (size_t i = 0; i < num_sketches; i++) {
-    uint32_t root = find_unionfind(uf, (uint32_t)i);
-    if (comp_size[root] >= 2 && cluster_map[root] == 0) {
-      cluster_map[root] = next_cluster_id++;
+static inline uint32_t candidate_window_b(CandidatePair pair) {
+  return pair.b & CANDIDATE_WINDOW_MASK;
+}
+
+static inline uint32_t candidate_score(CandidatePair pair) {
+  return (pair.a >> CANDIDATE_SCORE_SHIFT) |
+         ((pair.b >> CANDIDATE_SCORE_SHIFT) << 4);
+}
+
+void build_duplicate_loci(const CandidateGraph *graph, size_t num_windows,
+                          WindowCoord *coords, const GenomeSeqLen *seq_lens,
+                          size_t step_size, size_t window_size,
+                          SegtraceDupRegion **out_regions,
+                          size_t *out_n_regions) {
+  for (size_t i = 0; i < num_windows; i++) {
+    coords[i].sketch_offset = UINT32_MAX;
+    coords[i].sketch_size = 0;
+  }
+  for (int t = 0; t < graph->n_threads; t++) {
+    for (size_t i = 0; i < graph->counts[t]; i++) {
+      CandidatePair pair = graph->pairs[t][i];
+      coords[candidate_window_a(pair)].sketch_size = 1;
+      coords[candidate_window_b(pair)].sketch_size = 1;
     }
   }
 
-  size_t n_dup_regions = 0, cap_dup_regions = 0;
-  SegtraceDupRegion *dup_regions = NULL;
+  SegtraceDupRegion *regions = NULL;
+  size_t n_regions = 0, cap_regions = 0;
+  uint32_t previous_seq = UINT32_MAX;
+  uint32_t previous_window = 0;
 
-  for (size_t i = 0; i < num_sketches; i++) {
-    uint32_t root_i = find_unionfind(uf, (uint32_t)i);
-    uint32_t cid = cluster_map[root_i];
-    if (cid == 0)
+  for (size_t i = 0; i < num_windows; i++) {
+    if (coords[i].sketch_size == 0)
       continue;
 
-    uint32_t seq_i = coords[i].seq_id;
-    size_t start = (size_t)coords[i].window_idx * step_size;
+    uint32_t seq_id = coords[i].seq_id;
+    uint32_t window_idx = coords[i].window_idx;
+    size_t start = (size_t)window_idx * step_size;
     size_t end = start + window_size;
 
-    DA_PUSH(dup_regions, n_dup_regions, cap_dup_regions,
-            ((SegtraceDupRegion){.seq_id = seq_i,
-                                 .file_id = seq_lens[seq_i].file_id,
-                                 .start = start,
-                                 .end = end,
-                                 .cluster_id = cid}));
+    if (n_regions > 0 && seq_id == previous_seq &&
+        window_idx - previous_window <= MAX_COLLINEAR_LOOKAHEAD) {
+      regions[n_regions - 1].end = end;
+    } else {
+      DA_PUSH(regions, n_regions, cap_regions,
+              ((SegtraceDupRegion){.seq_id = seq_id,
+                                   .file_id = seq_lens[seq_id].file_id,
+                                   .start = start,
+                                   .end = end,
+                                   .cluster_id = 0,
+                                   .partner_id = UINT32_MAX}));
+    }
+    coords[i].sketch_offset = (uint32_t)(n_regions - 1);
+    previous_seq = seq_id;
+    previous_window = window_idx;
   }
 
-  free(comp_size);
-  free(cluster_map);
-
-  *out_regions = dup_regions;
-  *out_n_regions = n_dup_regions;
+  *out_regions = regions;
+  *out_n_regions = n_regions;
 }
 
 static int compare_dup_region_by_cluster_file(const void *a, const void *b) {
@@ -716,28 +753,71 @@ static int compare_dup_region_by_cluster_file(const void *a, const void *b) {
   return CMP(ra->end, rb->end);
 }
 
-size_t merge_dup_regions(SegtraceDupRegion *regions, size_t n,
-                         size_t window_size) {
-  if (n <= 1)
-    return n;
-  qsort(regions, n, sizeof(SegtraceDupRegion),
-        compare_dup_region_by_cluster_file);
+void cluster_duplicate_loci(const CandidateGraph *graph,
+                            const WindowCoord *coords,
+                            SegtraceDupRegion *regions, size_t n_regions) {
+  if (n_regions == 0)
+    return;
 
-  size_t out = 0;
-  for (size_t i = 1; i < n; i++) {
-    if (regions[i].cluster_id == regions[out].cluster_id &&
-        regions[i].file_id == regions[out].file_id &&
-        regions[i].seq_id == regions[out].seq_id &&
-        regions[i].start <= regions[out].end + window_size) {
-      if (regions[i].end > regions[out].end)
-        regions[out].end = regions[i].end;
-    } else {
-      out++;
-      if (out != i)
-        regions[out] = regions[i];
+  for (int t = 0; t < graph->n_threads; t++) {
+    for (size_t i = 0; i < graph->counts[t]; i++) {
+      CandidatePair pair = graph->pairs[t][i];
+      uint32_t region_a = coords[candidate_window_a(pair)].sketch_offset;
+      uint32_t region_b = coords[candidate_window_b(pair)].sketch_offset;
+      if (region_a == UINT32_MAX || region_b == UINT32_MAX)
+        continue;
+      if (region_a == region_b) {
+        if (regions[region_a].partner_id == UINT32_MAX)
+          regions[region_a].partner_id = INTERNAL_DUPLICATION_ID;
+        continue;
+      }
+
+      uint32_t score = candidate_score(pair);
+      if (score > regions[region_a].cluster_id ||
+          (score == regions[region_a].cluster_id &&
+           region_b < regions[region_a].partner_id)) {
+        regions[region_a].cluster_id = score;
+        regions[region_a].partner_id = region_b;
+      }
+      if (score > regions[region_b].cluster_id ||
+          (score == regions[region_b].cluster_id &&
+           region_a < regions[region_b].partner_id)) {
+        regions[region_b].cluster_id = score;
+        regions[region_b].partner_id = region_a;
+      }
     }
   }
-  return out + 1;
+
+  UnionFind uf;
+  init_unionfind(&uf, n_regions);
+  for (size_t i = 0; i < n_regions; i++) {
+    if (regions[i].partner_id < n_regions)
+      union_unionfind(&uf, (uint32_t)i, regions[i].partner_id);
+  }
+
+  uint32_t *cluster_map = calloc(n_regions, sizeof(uint32_t));
+  uint32_t next_cluster_id = 1;
+  for (size_t i = 0; i < n_regions; i++) {
+    uint32_t root = find_unionfind(&uf, (uint32_t)i);
+    if (cluster_map[root] == 0)
+      cluster_map[root] = next_cluster_id++;
+    regions[i].cluster_id = cluster_map[root];
+  }
+  free(cluster_map);
+  free_unionfind(&uf);
+
+  qsort(regions, n_regions, sizeof(SegtraceDupRegion),
+        compare_dup_region_by_cluster_file);
+}
+
+void free_candidate_graph(CandidateGraph *graph) {
+  for (int t = 0; t < graph->n_threads; t++)
+    free(graph->pairs[t]);
+  free(graph->pairs);
+  free(graph->counts);
+  graph->pairs = NULL;
+  graph->counts = NULL;
+  graph->n_threads = 0;
 }
 
 size_t filter_regions_by_copy_count(SegtraceDupRegion *regions, size_t n,
@@ -754,7 +834,9 @@ size_t filter_regions_by_copy_count(SegtraceDupRegion *regions, size_t n,
       j++;
     }
     size_t copy_count = j - i;
-    if (copy_count >= min_copies) {
+    if (copy_count >= min_copies ||
+        (min_copies == 2 && copy_count == 1 &&
+         regions[i].partner_id == INTERNAL_DUPLICATION_ID)) {
       for (size_t k = i; k < j; k++) {
         regions[out_count++] = regions[k];
       }
