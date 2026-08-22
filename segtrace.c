@@ -419,8 +419,8 @@ GlobalWindows extract_all_windows(char **files, int num_files,
 // SECTION 3: CANDIDATE DISCOVERY & DISTANCE COMPUTATION
 // ==============================================================
 
-static inline size_t calculate_sketch_dist_fast(const uint32_t *a, size_t n_a,
-                                                const uint32_t *b, size_t n_b) {
+static inline size_t calculate_sketch_dist(const uint32_t *a, size_t n_a,
+                                           const uint32_t *b, size_t n_b) {
   size_t i = 0, j = 0, shared = 0;
   while (i < n_a && j < n_b) {
     uint32_t va = a[i], vb = b[j];
@@ -436,9 +436,8 @@ static inline size_t calculate_window_dist(const uint32_t *all_hashes,
                                            const WindowCoord *wb) {
   if (wa->sketch_size == 0 || wb->sketch_size == 0)
     return 0;
-  return calculate_sketch_dist_fast(
-      all_hashes + wa->sketch_offset, wa->sketch_size,
-      all_hashes + wb->sketch_offset, wb->sketch_size);
+  return calculate_sketch_dist(all_hashes + wa->sketch_offset, wa->sketch_size,
+                               all_hashes + wb->sketch_offset, wb->sketch_size);
 }
 
 static inline int check_collinear_neighbor(DiscoverComputeData *w, uint32_t wa,
@@ -568,7 +567,7 @@ void discover_and_compute(const uint32_t *all_hashes, const WindowCoord *coords,
       .window_size = window_size,
       .step_size = step_size,
       .kmer_size = kmer_size,
-      .p_kmer = pow(0.80, (double)kmer_size),
+      .p_kmer = pow(MIN_IDENTITY, (double)kmer_size),
       .buckets = calloc(NUM_PARTITIONS, sizeof(PartitionBucket)),
       .t_bloom = malloc(n_threads * sizeof(uint8_t *)),
       .t_pairs = calloc(n_threads, sizeof(CandidatePair *)),
@@ -729,7 +728,7 @@ size_t merge_dup_regions(SegtraceDupRegion *regions, size_t n,
     if (regions[i].cluster_id == regions[out].cluster_id &&
         regions[i].file_id == regions[out].file_id &&
         regions[i].seq_id == regions[out].seq_id &&
-        regions[i].start <= regions[out].end + MERGE_COEFF * window_size) {
+        regions[i].start <= regions[out].end + window_size) {
       if (regions[i].end > regions[out].end)
         regions[out].end = regions[i].end;
     } else {
