@@ -805,7 +805,8 @@ static int compare_dup_region_by_cluster_file(const void *a, const void *b) {
 
 /* 구간 간 클러스터링:
  * 1패스 - 각 구간에 대해 score가 가장 높은 파트너 1개만 기록
- *         (같은 구간 안에서 매치된 쌍은 INTERNAL_DUPLICATION_ID로 표시),
+ *         (같은 locus 내부의 self-match는 별도 카피가 아닌 잡음이므로
+ *         best-partner 경쟁에서 완전히 제외한다),
  * 2패스 - best-partner 간선들을 union-find로 연결해 클러스터 id 부여,
  * 마지막으로 클러스터/파일/좌표 순으로 정렬한다. */
 void cluster_duplicate_loci(const CandidateGraph *graph,
@@ -820,13 +821,9 @@ void cluster_duplicate_loci(const CandidateGraph *graph,
       CandidatePair pair = graph->pairs[t][i];
       uint32_t region_a = coords[candidate_window(pair.a)].sketch_offset;
       uint32_t region_b = coords[candidate_window(pair.b)].sketch_offset;
-      if (region_a == UINT32_MAX || region_b == UINT32_MAX)
+      if (region_a == UINT32_MAX || region_b == UINT32_MAX ||
+          region_a == region_b)
         continue;
-      if (region_a == region_b) {
-        if (regions[region_a].partner_id == UINT32_MAX)
-          regions[region_a].partner_id = INTERNAL_DUPLICATION_ID;
-        continue;
-      }
 
       uint32_t score = candidate_score(pair);
       if (score > regions[region_a].cluster_id ||
@@ -876,33 +873,42 @@ void free_candidate_graph(CandidateGraph *graph) {
   free(graph->counts);
 }
 
-/* (클러스터, 파일) 그룹별로 복제 수를 세어 min_copies 미만이면 제거.
- * 단 min_copies==2일 때는 "한 구간 안에서 자기 자신과 매치된" 내부 복제
- * (INTERNAL_DUPLICATION_ID)도 유효한 것으로 간주해 살려둔다.
- * regions가 cluster/file 순으로 정렬된 상태이므로 그룹은 연속 구간이고,
- * in-place로 압축한 뒤 살아남은 개수를 반환한다. */
+/* 2단계 필터: 먼저 클러스터 전체(모든 파일 합산) 복제 수가 2 미만이면
+ * "다른 어딘가에도 존재"라는 최소 조건을 만족하지 못하므로 클러스터 전체를
+ * 제거한다. 그 다음 남은 클러스터에서 -c(min_copies)가 지정된 경우, 각
+ * (클러스터, 파일) 그룹의 파일별 복제 수가 min_copies 미만이면 그 그룹만
+ * 제거한다 (예: -c 3이면 폴리플로이드처럼 한 유전체 안에 3카피 이상 있는
+ * 경우만 남김). regions가 cluster/file 순으로 정렬된 상태이므로 두 그룹 모두
+ * 연속 구간이고, in-place로 압축한 뒤 살아남은 개수를 반환한다. */
 size_t filter_regions_by_copy_count(SegtraceDupRegion *regions, size_t n,
                                     uint32_t min_copies) {
-  if (n == 0 || min_copies <= 1)
-    return n;
+  if (n == 0)
+    return 0;
+  if (min_copies < 1)
+    min_copies = 1;
 
   size_t out_count = 0;
-  size_t i = 0;
-  while (i < n) {
-    size_t j = i + 1;
-    while (j < n && regions[j].cluster_id == regions[i].cluster_id &&
-           regions[j].file_id == regions[i].file_id) {
-      j++;
-    }
-    size_t copy_count = j - i;
-    if (copy_count >= min_copies ||
-        (min_copies == 2 && copy_count == 1 &&
-         regions[i].partner_id == INTERNAL_DUPLICATION_ID)) {
-      for (size_t k = i; k < j; k++) {
-        regions[out_count++] = regions[k];
+  size_t ci = 0;
+  while (ci < n) {
+    size_t cj = ci + 1;
+    while (cj < n && regions[cj].cluster_id == regions[ci].cluster_id)
+      cj++;
+
+    if (cj - ci >= 2) {
+      size_t i = ci;
+      while (i < cj) {
+        size_t j = i + 1;
+        while (j < cj && regions[j].file_id == regions[i].file_id)
+          j++;
+        if (j - i >= min_copies) {
+          for (size_t k = i; k < j; k++) {
+            regions[out_count++] = regions[k];
+          }
+        }
+        i = j;
       }
     }
-    i = j;
+    ci = cj;
   }
   return out_count;
 }
