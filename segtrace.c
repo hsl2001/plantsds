@@ -873,13 +873,12 @@ void free_candidate_graph(CandidateGraph *graph) {
   free(graph->counts);
 }
 
-/* 2단계 필터: 먼저 클러스터 전체(모든 파일 합산) 복제 수가 2 미만이면
- * "다른 어딘가에도 존재"라는 최소 조건을 만족하지 못하므로 클러스터 전체를
- * 제거한다. 그 다음 남은 클러스터에서 -c(min_copies)가 지정된 경우, 각
- * (클러스터, 파일) 그룹의 파일별 복제 수가 min_copies 미만이면 그 그룹만
- * 제거한다 (예: -c 3이면 폴리플로이드처럼 한 유전체 안에 3카피 이상 있는
- * 경우만 남김). regions가 cluster/file 순으로 정렬된 상태이므로 두 그룹 모두
- * 연속 구간이고, in-place로 압축한 뒤 살아남은 개수를 반환한다. */
+/* HT(수평 전이) 탐지 목적상 클러스터는 반드시 서로 다른 2개 이상의
+ * 파일(유전체)에 걸쳐 있어야 한다 (같은 유전체 내 여러 scaffold에만 존재하는
+ * 클러스터는 제외). 그 조건을 만족하는 클러스터에 한해, 각 (클러스터, 파일)
+ * 그룹 중 파일별 복제 수가 min_copies 이상인 그룹만 남긴다.
+ * regions가 cluster/file 순으로 정렬된 상태이므로 두 그룹 모두 연속 구간이고,
+ * in-place로 압축한 뒤 살아남은 개수를 반환한다. */
 size_t filter_regions_by_copy_count(SegtraceDupRegion *regions, size_t n,
                                     uint32_t min_copies) {
   if (n == 0)
@@ -894,8 +893,22 @@ size_t filter_regions_by_copy_count(SegtraceDupRegion *regions, size_t n,
     while (cj < n && regions[cj].cluster_id == regions[ci].cluster_id)
       cj++;
 
-    if (cj - ci >= 2) {
-      size_t i = ci;
+    /* 1차 스캔: min_copies 기준을 만족하는 파일이 몇 개인지 센다 */
+    size_t qualifying_files = 0;
+    size_t i = ci;
+    while (i < cj) {
+      size_t j = i + 1;
+      while (j < cj && regions[j].file_id == regions[i].file_id)
+        j++;
+      if (j - i >= min_copies)
+        qualifying_files++;
+      i = j;
+    }
+
+    /* 2차 스캔: 서로 다른 파일이 2개 이상 기준을 만족할 때만 해당 파일들의
+     * region을 출력에 포함시킨다 */
+    if (qualifying_files >= 2) {
+      i = ci;
       while (i < cj) {
         size_t j = i + 1;
         while (j < cj && regions[j].file_id == regions[i].file_id)
