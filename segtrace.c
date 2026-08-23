@@ -878,7 +878,9 @@ void free_candidate_graph(CandidateGraph *graph) {
  * 클러스터는 제외). 그 조건을 만족하는 클러스터에 한해, 각 (클러스터, 파일)
  * 그룹 중 파일별 복제 수가 min_copies 이상인 그룹만 남긴다.
  * regions가 cluster/file 순으로 정렬된 상태이므로 두 그룹 모두 연속 구간이고,
- * in-place로 압축한 뒤 살아남은 개수를 반환한다. */
+ * in-place로 압축한 뒤 살아남은 개수를 반환한다.
+ * 탈락한 클러스터로 인해 번호가 듬성듬성해지지 않도록, 살아남은 클러스터만
+ * 등장 순서대로 1부터 다시 번호를 매긴다. */
 size_t filter_regions_by_copy_count(SegtraceDupRegion *regions, size_t n,
                                     uint32_t min_copies) {
   if (n == 0)
@@ -887,6 +889,7 @@ size_t filter_regions_by_copy_count(SegtraceDupRegion *regions, size_t n,
     min_copies = 1;
 
   size_t out_count = 0;
+  uint32_t next_cluster_id = 1;
   size_t ci = 0;
   while (ci < n) {
     size_t cj = ci + 1;
@@ -908,6 +911,7 @@ size_t filter_regions_by_copy_count(SegtraceDupRegion *regions, size_t n,
     /* 2차 스캔: 서로 다른 파일이 2개 이상 기준을 만족할 때만 해당 파일들의
      * region을 출력에 포함시킨다 */
     if (qualifying_files >= 2) {
+      uint32_t out_cluster_id = next_cluster_id++;
       i = ci;
       while (i < cj) {
         size_t j = i + 1;
@@ -915,7 +919,9 @@ size_t filter_regions_by_copy_count(SegtraceDupRegion *regions, size_t n,
           j++;
         if (j - i >= min_copies) {
           for (size_t k = i; k < j; k++) {
-            regions[out_count++] = regions[k];
+            regions[out_count] = regions[k];
+            regions[out_count].cluster_id = out_cluster_id;
+            out_count++;
           }
         }
         i = j;
