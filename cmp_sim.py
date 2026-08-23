@@ -32,7 +32,8 @@ if os.path.isdir(sedef_local_dir):
 
 
 def sim_generate_genome(chrom_sizes, num_dups=100, min_dup_len=1000, max_dup_len=10_000,
-                        ortholog_rate=0.0, flank_len=500, out_fasta="sim.fa"):
+                        ortholog_rate=0.0, flank_len=500, min_separation=2048,
+                        out_fasta="sim.fa"):
     """Generates synthetic chromosomes with segmental duplications."""
     bases_bytes = np.frombuffer(b'ACGT', dtype=np.uint8)
     genomes = {chrom: bytearray(np.random.choice(bases_bytes, size=size).tobytes()) for chrom, size in chrom_sizes.items()}
@@ -44,13 +45,14 @@ def sim_generate_genome(chrom_sizes, num_dups=100, min_dup_len=1000, max_dup_len
         return any(max(s, ts) < min(e, te) for ts, te in used_intervals[chrom])
 
     def pick_free(length, extra=0):
-        tot = length + 2 * extra
+        margin = max(extra, min_separation)
+        tot = length + 2 * margin
         for _ in range(1000):
             c = random.choice(chrom_names)
             if chrom_sizes[c] <= tot + 10: continue
-            s = random.randint(extra, chrom_sizes[c] - length - extra)
-            if not is_overlap(c, s - extra, s + length + extra):
-                used_intervals[c].append((s - extra, s + length + extra))
+            s = random.randint(margin, chrom_sizes[c] - length - margin)
+            if not is_overlap(c, s - margin, s + length + margin):
+                used_intervals[c].append((s - margin, s + length + margin))
                 return c, s
         return None, None
 
@@ -84,9 +86,16 @@ def sim_generate_genome(chrom_sizes, num_dups=100, min_dup_len=1000, max_dup_len
 
     return list(set(true_intervals)), out_fasta
 
-def evaluate_caller_output(bed_path, true_intervals, exec_time):
+def evaluate_caller_output(bed_path, true_intervals, exec_time,
+                           boundary_tolerance=0):
     """Computes unified BP and fragment metrics for a caller."""
     pred_intervals = parse_bed_intervals(bed_path)
+    if boundary_tolerance:
+        pred_intervals = [
+            (chrom, start + boundary_tolerance, end - boundary_tolerance)
+            for chrom, start, end in pred_intervals
+            if end - start > 2 * boundary_tolerance
+        ]
     bp_m = calc_bp_metrics(pred_intervals, true_intervals)
     frag_m = eval_fragment_overlap(pred_intervals, true_intervals, fraction=0.5)
 
@@ -131,8 +140,10 @@ def sim_run_segtrace(fasta_path, true_intervals, threads=8, kmer=17,
     except Exception:
         mem_mb = 0.0
 
-    res = evaluate_caller_output(f"{out_prefix}.dup.bed", true_intervals,
-                                 t_elapsed)
+    res = evaluate_caller_output(
+        f"{out_prefix}.dup.bed", true_intervals, t_elapsed,
+        boundary_tolerance=window_size // 4
+    )
     res['Tool'] = 'Segtrace'
     res['kmer'] = kmer
     res['window_size'] = window_size

@@ -8,6 +8,13 @@ Provides high-speed base-pair footprint calculations and 1D fragment reciprocal 
 import os
 import bisect
 
+
+def _to_int_or_none(x):
+    try:
+        return int(x)
+    except (TypeError, ValueError):
+        return None
+
 def parse_bed_intervals(filepath):
     """Parses any BED/BEDPE file into unique (chrom, start, end) intervals."""
     intervals = []
@@ -20,16 +27,19 @@ def parse_bed_intervals(filepath):
             p = line.strip().split()
             if len(p) >= 3:
                 c1 = p[0].split('-')[-1] if '-' in p[0] and not p[0].startswith('chr') else p[0]
-                try:
-                    intervals.append((c1, int(p[1]), int(p[2])))
-                except ValueError:
-                    pass
+                s1 = _to_int_or_none(p[1])
+                e1 = _to_int_or_none(p[2])
+                if s1 is not None and e1 is not None and e1 > s1:
+                    intervals.append((c1, s1, e1))
+
+            # Parse second interval only when line is BEDPE-like:
+            # fields 4-6 must be (chrom, start, end) with valid coordinates.
             if len(p) >= 6:
-                try:
+                s2 = _to_int_or_none(p[4])
+                e2 = _to_int_or_none(p[5])
+                if s2 is not None and e2 is not None and e2 > s2:
                     c2 = p[3].split('-')[-1] if '-' in p[3] and not p[3].startswith('chr') else p[3]
-                    intervals.append((c2, int(p[4]), int(p[5])))
-                except ValueError:
-                    pass
+                    intervals.append((c2, s2, e2))
     return list(set(intervals))
 
 def merge_intervals_by_chrom(intervals):
@@ -80,7 +90,7 @@ def calc_bp_metrics(pred_intervals, ref_intervals):
     }
 
 def eval_fragment_overlap(pred_intervals, ref_intervals, fraction=0.5):
-    """Evaluates 1D fragment intervals using binary search (>= fraction coverage)."""
+    """Evaluates 1D fragment intervals using reciprocal overlap (>= fraction on both sides)."""
     p_by_c, r_by_c = {}, {}
     for c, s, e in pred_intervals: p_by_c.setdefault(c, []).append((s, e))
     for c, s, e in ref_intervals: r_by_c.setdefault(c, []).append((s, e))
@@ -98,7 +108,9 @@ def eval_fragment_overlap(pred_intervals, ref_intervals, fraction=0.5):
         for k in range(idx - 1, -1, -1):
             s_p, e_p = p_sorted[c][k]
             if e_p <= s_r: continue
-            if max(0, min(e_r, e_p) - max(s_r, s_p)) / l_r >= fraction:
+            ov = max(0, min(e_r, e_p) - max(s_r, s_p))
+            l_p = e_p - s_p
+            if l_p > 0 and (ov / l_r) >= fraction and (ov / l_p) >= fraction:
                 tp += 1
                 break
 
@@ -110,7 +122,9 @@ def eval_fragment_overlap(pred_intervals, ref_intervals, fraction=0.5):
         for k in range(idx - 1, -1, -1):
             s_r, e_r = r_sorted[c][k]
             if e_r <= s_p: continue
-            if max(0, min(e_p, e_r) - max(s_p, s_r)) / l_p >= fraction:
+            ov = max(0, min(e_p, e_r) - max(s_p, s_r))
+            l_r = e_r - s_r
+            if l_r > 0 and (ov / l_p) >= fraction and (ov / l_r) >= fraction:
                 matched_p += 1
                 break
 
