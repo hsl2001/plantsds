@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-cmp_human.py - Comparison CLI for real human / pangenome datasets (Segtrace vs SEDEF / CHM13).
+cmp_human.py - Comparison CLI for shared-segment calls (Segtrace vs SEDEF / CHM13).
 Evaluates Base-Pair (BP) footprint and Fragment-level Reciprocal 50% Overlap (bedtools -f 0.5 -r: TP, FP, FN).
 """
 
@@ -38,7 +38,7 @@ def load_normalized_intervals(path, exclude_chrm=True):
 def print_report(segtrace_name, sedef_name, bp_m, frag_m):
     """Prints standard human SD comparison report with TP, FP, FN."""
     print("=================================================================================")
-    print("            SEGMENTAL DUPLICATION COMPARISON REPORT")
+    print("            SHARED-SEGMENT COMPARISON REPORT")
     print("=================================================================================")
     print(f"Segtrace Input:  {segtrace_name}")
     print(f"SEDEF Input:     {sedef_name}")
@@ -80,7 +80,7 @@ def cmp_human_run(segtrace_bed, sedef_bed, exclude_chrm=True):
     return bp_m, frag_m
 
 def main():
-    parser = argparse.ArgumentParser(description="Compare Segtrace and SEDEF BED files on Human/Real genome datasets.")
+    parser = argparse.ArgumentParser(description="Compare shared-segment BED files on human/real genome datasets.")
     parser.add_argument("--segtrace", default="t2t-chm13_sd.dup.bed", help="Path to Segtrace dup.bed file")
     parser.add_argument("--sedef", default="data/chm13v2.0_SD.bed", help="Path to SEDEF/CHM13 bed file")
     parser.add_argument("--include-chrm", action="store_true", help="Include mitochondrial chromosome (chrM) in evaluation")

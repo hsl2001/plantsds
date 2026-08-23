@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-cmp_sim.py - Simulation benchmark for SD callers (Segtrace, SEDEF, BISER).
+cmp_sim.py - Simulation benchmark for shared-segment callers (Segtrace, SEDEF, BISER).
 
 Features:
 - Multi-length scaling evaluation across diverse genome sizes.
-- Full SD caller comparison (Segtrace, SEDEF, and BISER).
+- Full shared-segment caller comparison (Segtrace, SEDEF, and BISER).
 - Base-pair footprint and Fragment-level (50% reciprocal overlap) evaluation.
 - Output summary tables, CSV exports, and visualization plots.
 """
@@ -34,9 +34,15 @@ if os.path.isdir(sedef_local_dir):
 def sim_generate_genome(chrom_sizes, num_dups=100, min_dup_len=1000, max_dup_len=10_000,
                         ortholog_rate=0.0, flank_len=500, min_separation=2048,
                         out_fasta="sim.fa"):
-    """Generates synthetic chromosomes with segmental duplications."""
+    """Generates one random genome per chrom_sizes entry and injects
+    horizontally transferred segments between distinct genomes. Writes a
+    combined FASTA (for single-fasta callers) plus one FASTA per genome.
+    Returns (true_intervals, combined_fasta, per_genome_fastas)."""
     bases_bytes = np.frombuffer(b'ACGT', dtype=np.uint8)
     genomes = {chrom: bytearray(np.random.choice(bases_bytes, size=size).tobytes()) for chrom, size in chrom_sizes.items()}
+    stem = os.path.splitext(out_fasta)[0]
+    # segtrace reports loci as "<file basename>-<seq name>"
+    qname = {c: f"{stem}_{c}-{c}" for c in chrom_sizes}
     true_intervals = []
     used_intervals = {c: [] for c in chrom_sizes}
     chrom_names = list(chrom_sizes.keys())
@@ -44,58 +50,59 @@ def sim_generate_genome(chrom_sizes, num_dups=100, min_dup_len=1000, max_dup_len
     def is_overlap(chrom, s, e):
         return any(max(s, ts) < min(e, te) for ts, te in used_intervals[chrom])
 
-    def pick_free(length, extra=0):
+    def pick_free(length, extra=0, exclude=()):
         margin = max(extra, min_separation)
         tot = length + 2 * margin
         for _ in range(1000):
             c = random.choice(chrom_names)
-            if chrom_sizes[c] <= tot + 10: continue
+            if c in exclude or chrom_sizes[c] <= tot + 10: continue
             s = random.randint(margin, chrom_sizes[c] - length - margin)
             if not is_overlap(c, s - margin, s + length + margin):
                 used_intervals[c].append((s - margin, s + length + margin))
                 return c, s
         return None, None
 
-    print(f"[INFO] Injecting {num_dups} SDs into {out_fasta}...")
+    print(f"[INFO] Injecting {num_dups} transfer events across {len(chrom_names)} genomes...")
     for _ in range(num_dups):
         dup_len = random.randint(min_dup_len, max_dup_len)
         if ortholog_rate > 0.0 and random.random() < ortholog_rate and len(chrom_names) >= 3:
             c1, s1 = pick_free(dup_len, flank_len)
-            c2, s2 = pick_free(dup_len, flank_len)
-            c3, s3 = pick_free(dup_len, 0)
+            c2, s2 = pick_free(dup_len, flank_len, exclude=(c1,))
+            c3, s3 = pick_free(dup_len, 0, exclude=(c1, c2))
             if not c1 or not c2 or not c3: continue
             genomes[c2][s2 - flank_len:s2 + dup_len + flank_len] = genomes[c1][s1 - flank_len:s1 + dup_len + flank_len]
             genomes[c3][s3:s3 + dup_len] = genomes[c1][s1:s1 + dup_len]
-            l1, l2, l3 = (c1, s1, s1 + dup_len), (c2, s2, s2 + dup_len), (c3, s3, s3 + dup_len)
-            true_intervals.extend([l1, l2, l3])
+            true_intervals.extend([(qname[c1], s1, s1 + dup_len), (qname[c2], s2, s2 + dup_len), (qname[c3], s3, s3 + dup_len)])
         else:
             c1, s1 = pick_free(dup_len, 0)
-            c2, s2 = pick_free(dup_len, 0)
+            c2, s2 = pick_free(dup_len, 0, exclude=(c1,))
             if not c1 or not c2: continue
             genomes[c2][s2:s2 + dup_len] = genomes[c1][s1:s1 + dup_len]
-            l1, l2 = (c1, s1, s1 + dup_len), (c2, s2, s2 + dup_len)
-            true_intervals.extend([l1, l2])
+            true_intervals.extend([(qname[c1], s1, s1 + dup_len), (qname[c2], s2, s2 + dup_len)])
 
-    with open(out_fasta, "wb") as f:
+    genome_paths = []
+    with open(out_fasta, "wb") as fc:
         for c, seq in genomes.items():
-            f.write(f">{c}\n".encode())
-            for i in range(0, len(seq), 80): f.write(seq[i:i+80] + b"\n")
+            rec = bytearray(f">{c}\n".encode())
+            for i in range(0, len(seq), 80): rec += seq[i:i+80] + b"\n"
+            fc.write(rec)
+            gp = f"{stem}_{c}.fa"
+            with open(gp, "wb") as fg: fg.write(rec)
+            genome_paths.append(gp)
 
     for ext in [".fai", ".sdx"]:
         if os.path.exists(out_fasta + ext): os.remove(out_fasta + ext)
 
-    return list(set(true_intervals)), out_fasta
+    return list(set(true_intervals)), out_fasta, genome_paths
 
-def evaluate_caller_output(bed_path, true_intervals, exec_time,
-                           boundary_tolerance=0):
+def evaluate_caller_output(bed_path, true_intervals, exec_time, qualify=False):
     """Computes unified BP and fragment metrics for a caller."""
     pred_intervals = parse_bed_intervals(bed_path)
-    if boundary_tolerance:
-        pred_intervals = [
-            (chrom, start + boundary_tolerance, end - boundary_tolerance)
-            for chrom, start, end in pred_intervals
-            if end - start > 2 * boundary_tolerance
-        ]
+    if qualify:
+        # single-fasta callers emit bare chrom names; map them back to the
+        # genome-qualified names used in the ground truth
+        m = {c.rsplit('-', 1)[-1]: c for c, _, _ in true_intervals}
+        pred_intervals = [(m.get(c, c), s, e) for c, s, e in pred_intervals]
     bp_m = calc_bp_metrics(pred_intervals, true_intervals)
     frag_m = eval_fragment_overlap(pred_intervals, true_intervals, fraction=0.5)
 
@@ -105,9 +112,9 @@ def evaluate_caller_output(bed_path, true_intervals, exec_time,
         'Time(s)': exec_time
     }
 
-def sim_run_segtrace(fasta_path, true_intervals, threads=8, kmer=17,
+def sim_run_segtrace(genome_paths, true_intervals, threads=8, kmer=17,
                      window_size=1024, step_size=0, scale=16):
-    """Runs Segtrace with specified parameters and measures Time & Peak RSS Memory (MB)."""
+    """Runs Segtrace on per-genome FASTAs and measures Time & Peak RSS Memory (MB)."""
     out_prefix = "sim_out"
     segtrace_bin = "./segtrace" if os.path.isfile("./segtrace") else "./segtrace/segtrace"
     cmd = [
@@ -119,7 +126,7 @@ def sim_run_segtrace(fasta_path, true_intervals, threads=8, kmer=17,
         "-p", str(threads),
         "-o", out_prefix
     ]
-    cmd.append(fasta_path)
+    cmd.extend(genome_paths)
 
     if sys.platform == "darwin":
         profile_cmd = ["/usr/bin/time", "-l", *cmd]
@@ -174,7 +181,7 @@ def sim_run_sedef(fasta_path, true_intervals, threads=8):
 
         final_bed = os.path.join(sedef_out_dir, "final.bed")
         if os.path.exists(final_bed):
-            res_dict = evaluate_caller_output(final_bed, true_intervals, t_elapsed)
+            res_dict = evaluate_caller_output(final_bed, true_intervals, t_elapsed, qualify=True)
             res_dict['Tool'] = 'SEDEF'
             res_dict['Memory(MB)'] = 0.0
             return res_dict
@@ -195,7 +202,7 @@ def sim_run_biser(fasta_path, true_intervals, threads=8):
         subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env, check=True)
         t_elapsed = time.perf_counter() - t0
         if os.path.exists(biser_out):
-            res_dict = evaluate_caller_output(biser_out, true_intervals, t_elapsed)
+            res_dict = evaluate_caller_output(biser_out, true_intervals, t_elapsed, qualify=True)
             res_dict['Tool'] = 'BISER'
             res_dict['Memory(MB)'] = 0.0
             return res_dict
@@ -369,11 +376,11 @@ def run_kmer_sweep(genome_sizes, reps, threads, kmers, window_size, step_size, s
         n_dups = num_dups if num_dups else max(10, g_size // 1_000_000)
 
         for rep in range(1, reps + 1):
-            print(f">>> [Genome Size: {g_size:,} bp | Rep {rep}/{reps}] Injecting {n_dups} SDs...")
-            true_intervals, fasta_path = sim_generate_genome(chrom_sizes, num_dups=n_dups, ortholog_rate=ortholog_rate, out_fasta="sim.fa")
+            print(f">>> [Genome Size: {g_size:,} bp | Rep {rep}/{reps}] Injecting {n_dups} transfer events...")
+            true_intervals, fasta_path, genome_paths = sim_generate_genome(chrom_sizes, num_dups=n_dups, ortholog_rate=ortholog_rate, out_fasta="sim.fa")
 
             for k in kmers:
-                res = sim_run_segtrace(fasta_path, true_intervals, threads=threads, kmer=k, window_size=window_size, step_size=step_size, scale=scale)
+                res = sim_run_segtrace(genome_paths, true_intervals, threads=threads, kmer=k, window_size=window_size, step_size=step_size, scale=scale)
                 res['GenomeSize'], res['Rep'] = g_size, rep
                 results.append(res)
                 print(f"  [k={k:2d}] Frag F1: {res['F1_frag']*100:6.2f}% | Mem: {res['Memory(MB)']:6.2f}MB | Time: {res['Time(s)']:5.2f}s")
@@ -395,11 +402,11 @@ def run_scale_sweep(genome_sizes, reps, threads, scales, window_size, step_size,
         n_dups = num_dups if num_dups else max(10, g_size // 1_000_000)
 
         for rep in range(1, reps + 1):
-            print(f">>> [Genome Size: {g_size:,} bp | Rep {rep}/{reps}] Injecting {n_dups} SDs...")
-            true_intervals, fasta_path = sim_generate_genome(chrom_sizes, num_dups=n_dups, ortholog_rate=ortholog_rate, out_fasta="sim.fa")
+            print(f">>> [Genome Size: {g_size:,} bp | Rep {rep}/{reps}] Injecting {n_dups} transfer events...")
+            true_intervals, fasta_path, genome_paths = sim_generate_genome(chrom_sizes, num_dups=n_dups, ortholog_rate=ortholog_rate, out_fasta="sim.fa")
 
             for s in scales:
-                res = sim_run_segtrace(fasta_path, true_intervals, threads=threads, kmer=kmer, window_size=window_size, step_size=step_size, scale=s)
+                res = sim_run_segtrace(genome_paths, true_intervals, threads=threads, kmer=kmer, window_size=window_size, step_size=step_size, scale=s)
                 res['GenomeSize'], res['Rep'] = g_size, rep
                 results.append(res)
                 print(f"  [Scale={s:3d}] Frag F1: {res['F1_frag']*100:6.2f}% | Mem: {res['Memory(MB)']:6.2f}MB | Time: {res['Time(s)']:5.2f}s")
@@ -421,11 +428,11 @@ def run_window_sweep(genome_sizes, reps, threads, window_sizes, step_size, kmer,
         n_dups = num_dups if num_dups else max(10, g_size // 1_000_000)
 
         for rep in range(1, reps + 1):
-            print(f">>> [Genome Size: {g_size:,} bp | Rep {rep}/{reps}] Injecting {n_dups} SDs...")
-            true_intervals, fasta_path = sim_generate_genome(chrom_sizes, num_dups=n_dups, ortholog_rate=ortholog_rate, out_fasta="sim.fa")
+            print(f">>> [Genome Size: {g_size:,} bp | Rep {rep}/{reps}] Injecting {n_dups} transfer events...")
+            true_intervals, fasta_path, genome_paths = sim_generate_genome(chrom_sizes, num_dups=n_dups, ortholog_rate=ortholog_rate, out_fasta="sim.fa")
 
             for w in window_sizes:
-                res = sim_run_segtrace(fasta_path, true_intervals, threads=threads, kmer=kmer, window_size=w, step_size=step_size, scale=scale)
+                res = sim_run_segtrace(genome_paths, true_intervals, threads=threads, kmer=kmer, window_size=w, step_size=step_size, scale=scale)
                 res['GenomeSize'], res['Rep'] = g_size, rep
                 results.append(res)
                 print(f"  [Window={w:4d}] Frag F1: {res['F1_frag']*100:6.2f}% | Mem: {res['Memory(MB)']:6.2f}MB | Time: {res['Time(s)']:5.2f}s")
@@ -447,11 +454,11 @@ def run_step_sweep(genome_sizes, reps, threads, window_size, step_sizes, kmer, s
         n_dups = num_dups if num_dups else max(10, g_size // 1_000_000)
 
         for rep in range(1, reps + 1):
-            print(f">>> [Genome Size: {g_size:,} bp | Rep {rep}/{reps}] Injecting {n_dups} SDs...")
-            true_intervals, fasta_path = sim_generate_genome(chrom_sizes, num_dups=n_dups, ortholog_rate=ortholog_rate, out_fasta="sim.fa")
+            print(f">>> [Genome Size: {g_size:,} bp | Rep {rep}/{reps}] Injecting {n_dups} transfer events...")
+            true_intervals, fasta_path, genome_paths = sim_generate_genome(chrom_sizes, num_dups=n_dups, ortholog_rate=ortholog_rate, out_fasta="sim.fa")
 
             for t in step_sizes:
-                res = sim_run_segtrace(fasta_path, true_intervals, threads=threads, kmer=kmer, window_size=window_size, step_size=t, scale=scale)
+                res = sim_run_segtrace(genome_paths, true_intervals, threads=threads, kmer=kmer, window_size=window_size, step_size=t, scale=scale)
                 res['GenomeSize'], res['Rep'] = g_size, rep
                 results.append(res)
                 print(f"  [Step={t:4d}] Frag F1: {res['F1_frag']*100:6.2f}% | Mem: {res['Memory(MB)']:6.2f}MB | Time: {res['Time(s)']:5.2f}s")
@@ -468,7 +475,7 @@ def main():
     parser.add_argument("--genome-sizes", type=int, nargs='+', default=None, help="Genome sizes to test (e.g. 10000000 20000000)")
     parser.add_argument("--genome-size", type=int, default=None, help="Single genome size to test")
     parser.add_argument("--reps", "-N", type=int, default=3, help="Replicates per genome size (default: 3)")
-    parser.add_argument("--num-dups", type=int, default=None, help="Number of synthetic SDs to inject")
+    parser.add_argument("--num-transfers", "--num-dups", dest="num_transfers", type=int, default=None, help="Number of synthetic transfer events to inject")
     parser.add_argument("--ortholog-rate", type=float, default=0.0, help="Fraction of shared locus orthologs (default: 0.0)")
     parser.add_argument("--threads", "-p", type=int, default=8, help="CPU threads to use (default: 8)")
     
@@ -496,13 +503,13 @@ def main():
 
     if args.sweep_param != 'none':
         if args.sweep_param in ['kmer', 'all']:
-            run_kmer_sweep(genome_sizes, reps, args.threads, args.kmers, args.window_size, args.step_size, args.scale, args.ortholog_rate, args.num_dups)
+            run_kmer_sweep(genome_sizes, reps, args.threads, args.kmers, args.window_size, args.step_size, args.scale, args.ortholog_rate, args.num_transfers)
         if args.sweep_param in ['scale', 'all']:
-            run_scale_sweep(genome_sizes, reps, args.threads, args.scales, args.window_size, args.step_size, args.kmer, args.ortholog_rate, args.num_dups)
+            run_scale_sweep(genome_sizes, reps, args.threads, args.scales, args.window_size, args.step_size, args.kmer, args.ortholog_rate, args.num_transfers)
         if args.sweep_param in ['window', 'all']:
-            run_window_sweep(genome_sizes, reps, args.threads, args.window_sizes, args.step_size, args.kmer, args.scale, args.ortholog_rate, args.num_dups)
+            run_window_sweep(genome_sizes, reps, args.threads, args.window_sizes, args.step_size, args.kmer, args.scale, args.ortholog_rate, args.num_transfers)
         if args.sweep_param in ['step', 'all']:
-            run_step_sweep(genome_sizes, reps, args.threads, args.window_size, args.step_sizes, args.kmer, args.scale, args.ortholog_rate, args.num_dups)
+            run_step_sweep(genome_sizes, reps, args.threads, args.window_size, args.step_sizes, args.kmer, args.scale, args.ortholog_rate, args.num_transfers)
         return
 
     # Standard comparative benchmark if sweep_param is 'none'
@@ -517,14 +524,14 @@ def main():
     all_results = []
     for g_size in genome_sizes:
         chrom_sizes = {f'chr{i}': g_size // 5 for i in range(1, 6)}
-        n_dups = args.num_dups if args.num_dups else max(10, g_size // 1_000_000)
+        n_dups = args.num_transfers if args.num_transfers else max(10, g_size // 1_000_000)
 
         for rep in range(1, reps + 1):
-            print(f">>> [Genome Size: {g_size:,} bp | Rep {rep}/{reps} | SDs: {n_dups}] <<<")
-            true_intervals, fasta_path = sim_generate_genome(chrom_sizes, num_dups=n_dups, ortholog_rate=args.ortholog_rate, out_fasta="sim.fa")
+            print(f">>> [Genome Size: {g_size:,} bp | Rep {rep}/{reps} | Transfer events: {n_dups}] <<<")
+            true_intervals, fasta_path, genome_paths = sim_generate_genome(chrom_sizes, num_dups=n_dups, ortholog_rate=args.ortholog_rate, out_fasta="sim.fa")
 
             # 1. Segtrace
-            st_res = sim_run_segtrace(fasta_path, true_intervals, threads=args.threads, kmer=args.kmer, window_size=args.window_size, step_size=args.step_size, scale=args.scale)
+            st_res = sim_run_segtrace(genome_paths, true_intervals, threads=args.threads, kmer=args.kmer, window_size=args.window_size, step_size=args.step_size, scale=args.scale)
             st_res['GenomeSize'], st_res['Rep'] = g_size, rep
             all_results.append(st_res)
             print(f"  [Segtrace] Time: {st_res['Time(s)']:.2f}s | BP F1: {st_res['F1_bp']*100:.2f}% | Frag F1: {st_res['F1_frag']*100:.2f}%")

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-cmp_core.py - Core evaluation engine for Segmental Duplication (SD) analysis.
+cmp_core.py - Core evaluation engine for shared-segment transfer analysis.
 
 Provides high-speed base-pair footprint calculations and 1D fragment reciprocal overlap (50%).
 """
@@ -26,11 +26,12 @@ def parse_bed_intervals(filepath):
                 continue
             p = line.strip().split()
             if len(p) >= 3:
-                c1 = p[0].split('-')[-1] if '-' in p[0] and not p[0].startswith('chr') else p[0]
+                # Keep chrom names verbatim: "genome-chrom" identifies the
+                # source genome and must not be conflated across genomes.
                 s1 = _to_int_or_none(p[1])
                 e1 = _to_int_or_none(p[2])
                 if s1 is not None and e1 is not None and e1 > s1:
-                    intervals.append((c1, s1, e1))
+                    intervals.append((p[0], s1, e1))
 
             # Parse second interval only when line is BEDPE-like:
             # fields 4-6 must be (chrom, start, end) with valid coordinates.
@@ -38,8 +39,7 @@ def parse_bed_intervals(filepath):
                 s2 = _to_int_or_none(p[4])
                 e2 = _to_int_or_none(p[5])
                 if s2 is not None and e2 is not None and e2 > s2:
-                    c2 = p[3].split('-')[-1] if '-' in p[3] and not p[3].startswith('chr') else p[3]
-                    intervals.append((c2, s2, e2))
+                    intervals.append((p[3], s2, e2))
     return list(set(intervals))
 
 def merge_intervals_by_chrom(intervals):

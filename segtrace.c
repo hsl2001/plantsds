@@ -14,8 +14,10 @@ KSEQ_INIT(gzFile, gzread)
 // ==============================================================
 
 void print_usage(void) {
-  printf("Segtrace: Segmental Duplication Tracer\n\n"
-         "Usage: segtrace [options] fasta1 [fasta2 ...]\n\n"
+  printf("Segtrace: Segment Transfer Tracing\n\n"
+         "Finds segments shared across genomes\n"
+         "Each input FASTA file is one genome.\n\n"
+         "Usage: segtrace [options] genome1.fa [genome2.fa ...]\n\n"
          "Options:\n"
          "  -k: kmer size (default: 17)\n"
          "  -s: scale factor (default: 16)\n"
@@ -123,11 +125,6 @@ int main(int argc, char **argv) {
   size_t n_filtered =
       filter_regions_by_copy_count(dup_regions, n_merged, min_copies);
 
-  /* Boundary windows match with as little as ~min_shared*scale bp of true
-   * overlap, so each merged locus over-extends by up to ~window_size per
-   * side. Trim the coverage-1 margin (step) plus the minimum-evidence
-   * margin (4*scale bp, needed to observe >=2 shared sketch hashes),
-   * capped at window/2 so 2-window loci survive. */
   size_t trim = step_size + 4 * (size_t)def_scale;
   if (trim > window_size / 2)
     trim = window_size / 2;
