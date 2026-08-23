@@ -2,8 +2,7 @@
 """
 cmp_core.py - Core evaluation engine for Segmental Duplication (SD) analysis.
 
-Provides high-speed Base-Pair (BP) footprint calculations, 1D fragment reciprocal overlap (50%),
-and binary-search accelerated 2D fragment pair evaluations.
+Provides high-speed base-pair footprint calculations and 1D fragment reciprocal overlap (50%).
 """
 
 import os

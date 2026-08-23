@@ -15,6 +15,7 @@ import os
 import time
 import shutil
 import argparse
+import sys
 import numpy as np
 import pandas as pd
 
@@ -95,31 +96,43 @@ def evaluate_caller_output(bed_path, true_intervals, exec_time):
         'Time(s)': exec_time
     }
 
-def sim_run_segtrace(fasta_path, true_intervals, threads=8, kmer=17, window_size=1024, step_size=0, scale=16):
+def sim_run_segtrace(fasta_path, true_intervals, threads=8, kmer=17,
+                     window_size=1024, step_size=0, scale=16):
     """Runs Segtrace with specified parameters and measures Time & Peak RSS Memory (MB)."""
     out_prefix = "sim_out"
     segtrace_bin = "./segtrace" if os.path.isfile("./segtrace") else "./segtrace/segtrace"
     cmd = [
-        "/usr/bin/time", "-f", "%M",
         segtrace_bin,
         "-k", str(kmer),
         "-w", str(window_size),
         "-t", str(step_size),
         "-s", str(scale),
         "-p", str(threads),
-        fasta_path,
         "-o", out_prefix
     ]
+    cmd.append(fasta_path)
+
+    if sys.platform == "darwin":
+        profile_cmd = ["/usr/bin/time", "-l", *cmd]
+    else:
+        profile_cmd = ["/usr/bin/time", "-f", "%M", *cmd]
+
     t0 = time.perf_counter()
-    proc = subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+    proc = subprocess.run(profile_cmd, check=True, stdout=subprocess.DEVNULL,
+                          stderr=subprocess.PIPE, text=True)
     t_elapsed = time.perf_counter() - t0
     try:
-        mem_kb = int(proc.stderr.strip().splitlines()[-1])
-        mem_mb = mem_kb / 1024.0
+        if sys.platform == "darwin":
+            mem_bytes = next(int(line.split()[0]) for line in proc.stderr.splitlines()
+                             if "maximum resident set size" in line)
+            mem_mb = mem_bytes / (1024.0 * 1024.0)
+        else:
+            mem_mb = int(proc.stderr.strip().splitlines()[-1]) / 1024.0
     except Exception:
         mem_mb = 0.0
 
-    res = evaluate_caller_output(f"{out_prefix}.dup.bed", true_intervals, t_elapsed)
+    res = evaluate_caller_output(f"{out_prefix}.dup.bed", true_intervals,
+                                 t_elapsed)
     res['Tool'] = 'Segtrace'
     res['kmer'] = kmer
     res['window_size'] = window_size

@@ -52,7 +52,7 @@ int main(int argc, char **argv) {
 
   ketopt_t opt = KETOPT_INIT;
   int c;
-  while ((c = ketopt(&opt, argc, argv, 1, "k:s:w:t:b:c:o:p:mh", 0)) >= 0) {
+    while ((c = ketopt(&opt, argc, argv, 1, "k:s:w:t:b:c:o:p:mh", 0)) >= 0) {
     if (c == 'h') {
       print_usage();
       return 0;
@@ -111,7 +111,7 @@ int main(int argc, char **argv) {
           "[segtrace] Discovering candidates and computing distances...\n");
   CandidateGraph graph =
       discover_and_compute(gw.all_hashes, gw.coords, gw.num_sketches,
-                           window_size, step_size, n_threads, r.hash_window);
+                 window_size, step_size, n_threads, r.hash_window);
 
   free(gw.all_hashes);
 
@@ -644,8 +644,10 @@ void build_duplicate_loci(const CandidateGraph *graph, size_t num_windows,
     size_t start = (size_t)window_idx * step_size;
     size_t end = start + window_size;
 
-    if (n_regions > 0 && seq_id == previous_seq &&
-        window_idx - previous_window <= MAX_COLLINEAR_LOOKAHEAD) {
+    int merge = n_regions > 0 && seq_id == previous_seq &&
+          window_idx - previous_window <= MAX_COLLINEAR_LOOKAHEAD;
+
+    if (merge) {
       regions[n_regions - 1].end = end;
     } else {
       DA_PUSH(regions, n_regions, cap_regions,
@@ -787,9 +789,9 @@ void write_dup_bed(const char *out_prefix, const SegtraceDupRegion *dup_regions,
   for (size_t k = 0; k < n_merged; k++) {
     if (dup_regions[k].end - dup_regions[k].start >= min_sd_len) {
       uint32_t seq_i = dup_regions[k].seq_id;
-      fprintf(out_bed, "%s-%s\t%zu\t%zu\t%u\n", seq_lens[seq_i].genome,
+                  fprintf(out_bed, "%s-%s\t%zu\t%zu\t%u\n", seq_lens[seq_i].genome,
               seq_lens[seq_i].seq, dup_regions[k].start, dup_regions[k].end,
-              dup_regions[k].cluster_id);
+                    dup_regions[k].cluster_id);
     }
   }
   fclose(out_bed);
