@@ -48,15 +48,11 @@ extern "C" {
 
 #define NUM_PARTITIONS 1024
 #define BATCH_PARTITIONS 256
-#define MAX_KMER_FREQ 16
+#define MAX_KMER_FREQ 256
 #define MAX_PAIR_COMPARISONS 2
 #define MAX_COLLINEAR_LOOKAHEAD 8
 #define MIN_SD_LEN 1000
-#define MIN_IDENTITY 0.8
-
-#define CANDIDATE_SCORE_SHIFT 28
-#define CANDIDATE_WINDOW_MASK ((UINT32_C(1) << CANDIDATE_SCORE_SHIFT) - 1)
-#define INTERNAL_DUPLICATION_ID (UINT32_MAX - 1)
+#define SIMILARITY 0.8
 
 #define BLOOM_SIZE_BITS (1 << 26)
 #define BLOOM_SIZE_BYTES (BLOOM_SIZE_BITS / 8)
@@ -68,12 +64,13 @@ extern "C" {
 typedef struct {
   uint32_t hash_window;
   uint64_t hash_seed;
-  int8_t base_lookup[256];
+  const int8_t *base_lookup;
 } Segtrace;
 
 typedef struct {
   uint32_t *parent;
   uint8_t *rank;
+  size_t n;
 } UnionFind;
 
 typedef struct {
@@ -82,7 +79,6 @@ typedef struct {
   size_t start;
   size_t end;
   uint32_t cluster_id;
-  uint32_t partner_id;
 } SegtraceDupRegion;
 
 typedef struct {
@@ -102,12 +98,6 @@ typedef struct {
   uint32_t a;
   uint32_t b;
 } CandidatePair;
-
-typedef struct {
-  CandidatePair **pairs;
-  size_t *counts;
-  int n_threads;
-} CandidateGraph;
 
 typedef struct {
   uint32_t hash;
@@ -134,12 +124,14 @@ typedef struct {
 
 typedef struct {
   const Segtrace *r;
+  const int8_t *base_lookup;
   uint32_t threshold;
   size_t window_size;
   size_t step_size;
   size_t min_bases;
   uint32_t seq_id;
   const uint8_t *seq_ptr;
+  size_t seq_len;
   size_t chunk_start_idx;
   size_t chunk_end_idx;
   uint32_t *hashes;
@@ -156,6 +148,7 @@ typedef struct {
   size_t n_windows;
   size_t window_size;
   size_t step_size;
+  uint32_t kmer_size;
   double p_kmer;
   PartitionBucket *buckets;
   uint8_t **t_bloom;
@@ -171,14 +164,16 @@ typedef struct {
 void kt_for(int n_threads, void (*func)(void *, long, int), void *data, long n);
 
 // 1. CLI & UTILITIES
+void print_usage(void);
 void get_basename(const char *filename, char *basename, size_t size);
 uint32_t mix_hash(uint64_t hash_value, uint64_t seed);
 uint64_t encode_pair(uint32_t a, uint32_t b);
-int bloom_test_and_set(uint8_t *bloom, uint64_t key);
+int bloom_test_and_set(uint8_t *bloom, uint64_t key, uint32_t mask);
 int compare_uint32(const void *a, const void *b);
 int compare_hash_entry(const void *a, const void *b);
 
 // 2. CORE & SKETCHING
+void init_segtrace(Segtrace *r, size_t hash_window, int filter_masked);
 void init_unionfind(UnionFind *uf, size_t n);
 uint32_t find_unionfind(UnionFind *uf, uint32_t x);
 void union_unionfind(UnionFind *uf, uint32_t a, uint32_t b);
@@ -191,22 +186,20 @@ GlobalWindows extract_all_windows(char **files, int num_files,
                                   size_t min_bases, int n_threads);
 
 // 4. DISCOVERY & DISTANCE COMPUTATION
-CandidateGraph discover_and_compute(const uint32_t *all_hashes,
-                                    const WindowCoord *coords,
-                                    size_t n_windows, size_t window_size,
-                                    size_t step_size, int n_threads,
-                                    uint32_t kmer_size);
-void free_candidate_graph(CandidateGraph *graph);
+void discover_and_compute(const uint32_t *all_hashes, const WindowCoord *coords,
+                          size_t n_windows, size_t window_size,
+                          size_t step_size, int n_threads, uint32_t kmer_size,
+                          UnionFind *uf);
+void discover_compute_worker(void *data, long idx, int tid);
 
 // 5. REGION CLUSTERING, COPY FILTERING & OUTPUT
-void build_duplicate_loci(const CandidateGraph *graph, size_t num_windows,
-                          WindowCoord *coords, const GenomeSeqLen *seq_lens,
-                          size_t step_size, size_t window_size,
-                          SegtraceDupRegion **out_regions,
-                          size_t *out_n_regions);
-void cluster_duplicate_loci(const CandidateGraph *graph,
-                            const WindowCoord *coords,
-                            SegtraceDupRegion *regions, size_t n_regions);
+void build_duplicate_regions(UnionFind *uf, size_t num_sketches,
+                             const WindowCoord *coords,
+                             const GenomeSeqLen *seq_lens, size_t step_size,
+                             size_t window_size,
+                             SegtraceDupRegion **out_regions,
+                             size_t *out_n_regions);
+size_t merge_dup_regions(SegtraceDupRegion *regions, size_t n);
 size_t filter_regions_by_copy_count(SegtraceDupRegion *regions, size_t n,
                                     uint32_t min_copies);
 void write_dup_bed(const char *out_prefix, const SegtraceDupRegion *dup_regions,

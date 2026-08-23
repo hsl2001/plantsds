@@ -141,8 +141,7 @@ def sim_run_segtrace(fasta_path, true_intervals, threads=8, kmer=17,
         mem_mb = 0.0
 
     res = evaluate_caller_output(
-        f"{out_prefix}.dup.bed", true_intervals, t_elapsed,
-        boundary_tolerance=window_size // 4
+        f"{out_prefix}.dup.bed", true_intervals, t_elapsed
     )
     res['Tool'] = 'Segtrace'
     res['kmer'] = kmer
