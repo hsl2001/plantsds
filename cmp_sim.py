@@ -495,25 +495,6 @@ def main():
             run_step_sweep(genome_sizes, reps, args.threads, args.window_size, args.step_sizes, args.kmer, args.scale, args.ortholog_rate, args.num_dups)
         return
 
-    parser.add_argument("--no-sedef", action='store_true', help="Skip SEDEF benchmark")
-    parser.add_argument("--no-biser", action='store_true', help="Skip BISER benchmark")
-    parser.add_argument("--out-csv", default="evaluation_results.csv", help="Output results CSV")
-    parser.add_argument("--out-plot", default="evaluation_plots.png", help="Output plot PNG")
-    parser.add_argument("--no-plot", action='store_true', help="Disable plotting")
-    args = parser.parse_args()
-
-    genome_sizes = args.genome_sizes if args.genome_sizes else ([args.genome_size] if args.genome_size else [10_000_000, 20_000_000])
-    reps = max(1, args.reps)
-
-    if args.sweep_param != 'none':
-        if args.sweep_param in ['window_step', 'all']:
-            run_window_step_sweep(genome_sizes, reps, args.threads, args.window_sizes, args.step_ratios, args.kmer, args.scale, args.ortholog_rate, args.num_dups)
-        if args.sweep_param in ['kmer', 'all']:
-            run_kmer_sweep(genome_sizes, reps, args.threads, args.kmers, args.window_size, args.step_size, args.scale, args.ortholog_rate, args.num_dups)
-        if args.sweep_param in ['scale', 'all']:
-            run_scale_sweep(genome_sizes, reps, args.threads, args.scales, args.window_size, args.step_size, args.kmer, args.ortholog_rate, args.num_dups)
-        return
-
     # Standard comparative benchmark if sweep_param is 'none'
     biser_avail = not args.no_biser and (shutil.which("biser") is not None or os.path.isfile(os.path.expanduser("~/.local/bin/biser")))
     sedef_avail = not args.no_sedef and (os.path.isfile("sedef/sedef.sh") or shutil.which("sedef.sh") is not None)

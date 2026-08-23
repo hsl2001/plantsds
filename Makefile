@@ -4,13 +4,12 @@ LDFLAGS = -lm -lpthread -lz
 TARGET = segtrace
 SRCS = segtrace.c klib/kthread.c
 
-.PHONY: clean static
+.PHONY: all clean static
 
 $(TARGET): $(SRCS) segtrace.h
 	$(CC) $(CFLAGS) -o $(TARGET) $(SRCS) $(LDFLAGS)
 
-all: $(SRCS) segtrace.h
-	$(CC) $(CFLAGS) -o $(TARGET) $(SRCS) $(LDFLAGS)
+all: $(TARGET)
 
 static: $(SRCS) segtrace.h
 	$(CC) $(CFLAGS) -static -o $(TARGET) $(SRCS) $(LDFLAGS)

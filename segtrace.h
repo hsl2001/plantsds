@@ -68,14 +68,12 @@ extern "C" {
 typedef struct {
   uint32_t hash_window;
   uint64_t hash_seed;
-  int filter_masked;
-  const int8_t *base_lookup;
+  int8_t base_lookup[256];
 } Segtrace;
 
 typedef struct {
   uint32_t *parent;
   uint8_t *rank;
-  size_t n;
 } UnionFind;
 
 typedef struct {
@@ -136,14 +134,12 @@ typedef struct {
 
 typedef struct {
   const Segtrace *r;
-  const int8_t *base_lookup;
   uint32_t threshold;
   size_t window_size;
   size_t step_size;
   size_t min_bases;
   uint32_t seq_id;
   const uint8_t *seq_ptr;
-  size_t seq_len;
   size_t chunk_start_idx;
   size_t chunk_end_idx;
   uint32_t *hashes;
@@ -160,7 +156,6 @@ typedef struct {
   size_t n_windows;
   size_t window_size;
   size_t step_size;
-  uint32_t kmer_size;
   double p_kmer;
   PartitionBucket *buckets;
   uint8_t **t_bloom;
@@ -170,25 +165,20 @@ typedef struct {
   size_t batch_start;
 } DiscoverComputeData;
 
-extern const int8_t BASE_LOOKUP[256];
-extern const int8_t BASE_LOOKUP_NO_MASK[256];
-
 // ==============================================================
 // FUNCTION DECLARATIONS
 // ==============================================================
 void kt_for(int n_threads, void (*func)(void *, long, int), void *data, long n);
 
 // 1. CLI & UTILITIES
-void print_usage(void);
 void get_basename(const char *filename, char *basename, size_t size);
 uint32_t mix_hash(uint64_t hash_value, uint64_t seed);
 uint64_t encode_pair(uint32_t a, uint32_t b);
-int bloom_test_and_set(uint8_t *bloom, uint64_t key, uint32_t mask);
+int bloom_test_and_set(uint8_t *bloom, uint64_t key);
 int compare_uint32(const void *a, const void *b);
 int compare_hash_entry(const void *a, const void *b);
 
 // 2. CORE & SKETCHING
-void init_segtrace(Segtrace *r, size_t hash_window, int filter_masked);
 void init_unionfind(UnionFind *uf, size_t n);
 uint32_t find_unionfind(UnionFind *uf, uint32_t x);
 void union_unionfind(UnionFind *uf, uint32_t a, uint32_t b);
@@ -206,7 +196,6 @@ CandidateGraph discover_and_compute(const uint32_t *all_hashes,
                                     size_t n_windows, size_t window_size,
                                     size_t step_size, int n_threads,
                                     uint32_t kmer_size);
-void discover_compute_worker(void *data, long idx, int tid);
 void free_candidate_graph(CandidateGraph *graph);
 
 // 5. REGION CLUSTERING, COPY FILTERING & OUTPUT
