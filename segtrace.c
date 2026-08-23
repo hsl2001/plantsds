@@ -25,8 +25,8 @@ void print_usage(void) {
          "  -t: step size in bp (default: 0 [auto: 33%% of window size])\n"
          "  -b: minimum valid bases per window (default: 0 [auto: 25%% of "
          "window size])\n"
-         "  -c: minimum copies per genome/file to report (default: 2 "
-         "[1=duplication map, >=3=polyploid])\n"
+     "  -c: minimum copies per input genome/file (default: 2); each "
+     "reported cluster has at least 2 total copies\n"
          "  -m: exclude soft-masked (lowercase) bases (default: treat as "
          "valid)\n"
          "  -o: output file prefix (default: segtrace)\n"
@@ -678,24 +678,30 @@ size_t merge_dup_regions(SegtraceDupRegion *regions, size_t n) {
 
 size_t filter_regions_by_copy_count(SegtraceDupRegion *regions, size_t n,
                                     uint32_t min_copies) {
-  if (n == 0 || min_copies <= 1)
+  if (n == 0)
     return n;
 
   size_t out_count = 0;
   size_t i = 0;
   while (i < n) {
-    size_t j = i + 1;
-    while (j < n && regions[j].cluster_id == regions[i].cluster_id &&
-           regions[j].file_id == regions[i].file_id) {
-      j++;
-    }
-    size_t copy_count = j - i;
-    if (copy_count >= min_copies) {
-      for (size_t k = i; k < j; k++) {
-        regions[out_count++] = regions[k];
+    size_t cluster_end = i + 1;
+    while (cluster_end < n &&
+           regions[cluster_end].cluster_id == regions[i].cluster_id)
+      cluster_end++;
+    if (cluster_end - i >= 2) {
+      for (size_t file_start = i; file_start < cluster_end;) {
+        size_t file_end = file_start + 1;
+        while (file_end < cluster_end &&
+               regions[file_end].file_id == regions[file_start].file_id)
+          file_end++;
+        if (file_end - file_start >= min_copies) {
+          for (size_t k = file_start; k < file_end; k++)
+            regions[out_count++] = regions[k];
+        }
+        file_start = file_end;
       }
     }
-    i = j;
+    i = cluster_end;
   }
   return out_count;
 }
