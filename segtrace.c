@@ -6,13 +6,14 @@
 #include "klib/kseq.h"
 #include "segtrace.h"
 
-/* Reader initialization */
+/* kseq 리더 인스턴스화: gzread 기반이라 일반/gzip FASTA 모두 읽을 수 있다 */
 KSEQ_INIT(gzFile, gzread)
 
 // ==============================================================
 // SECTION 1: ENTRY POINT & CLI PARSING
 // ==============================================================
 
+/* 명령행 사용법과 각 옵션의 기본값을 출력한다 */
 static void print_usage(void) {
   printf("Segtrace: Segmental Tracer\n\n"
          "Usage: segtrace [options] fasta1 [fasta2 ...]\n\n"
@@ -36,6 +37,7 @@ int main(int argc, char **argv) {
     print_usage();
     return 1;
   }
+  /* --help는 위치와 상관없이 동작하도록 전체 인자를 먼저 훑는다 */
   for (int i = 1; i < argc; i++) {
     if (strcmp(argv[i], "--help") == 0) {
       print_usage();
@@ -43,6 +45,12 @@ int main(int argc, char **argv) {
     }
   }
 
+  /* 파라미터 기본값:
+   * kmer_size  = ntHash k-mer 길이
+   * scale      = 스케치 축소율 (해시값 하위 1/scale만 샘플링)
+   * window/step/min_bases = 윈도우 크기, 이동 간격, 최소 유효 염기 수
+   *   (0이면 윈도우 크기에서 자동 유도)
+   * min_copies = 파일(유전체)당 보고할 최소 복제 수 */
   uint32_t kmer_size = 17;
   uint64_t scale = 16;
   size_t window_size = 1024, step_size = 0, min_bases = 0;
@@ -50,6 +58,7 @@ int main(int argc, char **argv) {
   const char *out_prefix = "segtrace";
   int n_threads = 8, filter_masked = 0;
 
+  /* 단일 대시 옵션 파싱 (ketopt: getopt의 경량 대체) */
   ketopt_t opt = KETOPT_INIT;
   int c;
     while ((c = ketopt(&opt, argc, argv, 1, "k:s:w:t:b:c:o:p:mh", 0)) >= 0) {
@@ -80,6 +89,9 @@ int main(int argc, char **argv) {
     else
       return 1;
   }
+  /* 자동 파라미터 결정:
+   * step_size는 윈도우의 1/3 (인접 윈도우가 3배 중첩),
+   * min_bases는 윈도우의 1/4 (N이 75% 이상인 윈도우는 스케치하지 않음) */
   if (min_copies < 1)
     min_copies = 1;
   if (step_size == 0)
@@ -94,6 +106,9 @@ int main(int argc, char **argv) {
   int num_files = argc - opt.ind;
   char **files = &argv[opt.ind];
 
+  /* 염기 -> 2bit 코드(A=0,C=1,G=2,T=3) 룩업 테이블 구성.
+   * -1은 N 등 유효하지 않은 염기. -m 옵션이 없으면 소문자(soft-masked)도
+   * 유효 염기로 취급한다. hash_seed=42는 스케치 재현성을 위한 고정 시드. */
   Segtrace r = {.hash_window = kmer_size, .hash_seed = 42};
   memset(r.base_lookup, -1, sizeof(r.base_lookup));
   for (int8_t code = 0; code < 4; code++) {
@@ -103,30 +118,36 @@ int main(int argc, char **argv) {
       r.base_lookup[base + ('a' - 'A')] = code;
   }
 
+  /* [1단계] 모든 FASTA를 윈도우 단위로 나누고 각 윈도우의 스케치(해시 집합) 추출 */
   GlobalWindows gw =
       extract_all_windows(files, num_files, &r, scale, window_size,
                           step_size, min_bases, n_threads);
 
+  /* [2단계] 해시를 공유하는 윈도우 쌍을 후보로 찾고 유사도(공유 해시 수) 계산 */
   fprintf(stderr,
           "[segtrace] Discovering candidates and computing distances...\n");
   CandidateGraph graph =
       discover_and_compute(gw.all_hashes, gw.coords, gw.num_sketches,
                  window_size, step_size, n_threads, r.hash_window);
 
-  free(gw.all_hashes);
+  free(gw.all_hashes); /* 이후 단계에서는 원본 해시 배열이 필요 없음 */
 
+  /* [3단계] 후보에 포함된 윈도우를 같은 서열 내에서 연속 구간(locus)으로 병합 */
   SegtraceDupRegion *dup_regions = NULL;
   size_t n_dup_regions = 0;
   build_duplicate_loci(&graph, gw.num_sketches, gw.coords, gw.seq_lens,
                        step_size, window_size, &dup_regions, &n_dup_regions);
+  /* [4단계] 유사 구간 쌍을 union-find로 묶어 클러스터(복제 패밀리) id 부여 */
   cluster_duplicate_loci(&graph, gw.coords, dup_regions, n_dup_regions);
   free_candidate_graph(&graph);
 
   free(gw.coords);
 
+  /* [5단계] 유전체당 복제 수(min_copies) 미만인 클러스터 그룹 제거 */
   size_t n_filtered =
       filter_regions_by_copy_count(dup_regions, n_dup_regions, min_copies);
 
+  /* [6단계] BED 형식으로 출력 (최소 SD 길이 미만 구간은 제외) */
   write_dup_bed(out_prefix, dup_regions, n_filtered, gw.seq_lens,
                 window_size < MIN_SD_LEN ? window_size : MIN_SD_LEN);
 
@@ -143,16 +164,21 @@ int main(int argc, char **argv) {
 // SECTION 2: ROLLING NTHASH & WINDOW EXTRACTION
 // ==============================================================
 
+/* 64비트 순환 좌회전. (64 - n) & 63 트릭으로 n=0일 때 64비트 시프트라는
+ * 정의되지 않은 동작(UB)을 회피한다 */
 static inline uint64_t rol64(uint64_t v, unsigned int n) {
   n &= 63;
   return (v << n) | (v >> ((64 - n) & 63));
 }
 
+/* 64비트 순환 우회전 (역상보 롤링 해시 갱신용) */
 static inline uint64_t ror64(uint64_t v, unsigned int n) {
   n &= 63;
   return (v >> n) | (v << ((64 - n) & 63));
 }
 
+/* ntHash 염기별 64비트 시드 테이블. 각 염기는 이 값을 k-mer 내 위치에 따라
+ * 순환회전시켜 XOR 하는 방식으로 해시에 반영된다 */
 static const uint64_t NTHASH_H[4] = {
     0x3c8bf4f53c8bf4f5ULL, // A
     0x04c903a704c903a7ULL, // C
@@ -160,6 +186,12 @@ static const uint64_t NTHASH_H[4] = {
     0x2e0600d3fd09e083ULL  // T
 };
 
+/* 윈도우 하나의 스케치(해시 집합) 추출.
+ * ntHash 롤링 해시로 각 k-mer의 정방향/역상보 해시를 염기당 O(1)에 갱신하고,
+ * 정규(canonical) 해시가 threshold 미만인 k-mer만 샘플링한다.
+ * (threshold = UINT32_MAX/scale이므로 전체의 1/scale. minimizer처럼 서열 내용과
+ *  무관하게 해시값 기준으로 선택하므로 두 서열에서 같은 k-mer가 선택됨이 보장됨)
+ * 채택된 해시는 정렬+중복 제거 후 out_hashes에 저장 (최대 2048개). */
 static inline void extract_hash_direct(const Segtrace *r, uint32_t *out_hashes,
                                        size_t *out_size, uint32_t threshold,
                                        const uint8_t *seq, size_t len) {
@@ -170,12 +202,13 @@ static inline void extract_hash_direct(const Segtrace *r, uint32_t *out_hashes,
   }
 
   uint64_t f_hash = 0, r_hash = 0;
-  size_t valid_len = 0;
+  size_t valid_len = 0; /* 현재 위치까지 연속으로 유효한 염기 수 */
   size_t count = 0;
 
   for (size_t i = 0; i < len; i++) {
     int8_t b = r->base_lookup[seq[i]];
     if (b < 0) {
+      /* N 등 무효 염기: 롤링 상태를 리셋하고 k-mer 누적을 다시 시작 */
       valid_len = 0;
       f_hash = 0;
       r_hash = 0;
@@ -183,11 +216,15 @@ static inline void extract_hash_direct(const Segtrace *r, uint32_t *out_hashes,
     }
 
     if (valid_len < k) {
+      /* 첫 k-mer 구축 단계: 들어온 염기를 위치에 맞게 회전시켜 XOR.
+       * b ^ 3은 상보 염기(A<->T, C<->G) */
       int8_t b_rc = b ^ 3;
       f_hash ^= rol64(NTHASH_H[b], k - 1 - (uint32_t)valid_len);
       r_hash ^= rol64(NTHASH_H[b_rc], (uint32_t)valid_len);
       valid_len++;
     } else {
+      /* 롤링 갱신: 윈도우에서 빠지는 염기(i-k)의 기여를 제거하고 새로
+       * 들어오는 염기(i)의 기여를 추가. 전체를 다시 해싱하지 않아 O(1) */
       int8_t b_out = r->base_lookup[seq[i - k]];
       f_hash = rol64(f_hash, 1) ^ rol64(NTHASH_H[b_out], k) ^ NTHASH_H[b];
       r_hash = ror64(r_hash, 1) ^ ror64(NTHASH_H[b_out ^ 3], 1) ^
@@ -195,6 +232,9 @@ static inline void extract_hash_direct(const Segtrace *r, uint32_t *out_hashes,
     }
 
     if (valid_len >= k) {
+      /* 정방향/역상보 중 작은 값을 정규 해시로 사용해 가닥 방향과 무관하게
+       * 동일 k-mer에 동일 해시를 부여. mix_hash로 엔트로피를 32비트 전체에
+       * 퍼뜨린 뒤 threshold 미만이면 스케치에 채택 */
       uint64_t canonical = (f_hash < r_hash) ? f_hash : r_hash;
       uint32_t h = mix_hash(canonical, r->hash_seed);
       if (h < threshold && count < 2048) {
@@ -203,6 +243,7 @@ static inline void extract_hash_direct(const Segtrace *r, uint32_t *out_hashes,
     }
   }
 
+  /* 정렬 + 중복 제거: 이후 두 스케치의 교집합을 merge-join으로 세기 위한 전처리 */
   if (count > 1) {
     qsort(out_hashes, count, sizeof(uint32_t), compare_uint32);
     size_t u = 0;
@@ -215,9 +256,14 @@ static inline void extract_hash_direct(const Segtrace *r, uint32_t *out_hashes,
   *out_size = count;
 }
 
+/* kt_for 스레드 작업: 염색체의 한 chunk 구간을 담당해 윈도우를 step_size씩
+ * 이동하며 스케치를 만든다. 스레드 간 충돌을 피하기 위해 결과는 job 내부의
+ * 로컬 배열에 쌓고, 종료 후 메인 스레드가 전역 배열로 병합한다. */
 static void seq_chunk_worker(void *data, long i, int tid) {
   (void)tid;
   SeqChunkJob *job = &((SeqChunkJob *)data)[i];
+  /* chunk 시작 오프셋으로부터 전역 윈도우 인덱스 복원
+   * (chunk 크기가 step_size의 배수이므로 인덱스가 어긋나지 않음) */
   uint32_t current_window_idx =
       (uint32_t)(job->chunk_start_idx / job->step_size);
 
@@ -225,6 +271,7 @@ static void seq_chunk_worker(void *data, long i, int tid) {
 
   size_t idx = job->chunk_start_idx;
   size_t valid_bases = 0;
+  /* 첫 윈도우의 유효 염기 수만 직접 계산; 이후에는 아래에서 슬라이딩 갱신 */
   for (size_t j = 0; j < job->window_size; j++) {
     if (job->r->base_lookup[job->seq_ptr[idx + j]] >= 0)
       valid_bases++;
@@ -233,12 +280,14 @@ static void seq_chunk_worker(void *data, long i, int tid) {
   for (; idx + job->window_size <= job->chunk_end_idx;
        idx += job->step_size, current_window_idx++) {
 
+    /* 유효 염기가 부족한(N-rich) 윈도우는 스케치하지 않고 빈 상태로 기록 */
     size_t sketch_size = 0;
     if (valid_bases >= job->min_bases) {
       extract_hash_direct(job->r, local_hashes, &sketch_size, job->threshold,
                           job->seq_ptr + idx, job->window_size);
     }
 
+    /* 윈도우 메타데이터(서열 id, 윈도우 인덱스, 스케치 위치/크기) 기록 */
     DA_RESERVE(job->coords, job->cap_coords, job->num_coords + 1);
     WindowCoord *wc = &job->coords[job->num_coords++];
     wc->seq_id = job->seq_id;
@@ -253,6 +302,8 @@ static void seq_chunk_worker(void *data, long i, int tid) {
     }
     wc->sketch_offset = (uint32_t)h_idx;
 
+    /* 다음 윈도우를 위해 유효 염기 수를 슬라이딩 갱신:
+     * 앞에서 빠지는 step_size개를 빼고 뒤에서 들어오는 step_size개를 더함 */
     if (idx + job->step_size + job->window_size <= job->chunk_end_idx) {
       for (size_t k = 0; k < job->step_size; k++) {
         if (job->r->base_lookup[job->seq_ptr[idx + k]] >= 0)
@@ -265,6 +316,9 @@ static void seq_chunk_worker(void *data, long i, int tid) {
   }
 }
 
+/* 모든 입력 FASTA를 순회하며 전역 윈도우 테이블(gw.coords)과 전역 스케치
+ * 해시 테이블(gw.all_hashes)을 구축한다.
+ * threshold: 해시가 UINT32_MAX/scale 미만인 k-mer만 채택 (1/scale 샘플링) */
 GlobalWindows extract_all_windows(char **files, int num_files,
                                   const Segtrace *r, uint64_t scale,
                                   size_t window_size, size_t step_size,
@@ -308,6 +362,9 @@ GlobalWindows extract_all_windows(char **files, int num_files,
       DA_RESERVE(gw.all_hashes, gw.cap_all_hashes,
                  gw.num_all_hashes + (est_windows + 16) * 96);
 
+      /* 병렬화를 위해 염색체를 chunk로 분할.
+       * 스레드 수의 4배로 쪼개 부하 균형을 맞추고 최소 100kb를 보장하며,
+       * step_size의 배수로 맞춰 chunk 경계에서도 윈도우 인덱스가 어긋나지 않게 함 */
       size_t chunk_size = len / (n_threads * 4);
       if (chunk_size < 100000)
         chunk_size = 100000;
@@ -318,6 +375,8 @@ GlobalWindows extract_all_windows(char **files, int num_files,
 
       for (size_t c_start = 0; c_start <= len - window_size;
            c_start += chunk_size) {
+        /* chunk 끝을 window_size - step_size만큼 연장해 경계에 걸친 윈도우가
+         * 누락되지 않도록 한다 (인접 chunk와 겹침) */
         size_t c_end = c_start + chunk_size + window_size - step_size;
         if (c_end > len)
           c_end = len;
@@ -334,8 +393,11 @@ GlobalWindows extract_all_windows(char **files, int num_files,
                                          .chunk_end_idx = c_end};
       }
 
+      /* chunk들을 스레드 풀로 병렬 스케치 */
       kt_for(n_threads, seq_chunk_worker, jobs, num_jobs);
 
+      /* 각 chunk의 로컬 결과를 전역 배열로 병합.
+       * sketch_offset은 로컬 기준이므로 전역 해시 배열 기준으로 보정한다 */
       for (size_t j = 0; j < num_jobs; j++) {
         SeqChunkJob *job = &jobs[j];
         if (job->num_coords > 0) {
@@ -371,6 +433,8 @@ GlobalWindows extract_all_windows(char **files, int num_files,
 // SECTION 3: CANDIDATE DISCOVERY & DISTANCE COMPUTATION
 // ==============================================================
 
+/* 두 정렬된 스케치의 교집합 크기(공유 해시 개수)를 merge-join으로 계산.
+ * 이름은 dist지만 실제로는 유사도(클수록 유사)를 반환한다 */
 static inline size_t calculate_sketch_dist(const uint32_t *a, size_t n_a,
                                            const uint32_t *b, size_t n_b) {
   size_t i = 0, j = 0, shared = 0;
@@ -383,6 +447,7 @@ static inline size_t calculate_sketch_dist(const uint32_t *a, size_t n_a,
   return shared;
 }
 
+/* 윈도우 메타데이터에서 스케치 위치를 찾아 교집합 크기를 계산하는 래퍼 */
 static inline size_t calculate_window_dist(const uint32_t *all_hashes,
                                            const WindowCoord *wa,
                                            const WindowCoord *wb) {
@@ -390,6 +455,8 @@ static inline size_t calculate_window_dist(const uint32_t *all_hashes,
                                all_hashes + wb->sketch_offset, wb->sketch_size);
 }
 
+/* 두 윈도우가 같은 서열 위에서 좌표가 겹치는지 검사.
+ * 겹치는 윈도우는 서열이 본질적으로 같으므로 비교 대상에서 제외한다 */
 static inline int windows_overlap(const DiscoverComputeData *w, uint32_t wa,
                                   uint32_t wb) {
   if (w->coords[wa].seq_id != w->coords[wb].seq_id)
@@ -399,6 +466,7 @@ static inline int windows_overlap(const DiscoverComputeData *w, uint32_t wa,
   return window_distance * w->step_size < w->window_size;
 }
 
+/* 두 윈도우 중 더 큰 스케치 크기 반환 (유사도 정규화의 분모) */
 static inline size_t max_sketch_size(const DiscoverComputeData *w, uint32_t wa,
                                      uint32_t wb) {
   return w->coords[wa].sketch_size > w->coords[wb].sketch_size
@@ -406,6 +474,10 @@ static inline size_t max_sketch_size(const DiscoverComputeData *w, uint32_t wa,
              : w->coords[wb].sketch_size;
 }
 
+/* 매치로 인정하기 위한 최소 공유 해시 수.
+ * p_kmer = identity^k = "k-mer 하나가 두 서열 간에 보존될 확률"이므로
+ * 기대 공유 스케치 수는 대략 (스케치 크기) x p_kmer.
+ * 하한 3개를 둬 스케치가 작은 윈도우의 노이즈 매치를 걸러낸다 */
 static inline size_t required_shared(const DiscoverComputeData *w, uint32_t wa,
                                      uint32_t wb) {
   size_t max_size = max_sketch_size(w, wa, wb);
@@ -413,6 +485,8 @@ static inline size_t required_shared(const DiscoverComputeData *w, uint32_t wa,
   return min_shared < 3 ? 3 : min_shared;
 }
 
+/* collinear 탐색용 헬퍼: (wa, wb)가 배열 범위 안이고, 기대하는 서열 쌍
+ * (seq_a, seq_b)과 일치하며, 겹치지 않고, 유사도 기준을 통과하는지 검사 */
 static inline int matching_window_pair(const DiscoverComputeData *w,
                                        long long wa, long long wb,
                                        uint32_t seq_a, uint32_t seq_b) {
@@ -427,6 +501,10 @@ static inline int matching_window_pair(const DiscoverComputeData *w,
                                &w->coords[wb]) >= min_shared;
 }
 
+/* 후보 쌍 주변에 '연쇄적인(collinear)' 유사 윈도우가 더 있는지 검사.
+ * 진짜 segmental duplication은 여러 윈도우에 걸쳐 대각선 상에 연속으로
+ * 나타나므로, 고립된 단일 윈도우 매치(우연한 반복 서열 등)를 걸러내는 역할.
+ * dir_a/dir_b 조합으로 정방향/역방향, 양쪽 진행 방향의 대각선 4가지를 검사 */
 static inline int check_collinear_neighbor(const DiscoverComputeData *w,
                                            uint32_t wa, uint32_t wb) {
   uint32_t seq_a = w->coords[wa].seq_id;
@@ -435,7 +513,7 @@ static inline int check_collinear_neighbor(const DiscoverComputeData *w,
   const int dir_a[] = {1, -1, 1, -1};
   const int dir_b[] = {1, -1, -1, 1};
 
-  // Pass 1: Exact diagonals
+  // Pass 1: 정확한 대각선 (indel 없이 양쪽이 같은 step으로 진행하는 경우)
   for (int d = 0; d < 4; d++) {
     int da = dir_a[d], db = dir_b[d];
     for (int step = 1; step <= MAX_COLLINEAR_LOOKAHEAD; step++) {
@@ -446,7 +524,7 @@ static inline int check_collinear_neighbor(const DiscoverComputeData *w,
     }
   }
 
-  // Pass 2: Gapped / Indel lookahead
+  // Pass 2: indel이 낀 대각선 (양쪽의 진행 step이 다른 경우까지 허용)
   for (int d = 0; d < 4; d++) {
     int da = dir_a[d], db = dir_b[d];
     for (int step_a = 1; step_a <= MAX_COLLINEAR_LOOKAHEAD; step_a++) {
@@ -464,6 +542,9 @@ static inline int check_collinear_neighbor(const DiscoverComputeData *w,
   return 0;
 }
 
+/* 파티션(해시 구간) 하나를 담당하는 스레드 작업.
+ * 버킷을 (hash, window_id)로 정렬하면 같은 해시를 가진 윈도우들이 연속된
+ * run을 이루고, run 내부의 윈도우 쌍이 곧 "해시를 공유하는 후보 쌍"이다. */
 static void discover_compute_worker(void *data, long idx, int tid) {
   DiscoverComputeData *w_data = (DiscoverComputeData *)data;
   long p = (long)w_data->batch_start + idx;
@@ -473,6 +554,7 @@ static void discover_compute_worker(void *data, long idx, int tid) {
 
   qsort(b->entries, b->size, sizeof(HashWindowEntry), compare_hash_entry);
 
+  /* 같은 해시 값을 가진 run을 하나씩 순회 */
   size_t i = 0;
   while (i < b->size) {
     size_t j = i + 1;
@@ -480,28 +562,40 @@ static void discover_compute_worker(void *data, long idx, int tid) {
       j++;
     size_t run_len = j - i;
 
+    /* run이 너무 크면(초고빈도 k-mer, 저복잡도/반복 서열) 비교 폭발 방지를
+     * 위해 건너뛴다. 2 이상이어야 공유 쌍이 존재 */
     if (run_len >= 2 && run_len <= MAX_KMER_FREQ) {
+      /* 각 윈도우당 인접한 MAX_PAIR_COMPARISONS개의 이웃만 비교해
+       * run 내 비교 횟수를 선형으로 제한 (버스트 방지) */
       for (size_t a = i; a < j; a++) {
         size_t b_max =
             a + 1 + MAX_PAIR_COMPARISONS < j ? a + 1 + MAX_PAIR_COMPARISONS : j;
         for (size_t b_idx = a + 1; b_idx < b_max; b_idx++) {
           uint32_t wa = b->entries[a].window_id,
                    wb = b->entries[b_idx].window_id;
+          /* 같은 서열의 겹치는 윈도우끼리는 비교하지 않음 */
           if (windows_overlap(w_data, wa, wb))
             continue;
 
+          /* 같은 쌍이 다른 해시 run에서 반복 발견될 수 있으므로
+           * 스레드별 블룸필터로 중복 제거 */
           uint64_t pk = encode_pair(wa, wb);
           if (bloom_test_and_set(w_data->t_bloom[tid], pk))
             continue;
 
           size_t min_shared = required_shared(w_data, wa, wb);
 
+          /* 전체 스케치 교집합 크기로 유사도 산정. 기준 미달이거나
+           * collinear 이웃이 없으면(고립 매치면) 탈락 */
           size_t shared = calculate_window_dist(
               w_data->all_hashes, &w_data->coords[wa], &w_data->coords[wb]);
           if (shared < min_shared ||
               !check_collinear_neighbor(w_data, wa, wb))
             continue;
 
+          /* score = 공유 비율을 0~255로 정규화 (반올림 포함).
+           * 채택된 쌍은 윈도우 id 상위 4비트씩에 score를 끼워 넣어 저장한다
+           * (하위 28비트 = 윈도우 id, 상위 4비트 = score의 절반씩 a/b에 분산) */
           size_t max_size = max_sketch_size(w_data, wa, wb);
           uint32_t score =
               (uint32_t)((shared * UINT8_MAX + max_size / 2) / max_size);
@@ -518,12 +612,17 @@ static void discover_compute_worker(void *data, long idx, int tid) {
   }
 }
 
+/* 후보 쌍 탐색의 메인 드라이버.
+ * 32비트 해시 공간을 NUM_PARTITIONS개로 나누고 BATCH_PARTITIONS개씩 묶어
+ * 배치 처리해 메모리 사용량을 제한한다 (외부 정렬과 유사한 발상).
+ * 같은 해시는 항상 같은 파티션에 들어가므로 분할이 결과에 영향을 주지 않는다. */
 CandidateGraph discover_and_compute(const uint32_t *all_hashes,
                                     const WindowCoord *coords,
                                     size_t n_windows, size_t window_size,
                                     size_t step_size, int n_threads,
                                     uint32_t kmer_size) {
   if (n_windows > (size_t)CANDIDATE_WINDOW_MASK + 1) {
+    /* 쌍 인코딩이 윈도우 id에 28비트만 쓰므로 상한 검사 */
     fprintf(stderr, "[ERROR] Too many windows for candidate encoding\n");
     exit(1);
   }
@@ -534,6 +633,8 @@ CandidateGraph discover_and_compute(const uint32_t *all_hashes,
       .n_windows = n_windows,
       .window_size = window_size,
       .step_size = step_size,
+      /* p_kmer = identity^k: k-mer 하나가 두 서열 간에 보존될 확률.
+       * 공유 스케치 수의 기대치는 대략 (스케치 크기) x p_kmer */
       .p_kmer = pow(MIN_IDENTITY, (double)kmer_size),
       .buckets = calloc(NUM_PARTITIONS, sizeof(PartitionBucket)),
       .t_bloom = malloc(n_threads * sizeof(uint8_t *)),
@@ -545,10 +646,13 @@ CandidateGraph discover_and_compute(const uint32_t *all_hashes,
     fprintf(stderr, "[ERROR] Memory allocation failed\n");
     exit(1);
   }
+  /* 스레드별 블룸필터: 같은 윈도우 쌍의 중복 처리 방지 (락 없이 사용) */
   for (int t = 0; t < n_threads; t++)
     w.t_bloom[t] = calloc(BLOOM_SIZE_BYTES, 1);
 
   uint32_t part_size = (uint32_t)(UINT32_MAX / NUM_PARTITIONS);
+  /* 윈도우별로 "이번 배치까지 몇 번째 스케치 해시를 흘려보냈는지" 기록.
+   * 스케치가 정렬되어 있으므로 배치마다 처음부터 다시 훑지 않아도 된다 */
   uint16_t *win_curr_pos = calloc(n_windows, sizeof(uint16_t));
 
   for (size_t batch_start = 0; batch_start < NUM_PARTITIONS;
@@ -559,10 +663,13 @@ CandidateGraph discover_and_compute(const uint32_t *all_hashes,
 
     w.batch_start = batch_start;
     size_t batch_count = batch_end - batch_start;
+    /* 이번 배치가 담당하는 해시 상한 (마지막 배치는 UINT32_MAX까지) */
     uint32_t max_hash = (batch_end < NUM_PARTITIONS)
                             ? (uint32_t)(batch_end * part_size)
                             : UINT32_MAX;
 
+    /* 배치 범위에 속하는 해시들만 각 파티션 버킷에 분배.
+     * win_curr_pos 덕분에 윈도우당 amortized O(1)로 진행 */
     for (size_t win = 0; win < n_windows; win++) {
       uint32_t off = coords[win].sketch_offset;
       uint16_t sz = coords[win].sketch_size;
@@ -571,7 +678,7 @@ CandidateGraph discover_and_compute(const uint32_t *all_hashes,
       while (pos < sz) {
         uint32_t val = all_hashes[off + pos];
         if (val >= max_hash)
-          break;
+          break; /* 이후 해시는 다음 배치 소관 */
         size_t p = (size_t)(val / part_size);
         if (p >= NUM_PARTITIONS)
           p = NUM_PARTITIONS - 1;
@@ -582,8 +689,10 @@ CandidateGraph discover_and_compute(const uint32_t *all_hashes,
       win_curr_pos[win] = pos;
     }
 
+    /* 배치 내 파티션들을 병렬 처리 */
     kt_for(n_threads, discover_compute_worker, &w, (long)batch_count);
 
+    /* 배치가 끝난 버킷 메모리는 즉시 해제 */
     for (size_t p = batch_start; p < batch_end; p++) {
       free(w.buckets[p].entries);
     }
@@ -604,20 +713,28 @@ CandidateGraph discover_and_compute(const uint32_t *all_hashes,
 // SECTION 4: CLUSTERING, LOCUS MERGING & COPY FILTERING
 // ==============================================================
 
+/* 인코딩된 값에서 윈도우 id(하위 28비트) 추출 */
 static inline uint32_t candidate_window(uint32_t encoded) {
   return encoded & CANDIDATE_WINDOW_MASK;
 }
 
+/* a/b 상위 4비트에 나눠 담긴 8비트 score 복원 */
 static inline uint32_t candidate_score(CandidatePair pair) {
   return (pair.a >> CANDIDATE_SCORE_SHIFT) |
          ((pair.b >> CANDIDATE_SCORE_SHIFT) << 4);
 }
 
+/* 후보 쌍에 한 번이라도 등장한 윈도우들을 같은 서열 내 인접 윈도우끼리
+ * 하나의 연속 구간(locus)으로 병합한다.
+ * coords[].sketch_offset/size 필드를 재활용해:
+ *   sketch_size   = 후보 포함 여부 플래그
+ *   sketch_offset = 해당 윈도우가 속한 region 인덱스 */
 void build_duplicate_loci(const CandidateGraph *graph, size_t num_windows,
                           WindowCoord *coords, const GenomeSeqLen *seq_lens,
                           size_t step_size, size_t window_size,
                           SegtraceDupRegion **out_regions,
                           size_t *out_n_regions) {
+  /* 1) 마킹 초기화: 모든 윈도우를 "후보 아님" 상태로 */
   for (size_t i = 0; i < num_windows; i++) {
     coords[i].sketch_offset = UINT32_MAX;
     coords[i].sketch_size = 0;
@@ -630,6 +747,9 @@ void build_duplicate_loci(const CandidateGraph *graph, size_t num_windows,
     }
   }
 
+  /* 2) 마킹된 윈도우를 순서대로 스캔하며, 같은 서열에서 윈도우 인덱스 차이가
+   * MAX_COLLINEAR_LOOKAHEAD 이내면 같은 구간으로 병합.
+   * coords가 서열/인덱스 순으로 생성되므로 단순 선형 스캔으로 충분하다 */
   SegtraceDupRegion *regions = NULL;
   size_t n_regions = 0, cap_regions = 0;
   uint32_t previous_seq = UINT32_MAX;
@@ -667,6 +787,8 @@ void build_duplicate_loci(const CandidateGraph *graph, size_t num_windows,
   *out_n_regions = n_regions;
 }
 
+/* 정렬 기준: 클러스터 id -> 파일 -> 서열 -> 좌표 순.
+ * 이 정렬 덕분에 (클러스터, 파일) 그룹이 연속 배치되어 copy count 세기가 쉬워짐 */
 static int compare_dup_region_by_cluster_file(const void *a, const void *b) {
   const SegtraceDupRegion *ra = (const SegtraceDupRegion *)a,
                           *rb = (const SegtraceDupRegion *)b;
@@ -681,12 +803,18 @@ static int compare_dup_region_by_cluster_file(const void *a, const void *b) {
   return CMP(ra->end, rb->end);
 }
 
+/* 구간 간 클러스터링:
+ * 1패스 - 각 구간에 대해 score가 가장 높은 파트너 1개만 기록
+ *         (같은 구간 안에서 매치된 쌍은 INTERNAL_DUPLICATION_ID로 표시),
+ * 2패스 - best-partner 간선들을 union-find로 연결해 클러스터 id 부여,
+ * 마지막으로 클러스터/파일/좌표 순으로 정렬한다. */
 void cluster_duplicate_loci(const CandidateGraph *graph,
                             const WindowCoord *coords,
                             SegtraceDupRegion *regions, size_t n_regions) {
   if (n_regions == 0)
     return;
 
+  /* 1패스: best partner 선정 (cluster_id 필드를 임시로 best score 저장에 사용) */
   for (int t = 0; t < graph->n_threads; t++) {
     for (size_t i = 0; i < graph->counts[t]; i++) {
       CandidatePair pair = graph->pairs[t][i];
@@ -716,6 +844,7 @@ void cluster_duplicate_loci(const CandidateGraph *graph,
     }
   }
 
+  /* 2패스: best-partner 관계로 union-find를 수행해 연결 요소마다 클러스터 부여 */
   UnionFind uf;
   init_unionfind(&uf, n_regions);
   for (size_t i = 0; i < n_regions; i++) {
@@ -723,6 +852,7 @@ void cluster_duplicate_loci(const CandidateGraph *graph,
       union_unionfind(&uf, (uint32_t)i, regions[i].partner_id);
   }
 
+  /* root -> 1부터 시작하는 연속된 클러스터 번호로 재매핑 */
   uint32_t *cluster_map = calloc(n_regions, sizeof(uint32_t));
   uint32_t next_cluster_id = 1;
   for (size_t i = 0; i < n_regions; i++) {
@@ -738,6 +868,7 @@ void cluster_duplicate_loci(const CandidateGraph *graph,
         compare_dup_region_by_cluster_file);
 }
 
+/* 스레드별로 쌓인 후보 쌍 배열들을 모두 해제 */
 void free_candidate_graph(CandidateGraph *graph) {
   for (int t = 0; t < graph->n_threads; t++)
     free(graph->pairs[t]);
@@ -745,6 +876,11 @@ void free_candidate_graph(CandidateGraph *graph) {
   free(graph->counts);
 }
 
+/* (클러스터, 파일) 그룹별로 복제 수를 세어 min_copies 미만이면 제거.
+ * 단 min_copies==2일 때는 "한 구간 안에서 자기 자신과 매치된" 내부 복제
+ * (INTERNAL_DUPLICATION_ID)도 유효한 것으로 간주해 살려둔다.
+ * regions가 cluster/file 순으로 정렬된 상태이므로 그룹은 연속 구간이고,
+ * in-place로 압축한 뒤 살아남은 개수를 반환한다. */
 size_t filter_regions_by_copy_count(SegtraceDupRegion *regions, size_t n,
                                     uint32_t min_copies) {
   if (n == 0 || min_copies <= 1)
@@ -771,6 +907,9 @@ size_t filter_regions_by_copy_count(SegtraceDupRegion *regions, size_t n,
   return out_count;
 }
 
+/* 최종 구간을 "<prefix>.dup.bed"에 기록.
+ * chrom 컬럼은 "파일명-서열명" 형태, 4번째 컬럼은 클러스터 id.
+ * min_sd_len 미만의 짧은 구간은 출력하지 않는다 */
 void write_dup_bed(const char *out_prefix, const SegtraceDupRegion *dup_regions,
                    size_t n_merged, const GenomeSeqLen *seq_lens,
                    size_t min_sd_len) {
@@ -801,6 +940,7 @@ void write_dup_bed(const char *out_prefix, const SegtraceDupRegion *dup_regions,
 // SECTION 5: CORE ALGORITHMS & UTILITIES
 // ==============================================================
 
+/* Union-Find (Disjoint Set) 자료구조: path halving + union-by-rank 사용 */
 void init_unionfind(UnionFind *uf, size_t n) {
   uf->parent = malloc(n * sizeof(uint32_t));
   uf->rank = calloc(n, sizeof(uint8_t));
@@ -808,6 +948,7 @@ void init_unionfind(UnionFind *uf, size_t n) {
     uf->parent[i] = (uint32_t)i;
 }
 
+/* 루트를 찾아가며 경로 상의 노드를 조부모에 연결 (path halving) */
 uint32_t find_unionfind(UnionFind *uf, uint32_t x) {
   while (uf->parent[x] != x) {
     uint32_t next = uf->parent[x];
@@ -817,6 +958,7 @@ uint32_t find_unionfind(UnionFind *uf, uint32_t x) {
   return x;
 }
 
+/* rank가 낮은 트리를 높은 트리 아래에 붙이는 union-by-rank */
 void union_unionfind(UnionFind *uf, uint32_t a, uint32_t b) {
   uint32_t root_a = find_unionfind(uf, a), root_b = find_unionfind(uf, b);
   if (root_a != root_b) {
@@ -836,6 +978,8 @@ void free_unionfind(UnionFind *uf) {
   free(uf->rank);
 }
 
+/* 경로와 알려진 확장자(.fa/.fasta/.gz 등)를 제거한 순수 파일명 추출.
+ * 출력 BED의 genome 라벨로 사용된다 */
 void get_basename(const char *filename, char *basename, size_t size) {
   const char *last_slash = strrchr(filename, '/');
   const char *name = last_slash ? last_slash + 1 : filename;
@@ -854,6 +998,9 @@ void get_basename(const char *filename, char *basename, size_t size) {
   }
 }
 
+/* wyhash 스타일의 64->32비트 최종 믹서.
+ * ntHash 값의 상위 비트 엔트로피를 32비트 전체에 퍼뜨려
+ * threshold 기반 샘플링이 편향되지 않게 한다 */
 inline uint32_t mix_hash(uint64_t hash_value, uint64_t seed) {
   hash_value ^= seed;
   hash_value ^= hash_value >> 33;
@@ -864,16 +1011,21 @@ inline uint32_t mix_hash(uint64_t hash_value, uint64_t seed) {
   return (uint32_t)hash_value;
 }
 
+/* 순서 무관하게 (a,b) 쌍을 하나의 64비트 키로 인코딩 (블룸필터 키용) */
 uint64_t encode_pair(uint32_t a, uint32_t b) {
   return a < b ? ((uint64_t)a << 32) | b : ((uint64_t)b << 32) | a;
 }
 
+/* splitmix64 최종 해시: 인접한 키 값들이 블룸필터에 고르게 퍼지도록 함 */
 static inline uint64_t splitmix64(uint64_t x) {
   x = (x ^ (x >> 30)) * UINT64_C(0xbf58476d1ce4e5b9);
   x = (x ^ (x >> 27)) * UINT64_C(0x94d049bb133111eb);
   return x ^ (x >> 31);
 }
 
+/* 블룸필터 조회 겸 삽입: 이미 (아마도) 있으면 1 반환.
+ * 2개의 해시 비트(h1, h2)를 검사/설정한다. 거짓 양성은 허용하며, 이 경우
+ * 해당 쌍을 한 번 건너뛸 뿐이라 결과에 치명적이지 않다 */
 int bloom_test_and_set(uint8_t *bloom, uint64_t key) {
   uint64_t h = splitmix64(key);
   uint32_t h1 = (uint32_t)h & BLOOM_MASK;
@@ -885,11 +1037,13 @@ int bloom_test_and_set(uint8_t *bloom, uint64_t key) {
   return was_set;
 }
 
+/* qsort 비교 함수: uint32 오름차순 */
 int compare_uint32(const void *a, const void *b) {
   uint32_t va = *(const uint32_t *)a, vb = *(const uint32_t *)b;
   return (va > vb) - (va < vb);
 }
 
+/* qsort 비교 함수: 해시 오름차순, 같은 해시면 윈도우 id 오름차순 */
 int compare_hash_entry(const void *a, const void *b) {
   const HashWindowEntry *ea = (const HashWindowEntry *)a,
                         *eb = (const HashWindowEntry *)b;
