@@ -4,9 +4,9 @@ cmp_sim.py - Simulation benchmark for SD callers (Segtrace, SEDEF, BISER).
 
 Features:
 - Multi-length scaling evaluation across diverse genome sizes.
-- Full SD caller comparison (Segtrace with subclustering, SEDEF, and BISER).
-- Base-pair footprint, Fragment-level (50% reciprocal overlap), and Pairwise evaluation.
-- Output summary tables, CSV exports, and 3-panel visualization plots.
+- Full SD caller comparison (Segtrace, SEDEF, and BISER).
+- Base-pair footprint and Fragment-level (50% reciprocal overlap) evaluation.
+- Output summary tables, CSV exports, and visualization plots.
 """
 
 import random
@@ -21,10 +21,7 @@ import pandas as pd
 from cmp_core import (
     parse_bed_intervals,
     calc_bp_metrics,
-    eval_fragment_overlap,
-    load_segtrace_pairs,
-    load_bedpe_pairs,
-    evaluate_frag_pairs_fast
+    eval_fragment_overlap
 )
 
 # Register ./sedef to PATH
@@ -38,7 +35,7 @@ def sim_generate_genome(chrom_sizes, num_dups=100, min_dup_len=1000, max_dup_len
     """Generates synthetic chromosomes with segmental duplications."""
     bases_bytes = np.frombuffer(b'ACGT', dtype=np.uint8)
     genomes = {chrom: bytearray(np.random.choice(bases_bytes, size=size).tobytes()) for chrom, size in chrom_sizes.items()}
-    true_pairs, true_intervals = [], []
+    true_intervals = []
     used_intervals = {c: [] for c in chrom_sizes}
     chrom_names = list(chrom_sizes.keys())
 
@@ -68,7 +65,6 @@ def sim_generate_genome(chrom_sizes, num_dups=100, min_dup_len=1000, max_dup_len
             genomes[c3][s3:s3 + dup_len] = genomes[c1][s1:s1 + dup_len]
             l1, l2, l3 = (c1, s1, s1 + dup_len), (c2, s2, s2 + dup_len), (c3, s3, s3 + dup_len)
             true_intervals.extend([l1, l2, l3])
-            true_pairs.extend([(l1, l3), (l2, l3)])
         else:
             c1, s1 = pick_free(dup_len, 0)
             c2, s2 = pick_free(dup_len, 0)
@@ -76,7 +72,6 @@ def sim_generate_genome(chrom_sizes, num_dups=100, min_dup_len=1000, max_dup_len
             genomes[c2][s2:s2 + dup_len] = genomes[c1][s1:s1 + dup_len]
             l1, l2 = (c1, s1, s1 + dup_len), (c2, s2, s2 + dup_len)
             true_intervals.extend([l1, l2])
-            true_pairs.append((l1, l2))
 
     with open(out_fasta, "wb") as f:
         for c, seq in genomes.items():
@@ -86,25 +81,21 @@ def sim_generate_genome(chrom_sizes, num_dups=100, min_dup_len=1000, max_dup_len
     for ext in [".fai", ".sdx"]:
         if os.path.exists(out_fasta + ext): os.remove(out_fasta + ext)
 
-    return true_pairs, list(set(true_intervals)), out_fasta
+    return list(set(true_intervals)), out_fasta
 
-def evaluate_caller_output(tool_name, bed_path, true_pairs, true_intervals, exec_time):
-    """Computes unified BP, Fragment, and Pair metrics for a caller."""
+def evaluate_caller_output(bed_path, true_intervals, exec_time):
+    """Computes unified BP and fragment metrics for a caller."""
     pred_intervals = parse_bed_intervals(bed_path)
-    pred_pairs = load_segtrace_pairs(bed_path, use_subclusters=True) if tool_name == 'Segtrace' else load_bedpe_pairs(bed_path)
     bp_m = calc_bp_metrics(pred_intervals, true_intervals)
     frag_m = eval_fragment_overlap(pred_intervals, true_intervals, fraction=0.5)
-    pair_m = evaluate_frag_pairs_fast(true_pairs, pred_pairs, threshold=0.5)
 
     return {
-        'Tool': tool_name,
         'Recall_bp': bp_m['recall'], 'Precision_bp': bp_m['precision'], 'F1_bp': bp_m['f1'],
         'Recall_frag': frag_m['recall'], 'Precision_frag': frag_m['precision'], 'F1_frag': frag_m['f1'],
-        'Recall_pair': pair_m['recall'], 'Precision_pair': pair_m['precision'], 'F1_pair': pair_m['f1'],
-        'Pairs_Count': len(pred_pairs), 'Time(s)': exec_time
+        'Time(s)': exec_time
     }
 
-def sim_run_segtrace(fasta_path, true_pairs, true_intervals, threads=8, kmer=17, window_size=1024, step_size=0, scale=16):
+def sim_run_segtrace(fasta_path, true_intervals, threads=8, kmer=17, window_size=1024, step_size=0, scale=16):
     """Runs Segtrace with specified parameters and measures Time & Peak RSS Memory (MB)."""
     out_prefix = "sim_out"
     segtrace_bin = "./segtrace" if os.path.isfile("./segtrace") else "./segtrace/segtrace"
@@ -128,7 +119,8 @@ def sim_run_segtrace(fasta_path, true_pairs, true_intervals, threads=8, kmer=17,
     except Exception:
         mem_mb = 0.0
 
-    res = evaluate_caller_output('Segtrace', f"{out_prefix}.dup.bed", true_pairs, true_intervals, t_elapsed)
+    res = evaluate_caller_output(f"{out_prefix}.dup.bed", true_intervals, t_elapsed)
+    res['Tool'] = 'Segtrace'
     res['kmer'] = kmer
     res['window_size'] = window_size
     res['step_size'] = step_size
@@ -136,7 +128,7 @@ def sim_run_segtrace(fasta_path, true_pairs, true_intervals, threads=8, kmer=17,
     res['Memory(MB)'] = mem_mb
     return res
 
-def sim_run_sedef(fasta_path, true_pairs, true_intervals, threads=8):
+def sim_run_sedef(fasta_path, true_intervals, threads=8):
     """Runs SEDEF with robust path handling."""
     sedef_sh = os.path.abspath("sedef/sedef.sh") if os.path.isfile("sedef/sedef.sh") else shutil.which("sedef.sh")
     if not sedef_sh: return None
@@ -159,14 +151,15 @@ def sim_run_sedef(fasta_path, true_pairs, true_intervals, threads=8):
 
         final_bed = os.path.join(sedef_out_dir, "final.bed")
         if os.path.exists(final_bed):
-            res_dict = evaluate_caller_output('SEDEF', final_bed, true_pairs, true_intervals, t_elapsed)
+            res_dict = evaluate_caller_output(final_bed, true_intervals, t_elapsed)
+            res_dict['Tool'] = 'SEDEF'
             res_dict['Memory(MB)'] = 0.0
             return res_dict
     except Exception as e:
         print(f"[WARNING] SEDEF execution failed: {e}")
     return None
 
-def sim_run_biser(fasta_path, true_pairs, true_intervals, threads=8):
+def sim_run_biser(fasta_path, true_intervals, threads=8):
     """Runs BISER if installed."""
     biser_bin = shutil.which("biser") or (os.path.expanduser("~/.local/bin/biser") if os.path.isfile(os.path.expanduser("~/.local/bin/biser")) else None)
     if not biser_bin: return None
@@ -179,7 +172,8 @@ def sim_run_biser(fasta_path, true_pairs, true_intervals, threads=8):
         subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env, check=True)
         t_elapsed = time.perf_counter() - t0
         if os.path.exists(biser_out):
-            res_dict = evaluate_caller_output('BISER', biser_out, true_pairs, true_intervals, t_elapsed)
+            res_dict = evaluate_caller_output(biser_out, true_intervals, t_elapsed)
+            res_dict['Tool'] = 'BISER'
             res_dict['Memory(MB)'] = 0.0
             return res_dict
     except Exception as e:
@@ -187,13 +181,13 @@ def sim_run_biser(fasta_path, true_pairs, true_intervals, threads=8):
     return None
 
 def plot_sim_results(results_df, output_png="evaluation_plots.png"):
-    """Generates 4-panel visualization plots including BP, Fragment, and Pair-level metrics."""
+    """Generates BP, fragment, and runtime metric plots."""
     if results_df.empty: return
     try:
         import matplotlib.pyplot as plt
         import seaborn as sns
 
-        fig, (ax1, ax2, ax3, ax4) = plt.subplots(1, 4, figsize=(25, 5.5))
+        fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(19, 5.5))
         palette = {'Segtrace': '#1f77b4', 'SEDEF': '#d62728', 'BISER': '#2ca02c'}
         markers = {'Segtrace': 'o', 'SEDEF': 's', 'BISER': '^'}
 
@@ -211,21 +205,14 @@ def plot_sim_results(results_df, output_png="evaluation_plots.png"):
         sns.stripplot(data=df_frag, x='Tool', y='Score', hue='Metric', dodge=True, ax=ax2, palette='dark:black', alpha=0.7, size=5, legend=False)
         ax2.set_ylim(0, 1.08); ax2.set_title('2. Fragment Level', fontweight='bold'); ax2.grid(axis='y', alpha=0.3)
 
-        # 3. Pair-level metrics
-        df_pair = results_df[['Tool', 'Recall_pair', 'Precision_pair']].melt(id_vars='Tool', var_name='Metric', value_name='Score')
-        df_pair['Metric'] = df_pair['Metric'].map({'Recall_pair': 'Recall', 'Precision_pair': 'Precision'})
-        sns.barplot(data=df_pair, x='Tool', y='Score', hue='Metric', ax=ax3, alpha=0.7, capsize=0.1)
-        sns.stripplot(data=df_pair, x='Tool', y='Score', hue='Metric', dodge=True, ax=ax3, palette='dark:black', alpha=0.7, size=5, legend=False)
-        ax3.set_ylim(0, 1.08); ax3.set_title('3. Pair Level', fontweight='bold'); ax3.grid(axis='y', alpha=0.3)
-
-        # 4. Execution time vs Pair F1 scaling
+        # 3. Execution time vs Fragment F1 scaling
         tools = results_df['Tool'].unique()
-        sns.scatterplot(data=results_df, x='Time(s)', y='F1_pair', hue='Tool', style='Tool',
-                        palette={t: palette.get(t, '#7f7f7f') for t in tools}, markers={t: markers.get(t, 'o') for t in tools}, s=150, alpha=0.85, ax=ax4)
+        sns.scatterplot(data=results_df, x='Time(s)', y='F1_frag', hue='Tool', style='Tool',
+                        palette={t: palette.get(t, '#7f7f7f') for t in tools}, markers={t: markers.get(t, 'o') for t in tools}, s=150, alpha=0.85, ax=ax3)
         for t in tools:
-            mean_t = results_df[results_df['Tool'] == t].groupby('GenomeSize')[['Time(s)', 'F1_pair']].mean().reset_index()
-            ax4.plot(mean_t['Time(s)'], mean_t['F1_pair'], color=palette.get(t, '#7f7f7f'), linestyle='--', alpha=0.6)
-        ax4.set_ylim(0, 1.08); ax4.set_title('4. Time vs Pair F1 Scaling', fontweight='bold'); ax4.grid(True, alpha=0.3)
+            mean_t = results_df[results_df['Tool'] == t].groupby('GenomeSize')[['Time(s)', 'F1_frag']].mean().reset_index()
+            ax3.plot(mean_t['Time(s)'], mean_t['F1_frag'], color=palette.get(t, '#7f7f7f'), linestyle='--', alpha=0.6)
+        ax3.set_ylim(0, 1.08); ax3.set_title('3. Time vs Fragment F1 Scaling', fontweight='bold'); ax3.grid(True, alpha=0.3)
 
         plt.tight_layout(); plt.savefig(output_png, dpi=300); plt.close()
         print(f"[INFO] Visualization plot saved to {output_png}")
@@ -360,10 +347,10 @@ def run_kmer_sweep(genome_sizes, reps, threads, kmers, window_size, step_size, s
 
         for rep in range(1, reps + 1):
             print(f">>> [Genome Size: {g_size:,} bp | Rep {rep}/{reps}] Injecting {n_dups} SDs...")
-            true_pairs, true_intervals, fasta_path = sim_generate_genome(chrom_sizes, num_dups=n_dups, ortholog_rate=ortholog_rate, out_fasta="sim.fa")
+            true_intervals, fasta_path = sim_generate_genome(chrom_sizes, num_dups=n_dups, ortholog_rate=ortholog_rate, out_fasta="sim.fa")
 
             for k in kmers:
-                res = sim_run_segtrace(fasta_path, true_pairs, true_intervals, threads=threads, kmer=k, window_size=window_size, step_size=step_size, scale=scale)
+                res = sim_run_segtrace(fasta_path, true_intervals, threads=threads, kmer=k, window_size=window_size, step_size=step_size, scale=scale)
                 res['GenomeSize'], res['Rep'] = g_size, rep
                 results.append(res)
                 print(f"  [k={k:2d}] Frag F1: {res['F1_frag']*100:6.2f}% | Mem: {res['Memory(MB)']:6.2f}MB | Time: {res['Time(s)']:5.2f}s")
@@ -386,10 +373,10 @@ def run_scale_sweep(genome_sizes, reps, threads, scales, window_size, step_size,
 
         for rep in range(1, reps + 1):
             print(f">>> [Genome Size: {g_size:,} bp | Rep {rep}/{reps}] Injecting {n_dups} SDs...")
-            true_pairs, true_intervals, fasta_path = sim_generate_genome(chrom_sizes, num_dups=n_dups, ortholog_rate=ortholog_rate, out_fasta="sim.fa")
+            true_intervals, fasta_path = sim_generate_genome(chrom_sizes, num_dups=n_dups, ortholog_rate=ortholog_rate, out_fasta="sim.fa")
 
             for s in scales:
-                res = sim_run_segtrace(fasta_path, true_pairs, true_intervals, threads=threads, kmer=kmer, window_size=window_size, step_size=step_size, scale=s)
+                res = sim_run_segtrace(fasta_path, true_intervals, threads=threads, kmer=kmer, window_size=window_size, step_size=step_size, scale=s)
                 res['GenomeSize'], res['Rep'] = g_size, rep
                 results.append(res)
                 print(f"  [Scale={s:3d}] Frag F1: {res['F1_frag']*100:6.2f}% | Mem: {res['Memory(MB)']:6.2f}MB | Time: {res['Time(s)']:5.2f}s")
@@ -412,10 +399,10 @@ def run_window_sweep(genome_sizes, reps, threads, window_sizes, step_size, kmer,
 
         for rep in range(1, reps + 1):
             print(f">>> [Genome Size: {g_size:,} bp | Rep {rep}/{reps}] Injecting {n_dups} SDs...")
-            true_pairs, true_intervals, fasta_path = sim_generate_genome(chrom_sizes, num_dups=n_dups, ortholog_rate=ortholog_rate, out_fasta="sim.fa")
+            true_intervals, fasta_path = sim_generate_genome(chrom_sizes, num_dups=n_dups, ortholog_rate=ortholog_rate, out_fasta="sim.fa")
 
             for w in window_sizes:
-                res = sim_run_segtrace(fasta_path, true_pairs, true_intervals, threads=threads, kmer=kmer, window_size=w, step_size=step_size, scale=scale)
+                res = sim_run_segtrace(fasta_path, true_intervals, threads=threads, kmer=kmer, window_size=w, step_size=step_size, scale=scale)
                 res['GenomeSize'], res['Rep'] = g_size, rep
                 results.append(res)
                 print(f"  [Window={w:4d}] Frag F1: {res['F1_frag']*100:6.2f}% | Mem: {res['Memory(MB)']:6.2f}MB | Time: {res['Time(s)']:5.2f}s")
@@ -438,10 +425,10 @@ def run_step_sweep(genome_sizes, reps, threads, window_size, step_sizes, kmer, s
 
         for rep in range(1, reps + 1):
             print(f">>> [Genome Size: {g_size:,} bp | Rep {rep}/{reps}] Injecting {n_dups} SDs...")
-            true_pairs, true_intervals, fasta_path = sim_generate_genome(chrom_sizes, num_dups=n_dups, ortholog_rate=ortholog_rate, out_fasta="sim.fa")
+            true_intervals, fasta_path = sim_generate_genome(chrom_sizes, num_dups=n_dups, ortholog_rate=ortholog_rate, out_fasta="sim.fa")
 
             for t in step_sizes:
-                res = sim_run_segtrace(fasta_path, true_pairs, true_intervals, threads=threads, kmer=kmer, window_size=window_size, step_size=t, scale=scale)
+                res = sim_run_segtrace(fasta_path, true_intervals, threads=threads, kmer=kmer, window_size=window_size, step_size=t, scale=scale)
                 res['GenomeSize'], res['Rep'] = g_size, rep
                 results.append(res)
                 print(f"  [Step={t:4d}] Frag F1: {res['F1_frag']*100:6.2f}% | Mem: {res['Memory(MB)']:6.2f}MB | Time: {res['Time(s)']:5.2f}s")
@@ -511,29 +498,29 @@ def main():
 
         for rep in range(1, reps + 1):
             print(f">>> [Genome Size: {g_size:,} bp | Rep {rep}/{reps} | SDs: {n_dups}] <<<")
-            true_pairs, true_intervals, fasta_path = sim_generate_genome(chrom_sizes, num_dups=n_dups, ortholog_rate=args.ortholog_rate, out_fasta="sim.fa")
+            true_intervals, fasta_path = sim_generate_genome(chrom_sizes, num_dups=n_dups, ortholog_rate=args.ortholog_rate, out_fasta="sim.fa")
 
             # 1. Segtrace
-            st_res = sim_run_segtrace(fasta_path, true_pairs, true_intervals, threads=args.threads, kmer=args.kmer, window_size=args.window_size, step_size=args.step_size, scale=args.scale)
+            st_res = sim_run_segtrace(fasta_path, true_intervals, threads=args.threads, kmer=args.kmer, window_size=args.window_size, step_size=args.step_size, scale=args.scale)
             st_res['GenomeSize'], st_res['Rep'] = g_size, rep
             all_results.append(st_res)
-            print(f"  [Segtrace] Time: {st_res['Time(s)']:.2f}s | BP F1: {st_res['F1_bp']*100:.2f}% | Frag F1: {st_res['F1_frag']*100:.2f}% | Pair F1: {st_res['F1_pair']*100:.2f}% (Pairs: {st_res['Pairs_Count']})")
+            print(f"  [Segtrace] Time: {st_res['Time(s)']:.2f}s | BP F1: {st_res['F1_bp']*100:.2f}% | Frag F1: {st_res['F1_frag']*100:.2f}%")
 
             # 2. SEDEF
             if sedef_avail:
-                sd_res = sim_run_sedef(fasta_path, true_pairs, true_intervals, threads=args.threads)
+                sd_res = sim_run_sedef(fasta_path, true_intervals, threads=args.threads)
                 if sd_res:
                     sd_res['GenomeSize'], sd_res['Rep'] = g_size, rep
                     all_results.append(sd_res)
-                    print(f"  [SEDEF]    Time: {sd_res['Time(s)']:.2f}s | BP F1: {sd_res['F1_bp']*100:.2f}% | Frag F1: {sd_res['F1_frag']*100:.2f}% | Pair F1: {sd_res['F1_pair']*100:.2f}% (Pairs: {sd_res['Pairs_Count']})")
+                    print(f"  [SEDEF]    Time: {sd_res['Time(s)']:.2f}s | BP F1: {sd_res['F1_bp']*100:.2f}% | Frag F1: {sd_res['F1_frag']*100:.2f}%")
 
             # 3. BISER
             if biser_avail:
-                bi_res = sim_run_biser(fasta_path, true_pairs, true_intervals, threads=args.threads)
+                bi_res = sim_run_biser(fasta_path, true_intervals, threads=args.threads)
                 if bi_res:
                     bi_res['GenomeSize'], bi_res['Rep'] = g_size, rep
                     all_results.append(bi_res)
-                    print(f"  [BISER]    Time: {bi_res['Time(s)']:.2f}s | BP F1: {bi_res['F1_bp']*100:.2f}% | Frag F1: {bi_res['F1_frag']*100:.2f}% | Pair F1: {bi_res['F1_pair']*100:.2f}% (Pairs: {bi_res['Pairs_Count']})")
+                    print(f"  [BISER]    Time: {bi_res['Time(s)']:.2f}s | BP F1: {bi_res['F1_bp']*100:.2f}% | Frag F1: {bi_res['F1_frag']*100:.2f}%")
             print("-" * 85)
 
     df_results = pd.DataFrame(all_results)
@@ -541,14 +528,14 @@ def main():
         df_results.to_csv(args.out_csv, index=False)
         print(f"\n[INFO] Complete results saved to {args.out_csv}")
 
-        summary_cols = ['Tool', 'GenomeSize', 'Recall_bp', 'Precision_bp', 'F1_bp', 'Recall_frag', 'Precision_frag', 'F1_frag', 'Recall_pair', 'Precision_pair', 'F1_pair', 'Time(s)']
+        summary_cols = ['Tool', 'GenomeSize', 'Recall_bp', 'Precision_bp', 'F1_bp', 'Recall_frag', 'Precision_frag', 'F1_frag', 'Time(s)']
         df_summary = df_results[summary_cols].groupby(['Tool', 'GenomeSize']).mean().reset_index()
 
         print("\n" + "=" * 115 + "\n                                     AVERAGE BENCHMARK SUMMARY\n" + "=" * 115)
-        print(f"{'Tool':<12} {'Size':<12} {'BP F1':<9} {'Frag Rec':<10} {'Frag Prec':<10} {'Frag F1':<10} {'Pair Rec':<10} {'Pair Prec':<10} {'Pair F1':<10} {'Time(s)':<8}")
+        print(f"{'Tool':<12} {'Size':<12} {'BP F1':<9} {'Frag Rec':<10} {'Frag Prec':<10} {'Frag F1':<10} {'Time(s)':<8}")
         print("-" * 115)
         for _, row in df_summary.iterrows():
-            print(f"{row['Tool']:<12} {int(row['GenomeSize']):<12,} {row['F1_bp']*100:>6.2f}%   {row['Recall_frag']*100:>6.2f}%   {row['Precision_frag']*100:>6.2f}%   {row['F1_frag']*100:>6.2f}%   {row['Recall_pair']*100:>6.2f}%   {row['Precision_pair']*100:>6.2f}%   {row['F1_pair']*100:>6.2f}%   {row['Time(s)']:>6.2f}s")
+            print(f"{row['Tool']:<12} {int(row['GenomeSize']):<12,} {row['F1_bp']*100:>6.2f}%   {row['Recall_frag']*100:>6.2f}%   {row['Precision_frag']*100:>6.2f}%   {row['F1_frag']*100:>6.2f}%   {row['Time(s)']:>6.2f}s")
         print("=" * 115 + "\n")
 
         if not args.no_plot:
