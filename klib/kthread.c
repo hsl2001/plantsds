@@ -25,10 +25,12 @@ typedef struct kt_for_t {
 static inline long steal_work(kt_for_t *t) {
   int i, min_i = -1;
   long k, min = LONG_MAX;
-  for (i = 0; i < t->n_threads; ++i)
-    if (min > t->w[i].i)
-      min = t->w[i].i, min_i = i;
-  k = __sync_fetch_and_add(&t->w[min_i].i, t->n_threads);
+  for (i = 0; i < t->n_threads; ++i) {
+    long current = __atomic_load_n(&t->w[i].i, __ATOMIC_RELAXED);
+    if (min > current)
+      min = current, min_i = i;
+  }
+  k = __atomic_fetch_add(&t->w[min_i].i, t->n_threads, __ATOMIC_RELAXED);
   return k >= t->n ? -1 : k;
 }
 
@@ -36,7 +38,7 @@ static void *ktf_worker(void *data) {
   ktf_worker_t *w = (ktf_worker_t *)data;
   long i;
   for (;;) {
-    i = __sync_fetch_and_add(&w->i, w->t->n_threads);
+    i = __atomic_fetch_add(&w->i, w->t->n_threads, __ATOMIC_RELAXED);
     if (i >= w->t->n)
       break;
     w->t->func(w->t->data, i, w - w->t->w);
@@ -95,10 +97,12 @@ typedef struct kt_forpool_t {
 static inline long kt_fp_steal_work(kt_forpool_t *t) {
   int i, min_i = -1;
   long k, min = LONG_MAX;
-  for (i = 0; i < t->n_threads; ++i)
-    if (min > t->w[i].i)
-      min = t->w[i].i, min_i = i;
-  k = __sync_fetch_and_add(&t->w[min_i].i, t->n_threads);
+  for (i = 0; i < t->n_threads; ++i) {
+    long current = __atomic_load_n(&t->w[i].i, __ATOMIC_RELAXED);
+    if (min > current)
+      min = current, min_i = i;
+  }
+  k = __atomic_fetch_add(&t->w[min_i].i, t->n_threads, __ATOMIC_RELAXED);
   return k >= t->n ? -1 : k;
 }
 
@@ -119,7 +123,7 @@ static void *kt_fp_worker(void *data) {
     if (action < 0)
       break;
     for (;;) { // process jobs allocated to this worker
-      i = __sync_fetch_and_add(&w->i, fp->n_threads);
+      i = __atomic_fetch_add(&w->i, fp->n_threads, __ATOMIC_RELAXED);
       if (i >= fp->n)
         break;
       fp->func(fp->data, i, w - fp->w);
@@ -156,9 +160,11 @@ void *kt_forpool_init(int n_threads) {
 void kt_forpool_destroy(void *_fp) {
   kt_forpool_t *fp = (kt_forpool_t *)_fp;
   int i;
+  pthread_mutex_lock(&fp->mutex);
   for (i = 0; i < fp->n_threads; ++i)
     fp->w[i].action = -1;
   pthread_cond_broadcast(&fp->cv_s);
+  pthread_mutex_unlock(&fp->mutex);
   for (i = 0; i < fp->n_threads; ++i)
     pthread_join(fp->tid[i], 0);
   pthread_cond_destroy(&fp->cv_s);

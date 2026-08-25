@@ -118,17 +118,22 @@ int main(int argc, char **argv) {
       r.base_lookup[base + ('a' - 'A')] = code;
   }
 
+  void *thread_pool = n_threads > 1 ? kt_forpool_init(n_threads) : NULL;
+
   /* [1단계] 모든 FASTA를 윈도우 단위로 나누고 각 윈도우의 스케치(해시 집합) 추출 */
   GlobalWindows gw =
       extract_all_windows(files, num_files, &r, scale, window_size,
-                          step_size, min_bases, n_threads);
+                          step_size, min_bases, n_threads, thread_pool);
 
   /* [2단계] 해시를 공유하는 윈도우 쌍을 후보로 찾고 유사도(공유 해시 수) 계산 */
   fprintf(stderr,
           "[segtrace] Discovering candidates and computing distances...\n");
   CandidateGraph graph =
       discover_and_compute(gw.all_hashes, gw.coords, gw.num_sketches,
-                 window_size, step_size, n_threads, r.hash_window);
+                 window_size, step_size, n_threads, r.hash_window,
+                           thread_pool);
+  if (thread_pool)
+    kt_forpool_destroy(thread_pool);
 
   free(gw.all_hashes); /* 이후 단계에서는 원본 해시 배열이 필요 없음 */
 
@@ -186,6 +191,13 @@ static const uint64_t NTHASH_H[4] = {
     0x2e0600d3fd09e083ULL  // T
 };
 
+/* 선택된 [0, threshold) 해시를 32비트 전체 범위에 단조 확장한다.
+ * 동일성 및 정렬 순서는 유지하면서 파티션 계산을 곱셈+shift로 단순화한다. */
+static inline uint32_t normalize_sampled_hash(uint32_t hash,
+                                              uint32_t threshold) {
+  return (uint32_t)(((uint64_t)hash << 32) / threshold);
+}
+
 /* 윈도우 하나의 스케치(해시 집합) 추출.
  * ntHash 롤링 해시로 각 k-mer의 정방향/역상보 해시를 염기당 O(1)에 갱신하고,
  * 정규(canonical) 해시가 threshold 미만인 k-mer만 샘플링한다.
@@ -238,7 +250,7 @@ static inline void extract_hash_direct(const Segtrace *r, uint32_t *out_hashes,
       uint64_t canonical = (f_hash < r_hash) ? f_hash : r_hash;
       uint32_t h = mix_hash(canonical, r->hash_seed);
       if (h < threshold && count < 2048) {
-        out_hashes[count++] = h;
+        out_hashes[count++] = normalize_sampled_hash(h, threshold);
       }
     }
   }
@@ -322,7 +334,8 @@ static void seq_chunk_worker(void *data, long i, int tid) {
 GlobalWindows extract_all_windows(char **files, int num_files,
                                   const Segtrace *r, uint64_t scale,
                                   size_t window_size, size_t step_size,
-                                  size_t min_bases, int n_threads) {
+                                  size_t min_bases, int n_threads,
+                                  void *thread_pool) {
   fprintf(stderr, "[segtrace] Extracting windows across genomes...\n");
   GlobalWindows gw = {0};
   uint32_t threshold = (uint32_t)(UINT32_MAX / scale);
@@ -365,7 +378,7 @@ GlobalWindows extract_all_windows(char **files, int num_files,
       /* 병렬화를 위해 염색체를 chunk로 분할.
        * 스레드 수의 4배로 쪼개 부하 균형을 맞추고 최소 100kb를 보장하며,
        * step_size의 배수로 맞춰 chunk 경계에서도 윈도우 인덱스가 어긋나지 않게 함 */
-      size_t chunk_size = len / (n_threads * 4);
+      size_t chunk_size = len / ((size_t)n_threads * 4);
       if (chunk_size < 100000)
         chunk_size = 100000;
       chunk_size = ((chunk_size + step_size - 1) / step_size) * step_size;
@@ -394,7 +407,7 @@ GlobalWindows extract_all_windows(char **files, int num_files,
       }
 
       /* chunk들을 스레드 풀로 병렬 스케치 */
-      kt_for(n_threads, seq_chunk_worker, jobs, num_jobs);
+      kt_forpool(thread_pool, seq_chunk_worker, jobs, (long)num_jobs);
 
       /* 각 chunk의 로컬 결과를 전역 배열로 병합.
        * sketch_offset은 로컬 기준이므로 전역 해시 배열 기준으로 보정한다 */
@@ -542,6 +555,76 @@ static inline int check_collinear_neighbor(const DiscoverComputeData *w,
   return 0;
 }
 
+typedef struct {
+  const uint32_t *all_hashes;
+  const WindowCoord *coords;
+  uint16_t *win_curr_pos;
+  size_t n_windows;
+  size_t n_blocks;
+  size_t batch_start;
+  size_t batch_count;
+  size_t *block_offsets;
+  HashWindowEntry *entries;
+} BucketBuildData;
+
+static inline size_t hash_partition(uint32_t hash) {
+  return (size_t)(((uint64_t)hash * NUM_PARTITIONS) >> 32);
+}
+
+/* 각 block이 담당하는 윈도우에서 이번 배치의 파티션별 엔트리 수를 센다. */
+static void count_bucket_entries(void *data, long idx, int tid) {
+  (void)tid;
+  BucketBuildData *build = (BucketBuildData *)data;
+  size_t block = (size_t)idx;
+  size_t win_start = build->n_windows * block / build->n_blocks;
+  size_t win_end = build->n_windows * (block + 1) / build->n_blocks;
+  size_t *counts = build->block_offsets + block * build->batch_count;
+
+  for (size_t win = win_start; win < win_end; win++) {
+    uint32_t off = build->coords[win].sketch_offset;
+    uint16_t size = build->coords[win].sketch_size;
+    uint16_t pos = build->win_curr_pos[win];
+    while (pos < size) {
+      uint32_t hash = build->all_hashes[off + pos];
+      size_t partition = hash_partition(hash);
+      if (partition >= build->batch_start + build->batch_count)
+        break;
+      if (partition >= build->batch_start)
+        counts[partition - build->batch_start]++;
+      pos++;
+    }
+  }
+}
+
+/* prefix sum으로 미리 배정된 block별 구간에 엔트리를 락 없이 기록한다. */
+static void scatter_bucket_entries(void *data, long idx, int tid) {
+  (void)tid;
+  BucketBuildData *build = (BucketBuildData *)data;
+  size_t block = (size_t)idx;
+  size_t win_start = build->n_windows * block / build->n_blocks;
+  size_t win_end = build->n_windows * (block + 1) / build->n_blocks;
+  size_t *offsets = build->block_offsets + block * build->batch_count;
+
+  for (size_t win = win_start; win < win_end; win++) {
+    uint32_t off = build->coords[win].sketch_offset;
+    uint16_t size = build->coords[win].sketch_size;
+    uint16_t pos = build->win_curr_pos[win];
+    while (pos < size) {
+      uint32_t hash = build->all_hashes[off + pos];
+      size_t partition = hash_partition(hash);
+      if (partition >= build->batch_start + build->batch_count)
+        break;
+      if (partition >= build->batch_start) {
+        size_t local_partition = partition - build->batch_start;
+        build->entries[offsets[local_partition]++] =
+            (HashWindowEntry){hash, (uint32_t)win};
+      }
+      pos++;
+    }
+    build->win_curr_pos[win] = pos;
+  }
+}
+
 /* 파티션(해시 구간) 하나를 담당하는 스레드 작업.
  * 버킷을 (hash, window_id)로 정렬하면 같은 해시를 가진 윈도우들이 연속된
  * run을 이루고, run 내부의 윈도우 쌍이 곧 "해시를 공유하는 후보 쌍"이다. */
@@ -577,10 +660,10 @@ static void discover_compute_worker(void *data, long idx, int tid) {
           if (windows_overlap(w_data, wa, wb))
             continue;
 
-          /* 같은 쌍이 다른 해시 run에서 반복 발견될 수 있으므로
-           * 스레드별 블룸필터로 중복 제거 */
+          /* 같은 쌍이 다른 해시 run이나 스레드에서 반복 발견될 수 있으므로
+           * 공유 cache-blocked 블룸필터로 중복 제거 */
           uint64_t pk = encode_pair(wa, wb);
-          if (bloom_test_and_set(w_data->t_bloom[tid], pk))
+          if (bloom_test_and_set(w_data->bloom, pk))
             continue;
 
           size_t min_shared = required_shared(w_data, wa, wb);
@@ -620,7 +703,8 @@ CandidateGraph discover_and_compute(const uint32_t *all_hashes,
                                     const WindowCoord *coords,
                                     size_t n_windows, size_t window_size,
                                     size_t step_size, int n_threads,
-                                    uint32_t kmer_size) {
+                                    uint32_t kmer_size,
+                                    void *thread_pool) {
   if (n_windows > (size_t)CANDIDATE_WINDOW_MASK + 1) {
     /* 쌍 인코딩이 윈도우 id에 28비트만 쓰므로 상한 검사 */
     fprintf(stderr, "[ERROR] Too many windows for candidate encoding\n");
@@ -637,23 +721,33 @@ CandidateGraph discover_and_compute(const uint32_t *all_hashes,
        * 공유 스케치 수의 기대치는 대략 (스케치 크기) x p_kmer */
       .p_kmer = pow(MIN_IDENTITY, (double)kmer_size),
       .buckets = calloc(NUM_PARTITIONS, sizeof(PartitionBucket)),
-      .t_bloom = malloc(n_threads * sizeof(uint8_t *)),
+      .bloom = calloc(BLOOM_NUM_WORDS, sizeof(uint64_t)),
       .t_pairs = calloc(n_threads, sizeof(CandidatePair *)),
       .t_n_pairs = calloc(n_threads, sizeof(size_t)),
       .t_cap_pairs = calloc(n_threads, sizeof(size_t))};
 
-  if (!w.buckets || !w.t_bloom || !w.t_pairs) {
+  if (!w.buckets || !w.bloom || !w.t_pairs || !w.t_n_pairs ||
+      !w.t_cap_pairs) {
     fprintf(stderr, "[ERROR] Memory allocation failed\n");
     exit(1);
   }
-  /* 스레드별 블룸필터: 같은 윈도우 쌍의 중복 처리 방지 (락 없이 사용) */
-  for (int t = 0; t < n_threads; t++)
-    w.t_bloom[t] = calloc(BLOOM_SIZE_BYTES, 1);
 
-  uint32_t part_size = (uint32_t)(UINT32_MAX / NUM_PARTITIONS);
   /* 윈도우별로 "이번 배치까지 몇 번째 스케치 해시를 흘려보냈는지" 기록.
    * 스케치가 정렬되어 있으므로 배치마다 처음부터 다시 훑지 않아도 된다 */
   uint16_t *win_curr_pos = calloc(n_windows, sizeof(uint16_t));
+  if (n_windows && !win_curr_pos) {
+    fprintf(stderr, "[ERROR] Memory allocation failed\n");
+    exit(1);
+  }
+  size_t n_blocks = (size_t)n_threads * 8;
+  if (n_blocks > n_windows)
+    n_blocks = n_windows;
+  size_t *block_offsets =
+      n_blocks ? calloc(n_blocks * BATCH_PARTITIONS, sizeof(size_t)) : NULL;
+  if (n_blocks && !block_offsets) {
+    fprintf(stderr, "[ERROR] Memory allocation failed\n");
+    exit(1);
+  }
 
   for (size_t batch_start = 0; batch_start < NUM_PARTITIONS;
        batch_start += BATCH_PARTITIONS) {
@@ -663,47 +757,70 @@ CandidateGraph discover_and_compute(const uint32_t *all_hashes,
 
     w.batch_start = batch_start;
     size_t batch_count = batch_end - batch_start;
-    /* 이번 배치가 담당하는 해시 상한 (마지막 배치는 UINT32_MAX까지) */
-    uint32_t max_hash = (batch_end < NUM_PARTITIONS)
-                            ? (uint32_t)(batch_end * part_size)
-                            : UINT32_MAX;
+    /* block별 count와 prefix sum으로 정확한 크기의 연속 버킷을 만든 뒤,
+     * 각 block의 전용 구간에 병렬로 엔트리를 기록한다. */
+    if (n_blocks)
+      memset(block_offsets, 0,
+             n_blocks * batch_count * sizeof(*block_offsets));
+    BucketBuildData build = {.all_hashes = all_hashes,
+                             .coords = coords,
+                             .win_curr_pos = win_curr_pos,
+                             .n_windows = n_windows,
+                             .n_blocks = n_blocks,
+                             .batch_start = batch_start,
+                             .batch_count = batch_count,
+                             .block_offsets = block_offsets};
+    if (n_blocks)
+      kt_forpool(thread_pool, count_bucket_entries, &build, (long)n_blocks);
 
-    /* 배치 범위에 속하는 해시들만 각 파티션 버킷에 분배.
-     * win_curr_pos 덕분에 윈도우당 amortized O(1)로 진행 */
-    for (size_t win = 0; win < n_windows; win++) {
-      uint32_t off = coords[win].sketch_offset;
-      uint16_t sz = coords[win].sketch_size;
-      uint16_t pos = win_curr_pos[win];
-
-      while (pos < sz) {
-        uint32_t val = all_hashes[off + pos];
-        if (val >= max_hash)
-          break; /* 이후 해시는 다음 배치 소관 */
-        size_t p = (size_t)(val / part_size);
-        if (p >= NUM_PARTITIONS)
-          p = NUM_PARTITIONS - 1;
-        DA_PUSH(w.buckets[p].entries, w.buckets[p].size, w.buckets[p].cap,
-                ((HashWindowEntry){val, (uint32_t)win}));
-        pos++;
-      }
-      win_curr_pos[win] = pos;
+    size_t total_entries = 0;
+    for (size_t local = 0; local < batch_count; local++) {
+      PartitionBucket *bucket = &w.buckets[batch_start + local];
+      bucket->size = 0;
+      for (size_t block = 0; block < n_blocks; block++)
+        bucket->size += block_offsets[block * batch_count + local];
+      bucket->cap = bucket->size;
+      total_entries += bucket->size;
     }
 
-    /* 배치 내 파티션들을 병렬 처리 */
-    kt_for(n_threads, discover_compute_worker, &w, (long)batch_count);
+    HashWindowEntry *batch_entries =
+        total_entries ? malloc(total_entries * sizeof(*batch_entries)) : NULL;
+    if (total_entries && !batch_entries) {
+      fprintf(stderr, "[ERROR] Memory allocation failed\n");
+      exit(1);
+    }
+    size_t partition_offset = 0;
+    for (size_t local = 0; local < batch_count; local++) {
+      PartitionBucket *bucket = &w.buckets[batch_start + local];
+      bucket->entries = bucket->size ? batch_entries + partition_offset : NULL;
+      size_t block_offset = partition_offset;
+      for (size_t block = 0; block < n_blocks; block++) {
+        size_t offset_idx = block * batch_count + local;
+        size_t count = block_offsets[offset_idx];
+        block_offsets[offset_idx] = block_offset;
+        block_offset += count;
+      }
+      partition_offset += bucket->size;
+    }
+    build.entries = batch_entries;
+    if (n_blocks)
+      kt_forpool(thread_pool, scatter_bucket_entries, &build, (long)n_blocks);
 
-    /* 배치가 끝난 버킷 메모리는 즉시 해제 */
+    /* 배치 내 파티션들을 병렬 처리 */
+    kt_forpool(thread_pool, discover_compute_worker, &w, (long)batch_count);
+
+    /* 배치가 끝난 연속 버킷 메모리는 즉시 해제 */
+    free(batch_entries);
     for (size_t p = batch_start; p < batch_end; p++) {
-      free(w.buckets[p].entries);
+      w.buckets[p] = (PartitionBucket){0};
     }
   }
 
-  for (int t = 0; t < n_threads; t++)
-    free(w.t_bloom[t]);
   free(w.buckets);
-  free(w.t_bloom);
+  free(w.bloom);
   free(w.t_cap_pairs);
   free(win_curr_pos);
+  free(block_offsets);
 
   return (CandidateGraph){
       .pairs = w.t_pairs, .counts = w.t_n_pairs, .n_threads = n_threads};
@@ -1035,18 +1152,18 @@ static inline uint64_t splitmix64(uint64_t x) {
   return x ^ (x >> 31);
 }
 
-/* 블룸필터 조회 겸 삽입: 이미 (아마도) 있으면 1 반환.
- * 2개의 해시 비트(h1, h2)를 검사/설정한다. 거짓 양성은 허용하며, 이 경우
- * 해당 쌍을 한 번 건너뛸 뿐이라 결과에 치명적이지 않다 */
-int bloom_test_and_set(uint8_t *bloom, uint64_t key) {
+/* 공유 cache-blocked 블룸필터 조회 겸 삽입. 한 키의 세 비트를 같은 64비트
+ * word에 배치해 메모리 접근을 한 cache line으로 제한하고, atomic OR로
+ * 여러 worker가 락 없이 공유한다. */
+int bloom_test_and_set(uint64_t *bloom, uint64_t key) {
   uint64_t h = splitmix64(key);
-  uint32_t h1 = (uint32_t)h & BLOOM_MASK;
-  uint32_t h2 = (uint32_t)(h >> 32) & BLOOM_MASK;
-  int was_set =
-      ((bloom[h1 >> 3] >> (h1 & 7)) & 1) & ((bloom[h2 >> 3] >> (h2 & 7)) & 1);
-  bloom[h1 >> 3] |= (uint8_t)(1 << (h1 & 7));
-  bloom[h2 >> 3] |= (uint8_t)(1 << (h2 & 7));
-  return was_set;
+  uint32_t word_idx = (uint32_t)h & BLOOM_WORD_MASK;
+  uint64_t bits = (UINT64_C(1) << ((h >> 22) & 63)) |
+                  (UINT64_C(1) << ((h >> 36) & 63)) |
+                  (UINT64_C(1) << ((h >> 50) & 63));
+  uint64_t old =
+      __atomic_fetch_or(&bloom[word_idx], bits, __ATOMIC_RELAXED);
+  return (old & bits) == bits;
 }
 
 /* qsort 비교 함수: uint32 오름차순 */

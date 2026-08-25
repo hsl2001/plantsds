@@ -47,7 +47,7 @@ extern "C" {
 #define ABS_DIFF(a, b) ((a) > (b) ? (a) - (b) : (b) - (a))
 
 #define NUM_PARTITIONS 1024
-#define BATCH_PARTITIONS 256
+#define BATCH_PARTITIONS 64
 #define MAX_KMER_FREQ 16
 #define MAX_PAIR_COMPARISONS 2
 #define MAX_COLLINEAR_LOOKAHEAD 8
@@ -57,9 +57,10 @@ extern "C" {
 #define CANDIDATE_SCORE_SHIFT 28
 #define CANDIDATE_WINDOW_MASK ((UINT32_C(1) << CANDIDATE_SCORE_SHIFT) - 1)
 
-#define BLOOM_SIZE_BITS (1 << 26)
-#define BLOOM_SIZE_BYTES (BLOOM_SIZE_BITS / 8)
-#define BLOOM_MASK (BLOOM_SIZE_BITS - 1)
+#define BLOOM_SIZE_BITS (UINT32_C(1) << 28)
+#define BLOOM_WORD_BITS 64
+#define BLOOM_NUM_WORDS (BLOOM_SIZE_BITS / BLOOM_WORD_BITS)
+#define BLOOM_WORD_MASK (BLOOM_NUM_WORDS - 1)
 
 // ==============================================================
 // CORE DATA STRUCTURES
@@ -157,7 +158,7 @@ typedef struct {
   size_t step_size;
   double p_kmer;
   PartitionBucket *buckets;
-  uint8_t **t_bloom;
+  uint64_t *bloom;
   CandidatePair **t_pairs;
   size_t *t_n_pairs;
   size_t *t_cap_pairs;
@@ -168,12 +169,16 @@ typedef struct {
 // FUNCTION DECLARATIONS
 // ==============================================================
 void kt_for(int n_threads, void (*func)(void *, long, int), void *data, long n);
+void *kt_forpool_init(int n_threads);
+void kt_forpool_destroy(void *pool);
+void kt_forpool(void *pool, void (*func)(void *, long, int), void *data,
+                long n);
 
 // 1. CLI & UTILITIES
 void get_basename(const char *filename, char *basename, size_t size);
 uint32_t mix_hash(uint64_t hash_value, uint64_t seed);
 uint64_t encode_pair(uint32_t a, uint32_t b);
-int bloom_test_and_set(uint8_t *bloom, uint64_t key);
+int bloom_test_and_set(uint64_t *bloom, uint64_t key);
 int compare_uint32(const void *a, const void *b);
 int compare_hash_entry(const void *a, const void *b);
 
@@ -187,14 +192,16 @@ void free_unionfind(UnionFind *uf);
 GlobalWindows extract_all_windows(char **files, int num_files,
                                   const Segtrace *r, uint64_t scale,
                                   size_t window_size, size_t step_size,
-                                  size_t min_bases, int n_threads);
+                                  size_t min_bases, int n_threads,
+                                  void *thread_pool);
 
 // 4. DISCOVERY & DISTANCE COMPUTATION
 CandidateGraph discover_and_compute(const uint32_t *all_hashes,
                                     const WindowCoord *coords,
                                     size_t n_windows, size_t window_size,
                                     size_t step_size, int n_threads,
-                                    uint32_t kmer_size);
+                                    uint32_t kmer_size,
+                                    void *thread_pool);
 void free_candidate_graph(CandidateGraph *graph);
 
 // 5. REGION CLUSTERING, COPY FILTERING & OUTPUT
