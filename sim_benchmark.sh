@@ -15,6 +15,6 @@ echo "=== Running SegTrace simulation smoke benchmark ==="
         --force \
         --species 3 \
         --chromosomes 2 \
-        --chrom-length 1000000 \
-        --fragments 5 \
+        --chrom-length 2000000 \
+        --fragments 10 \
         --threads 8

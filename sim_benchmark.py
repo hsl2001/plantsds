@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import platform
 import random
 import re
 import shutil
@@ -104,8 +105,7 @@ class FastaWriter:
         self.finish_record()
         if self.column:
             self.handle.write(b"\n")
-        header = f">{name}\n".encode()
-        self.handle.write(header)
+        self.handle.write(f">{name}\n".encode())
         self.current_name = name
         self.current_length = 0
         self.current_offset = self.handle.tell()
@@ -118,6 +118,23 @@ class FastaWriter:
             take = min(self.width - self.column, len(seq) - offset)
             self.handle.write(seq[offset:offset + take])
             self.column += take
+            offset += take
+            if self.column == self.width:
+                self.handle.write(b"\n")
+                self.column = 0
+
+    def finish_record(self) -> None:
+        if self.column:
+            self.handle.write(b"\n")
+            self.column = 0
+        if self.current_name:
+            self.records.append((self.current_name, self.current_length, self.current_offset, self.width, self.width + 1))
+            self.current_name = ""
+
+    def write_fai(self, fasta_path: Path) -> None:
+        with fasta_path.with_suffix(fasta_path.suffix + ".fai").open("w") as handle:
+            for record in self.records:
+                handle.write("\t".join(str(value) for value in record) + "\n")
             offset += take
             if self.column == self.width:
                 self.handle.write(b"\n")
@@ -457,7 +474,8 @@ def profile_command(
     stderr_path = profile_dir / f"{label}.stderr.txt"
 
     time_bin = Path("/usr/bin/time")
-    wrapped = [str(time_bin), "-v", "-o", str(time_path), *command] if time_bin.exists() else command
+    time_flag = "-l" if platform.system() == "Darwin" else "-v"
+    wrapped = [str(time_bin), time_flag, "-o", str(time_path), *command] if time_bin.exists() else command
 
     started = time.perf_counter()
     with stderr_path.open("w") as stderr_handle:
@@ -501,8 +519,12 @@ def parse_max_rss(path: Path) -> int:
     if not path.exists():
         return 0
     text = path.read_text(errors="replace")
-    match = re.search(r"Maximum resident set size \(kbytes\): (\d+)", text)
-    return int(match.group(1)) if match else 0
+    linux_match = re.search(r"Maximum resident set size \(kbytes\): (\d+)", text)
+    if linux_match:
+        return int(linux_match.group(1))
+
+    mac_match = re.search(r"^\s*(\d+)\s+maximum resident set size\s*$", text, re.IGNORECASE | re.MULTILINE)
+    return int(mac_match.group(1)) // 1024 if mac_match else 0
 
 
 def empty_bed(path: Path) -> Path:
@@ -574,22 +596,6 @@ def run_minimap2(args: argparse.Namespace, paths: SimulationPaths, work_dir: Pat
         return tool_failed(tool, exc)
 
 
-def run_wfmash(args: argparse.Namespace, paths: SimulationPaths, work_dir: Path) -> ToolResult:
-    tool = "wfmash"
-    wfmash_bin = resolve_executable(args.wfmash_bin)
-    if wfmash_bin is None:
-        return tool_missing(tool, args.wfmash_bin)
-    paf = work_dir / "wfmash.paf"
-    prediction = work_dir / "wfmash.bed"
-    command = [str(wfmash_bin), "-t", str(args.threads), str(paths.combined_fasta), str(paths.combined_fasta)]
-    try:
-        profile = profile_command(command, work_dir, "wfmash", stdout_path=paf)
-        paf_to_bed(paf, prediction, args.min_call_length)
-        return result_from_prediction(tool, prediction, paths.truth_bed, profile)
-    except Exception as exc:
-        return tool_failed(tool, exc)
-
-
 def run_nucmer(args: argparse.Namespace, paths: SimulationPaths, work_dir: Path) -> ToolResult:
     tool = "MUMmer/nucmer"
     nucmer_bin = resolve_executable(args.nucmer_bin)
@@ -616,6 +622,7 @@ def run_blastn(args: argparse.Namespace, paths: SimulationPaths, work_dir: Path)
     tool = "BLASTN"
     makeblastdb_bin = resolve_executable(args.makeblastdb_bin)
     blastn_bin = resolve_executable(args.blastn_bin)
+
     if makeblastdb_bin is None:
         return tool_missing(tool, args.makeblastdb_bin)
     if blastn_bin is None:
@@ -784,7 +791,6 @@ def tool_specs() -> list[ToolSpec]:
     return [
         ToolSpec("SegTrace", "no_segtrace", "segtrace", "-", run_segtrace),
         ToolSpec("minimap2", "no_minimap2", "minimap2", "-", run_minimap2),
-        ToolSpec("wfmash", "no_wfmash", "wfmash", "-", run_wfmash),
         ToolSpec("MUMmer/nucmer", "no_nucmer", "nucmer", "-", run_nucmer),
         ToolSpec("BLASTN", "no_blastn", "blastn", "-", run_blastn),
     ]
@@ -819,7 +825,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--step-size", "-t", type=int, default=0, help="SegTrace step size")
     parser.add_argument("--min-report-copies", "-c", type=int, default=1, help="SegTrace -c value")
     parser.add_argument("--minimap2-bin", default="minimap2", help="minimap2 executable")
-    parser.add_argument("--wfmash-bin", default="wfmash", help="wfmash executable")
     parser.add_argument("--nucmer-bin", default="nucmer", help="nucmer executable")
     parser.add_argument("--show-coords-bin", default="show-coords", help="show-coords executable")
     parser.add_argument("--blastn-bin", default="blastn", help="blastn executable")
