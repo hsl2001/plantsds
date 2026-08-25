@@ -18,7 +18,7 @@ static void print_usage(void) {
   printf("Segtrace: Segmental Tracer\n\n"
          "Usage: segtrace [options] fasta1 [fasta2 ...]\n\n"
          "Options:\n"
-         "  -k: kmer size (default: 17)\n"
+         "  -k: kmer size (default: 21)\n"
          "  -s: scale factor (default: 16)\n"
          "  -w: window size in bp (default: 1024)\n"
          "  -t: step size in bp (default: 0 [auto: 33%% of window size])\n"
@@ -51,7 +51,7 @@ int main(int argc, char **argv) {
    * window/step/min_bases = 윈도우 크기, 이동 간격, 최소 유효 염기 수
    *   (0이면 윈도우 크기에서 자동 유도)
    * min_copies = 파일(유전체)당 보고할 최소 복제 수 */
-  uint32_t kmer_size = 17;
+  uint32_t kmer_size = 21;
   uint64_t scale = 16;
   size_t window_size = 1024, step_size = 0, min_bases = 0;
   uint32_t min_copies = 2;
