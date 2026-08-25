@@ -1,6 +1,8 @@
 segtrace
 results/
 data/
+fasta/
+gene.bed/
 benchmark
 sedef*
 *.fa*
@@ -9,5 +11,7 @@ sedef*
 *.csv
 venv/
 *.gz
+*.log
 __pycache__/
 plotting/
+sim_benchmark/
