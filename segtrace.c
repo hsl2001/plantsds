@@ -309,7 +309,7 @@ static void seq_chunk_worker(void *data, long i, int tid) {
       memcpy(job->hashes + h_idx, local_hashes, sketch_size * sizeof(uint32_t));
       job->num_hashes += sketch_size;
     }
-    wc->sketch_offset = (uint32_t)h_idx;
+    wc->sketch_offset = (uint64_t)h_idx;
 
     /* 다음 윈도우를 위해 유효 염기 수를 슬라이딩 갱신:
      * 앞에서 빠지는 step_size개를 빼고 뒤에서 들어오는 step_size개를 더함 */
@@ -423,7 +423,7 @@ GlobalWindows extract_all_windows(char **files, int num_files,
           size_t base_c_offset = gw.num_sketches;
           for (size_t k = 0; k < job->num_coords; k++) {
             WindowCoord wc = job->coords[k];
-            wc.sketch_offset += (uint32_t)base_h_offset;
+            wc.sketch_offset += (uint64_t)base_h_offset;
             gw.coords[base_c_offset + k] = wc;
           }
           gw.num_sketches += job->num_coords;
@@ -578,7 +578,7 @@ static void count_bucket_entries(void *data, long idx, int tid) {
   size_t *counts = build->block_offsets + block * build->batch_count;
 
   for (size_t win = win_start; win < win_end; win++) {
-    uint32_t off = build->coords[win].sketch_offset;
+    uint64_t off = build->coords[win].sketch_offset;
     uint16_t size = build->coords[win].sketch_size;
     uint16_t pos = build->win_curr_pos[win];
     while (pos < size) {
@@ -602,7 +602,7 @@ static void scatter_bucket_entries(void *data, long idx, int tid) {
   size_t *offsets = build->block_offsets + block * build->batch_count;
 
   for (size_t win = win_start; win < win_end; win++) {
-    uint32_t off = build->coords[win].sketch_offset;
+    uint64_t off = build->coords[win].sketch_offset;
     uint16_t size = build->coords[win].sketch_size;
     uint16_t pos = build->win_curr_pos[win];
     while (pos < size) {
@@ -670,18 +670,13 @@ static void discover_compute_worker(void *data, long idx, int tid) {
               !check_collinear_neighbor(w_data, wa, wb))
             continue;
 
-          /* score = 공유 비율을 0~255로 정규화 (반올림 포함).
-           * 채택된 쌍은 윈도우 id 상위 4비트씩에 score를 끼워 넣어 저장한다
-           * (하위 28비트 = 윈도우 id, 상위 4비트 = score의 절반씩 a/b에 분산) */
+              /* score = 공유 비율을 0~255로 정규화 (반올림 포함). */
           size_t max_size = max_sketch_size(w_data, wa, wb);
           uint32_t score =
               (uint32_t)((shared * UINT8_MAX + max_size / 2) / max_size);
           DA_PUSH(w_data->t_pairs[tid], w_data->t_n_pairs[tid],
                   w_data->t_cap_pairs[tid],
-                  ((CandidatePair){
-                      wa | ((score & UINT32_C(0x0f))
-                            << CANDIDATE_SCORE_SHIFT),
-                      wb | ((score >> 4) << CANDIDATE_SCORE_SHIFT)}));
+                  ((CandidatePair){wa, wb, (uint8_t)score}));
         }
       }
     }
@@ -700,7 +695,7 @@ CandidateGraph discover_and_compute(const uint32_t *all_hashes,
                                     uint32_t kmer_size,
                                     void *thread_pool) {
   if (n_windows > (size_t)CANDIDATE_WINDOW_MASK + 1) {
-    /* 쌍 인코딩이 윈도우 id에 28비트만 쓰므로 상한 검사 */
+    /* 쌍 인코딩이 윈도우 id에 32비트만 쓰므로 상한 검사 */
     fprintf(stderr, "[ERROR] Too many windows for candidate encoding\n");
     exit(1);
   }
@@ -825,13 +820,11 @@ CandidateGraph discover_and_compute(const uint32_t *all_hashes,
 
 /* 인코딩된 값에서 윈도우 id(하위 28비트) 추출 */
 static inline uint32_t candidate_window(uint32_t encoded) {
-  return encoded & CANDIDATE_WINDOW_MASK;
+  return encoded;
 }
 
-/* a/b 상위 4비트에 나눠 담긴 8비트 score 복원 */
 static inline uint32_t candidate_score(CandidatePair pair) {
-  return (pair.a >> CANDIDATE_SCORE_SHIFT) |
-         ((pair.b >> CANDIDATE_SCORE_SHIFT) << 4);
+  return pair.score;
 }
 
 /* 후보 쌍에 한 번이라도 등장한 윈도우들을 같은 서열 내 인접 윈도우끼리
@@ -846,7 +839,7 @@ void build_duplicate_loci(const CandidateGraph *graph, size_t num_windows,
                           size_t *out_n_regions) {
   /* 1) 마킹 초기화: 모든 윈도우를 "후보 아님" 상태로 */
   for (size_t i = 0; i < num_windows; i++) {
-    coords[i].sketch_offset = UINT32_MAX;
+    coords[i].sketch_offset = UINT64_MAX;
     coords[i].sketch_size = 0;
   }
   for (int t = 0; t < graph->n_threads; t++) {
@@ -929,9 +922,9 @@ void cluster_duplicate_loci(const CandidateGraph *graph,
   for (int t = 0; t < graph->n_threads; t++) {
     for (size_t i = 0; i < graph->counts[t]; i++) {
       CandidatePair pair = graph->pairs[t][i];
-      uint32_t region_a = coords[candidate_window(pair.a)].sketch_offset;
-      uint32_t region_b = coords[candidate_window(pair.b)].sketch_offset;
-      if (region_a == UINT32_MAX || region_b == UINT32_MAX ||
+      uint64_t region_a = coords[candidate_window(pair.a)].sketch_offset;
+      uint64_t region_b = coords[candidate_window(pair.b)].sketch_offset;
+      if (region_a == UINT64_MAX || region_b == UINT64_MAX ||
           region_a == region_b)
         continue;
 
@@ -940,13 +933,13 @@ void cluster_duplicate_loci(const CandidateGraph *graph,
           (score == regions[region_a].cluster_id &&
            region_b < regions[region_a].partner_id)) {
         regions[region_a].cluster_id = score;
-        regions[region_a].partner_id = region_b;
+        regions[region_a].partner_id = (uint32_t)region_b;
       }
       if (score > regions[region_b].cluster_id ||
           (score == regions[region_b].cluster_id &&
            region_a < regions[region_b].partner_id)) {
         regions[region_b].cluster_id = score;
-        regions[region_b].partner_id = region_a;
+        regions[region_b].partner_id = (uint32_t)region_a;
       }
     }
   }

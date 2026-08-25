@@ -55,8 +55,7 @@ extern "C" {
 #define MIN_SD_LEN 1000
 #define MIN_IDENTITY 0.8
 
-#define CANDIDATE_SCORE_SHIFT 28
-#define CANDIDATE_WINDOW_MASK ((UINT32_C(1) << CANDIDATE_SCORE_SHIFT) - 1)
+#define CANDIDATE_WINDOW_MASK UINT32_MAX
 
 #define BLOOM_NUM_WORDS (UINT32_C(1) << 22)
 
@@ -85,7 +84,7 @@ typedef struct {
 
 typedef struct {
   uint32_t seq_id;
-  uint32_t sketch_offset;
+  uint64_t sketch_offset;
   uint32_t window_idx;
   uint16_t sketch_size;
 } WindowCoord;
@@ -99,6 +98,7 @@ typedef struct {
 typedef struct {
   uint32_t a;
   uint32_t b;
+  uint8_t score;
 } CandidatePair;
 
 typedef struct {
