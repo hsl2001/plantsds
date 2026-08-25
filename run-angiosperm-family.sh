@@ -32,8 +32,6 @@ set -euo pipefail
 cd "$WORKDIR"
 mkdir -p results
 
-make
-
 mapfile -t FASTAS < ./selected/angiosperm_family.files
 printf '[segtrace] input FASTA count: %d\n' "${#FASTAS[@]}"
 
