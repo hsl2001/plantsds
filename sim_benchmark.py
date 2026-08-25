@@ -813,7 +813,7 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument("--threads", "-p", type=int, default=8, help="Tool threads where supported")
     parser.add_argument("--segtrace-bin", default="./segtrace", help="SegTrace executable")
-    parser.add_argument("--kmer", "-k", type=int, default=17, help="SegTrace k-mer size")
+    parser.add_argument("--kmer", "-k", type=int, default=19, help="SegTrace k-mer size")
     parser.add_argument("--scale", "-s", type=int, default=16, help="SegTrace scale factor")
     parser.add_argument("--window-size", "-w", type=int, default=1024, help="SegTrace window size")
     parser.add_argument("--step-size", "-t", type=int, default=0, help="SegTrace step size")
