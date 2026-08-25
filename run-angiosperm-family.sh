@@ -13,8 +13,8 @@ cd "$WORKDIR"
 mkdir -p selected results
 
 python3 ./select_angiosperm_family.py \
-  --dataset-dir ./ncbi_dataset/data \
-  --report ./ncbi_dataset/data/assembly_data_report.jsonl \
+  --dataset-dir ./eukaryotic_data/ncbi_dataset/data \
+  --report ./eukaryotic_data/ncbi_dataset/data/assembly_data_report.jsonl \
   --taxonomy-cache ./selected/taxonomy_rank_lineage.tsv \
   --out ./selected/angiosperm_family.files \
   --summary ./selected/angiosperm_family_min.tsv

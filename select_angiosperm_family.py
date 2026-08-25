@@ -11,21 +11,15 @@ from pathlib import Path
 
 ANGIOSPERM_TAXID = 3398
 
-FORCED_MAJOR_PLANT_ACCESSIONS = {
-    "Am": "GCF_000471905.2",  # Amborella trichopoda
-    "At": "GCF_000001735.4",  # Arabidopsis thaliana
-    "Bd": "GCF_000005505.3",  # Brachypodium distachyon
-    "Br": "GCF_000309985.2",  # Brassica rapa
-    # "Cr": "GCF_000002595.2",  # Chlamydomonas reinhardtii
-    # "Cv": "GCA_023343905.1",  # Chlorella vulgaris
-    # "Mp": "GCA_037833965.1",  # Marchantia polymorpha
-    "Os": "GCF_034140825.1",  # Oryza sativa Japonica Group
-    # "Pp": "GCF_000002425.5",  # Physcomitrium patens
-    "Pt": "GCF_000002775.5",  # Populus trichocarpa
-    "Sl": "GCF_036512215.1",  # Solanum lycopersicum
-    # "Sm": "GCF_000143415.4",  # Selaginella moellendorffii
-    # "Vc": "GCF_000143455.1",  # Volvox carteri
-    "Vv": "GCF_030704535.1",  # Vitis vinifera
+FORCED_MAJOR_PLANTS = {
+    "Am": ("GCF_000471905.2", "Amborella trichopoda"),
+    "At": ("GCF_000001735.4", "Arabidopsis thaliana"),
+    "Bd": ("GCF_000005505.3", "Brachypodium distachyon"),
+    "Br": ("GCF_000309985.2", "Brassica rapa"),
+    "Os": ("GCF_034140825.1", "Oryza sativa"),
+    "Pt": ("GCF_000002775.5", "Populus trichocarpa"),
+    "Sl": ("GCF_036512215.1", "Solanum lycopersicum"),
+    "Vv": ("GCF_030704535.1", "Vitis vinifera"),
 }
 
 
@@ -121,6 +115,32 @@ def assembly_path(dataset_dir, accession):
     return matches[0] if matches else ""
 
 
+def available_forced_record(preferred_accession, organism_name, records,
+                            records_by_accession, dataset_dir):
+    preferred = records_by_accession.get(preferred_accession)
+    if preferred and assembly_path(dataset_dir, preferred_accession):
+        return preferred
+
+    candidates = [
+        record for record in records
+        if record["name"].lower().startswith(organism_name.lower()) and
+        assembly_path(dataset_dir, record["accession"])
+    ]
+    if not candidates:
+        genus = organism_name.split()[0].lower()
+        candidates = [
+            record for record in records
+            if record["name"].lower().startswith(genus + " ") and
+            assembly_path(dataset_dir, record["accession"])
+        ]
+    if candidates:
+        fallback = min(candidates, key=lambda record: record["size"])
+        print(f"[select] {preferred_accession} unavailable; using "
+              f"{fallback['accession']} for {organism_name}", file=sys.stderr)
+        return fallback
+    return preferred
+
+
 def main():
     parser = argparse.ArgumentParser(description="Select the smallest assembly per angiosperm family.")
     parser.add_argument("--dataset-dir", default="ncbi_dataset/data")
@@ -162,11 +182,12 @@ def main():
 
     selected = {record["accession"]: ("family_min", family, record)
                 for family, record in best.items()}
-    for label, accession in FORCED_MAJOR_PLANT_ACCESSIONS.items():
-        record = records_by_accession.get(accession)
+    for label, (accession, organism_name) in FORCED_MAJOR_PLANTS.items():
+        record = available_forced_record(accession, organism_name, records,
+                                         records_by_accession, dataset_dir)
         if record is None:
             raise SystemExit(f"forced accession for {label} is absent from report: {accession}")
-        selected[accession] = (f"forced_{label}", None, record)
+        selected[record["accession"]] = (f"forced_{label}", None, record)
     for accession in args.force_accession:
         record = records_by_accession.get(accession)
         if record is None:
@@ -198,7 +219,7 @@ def main():
     print(f"selected_families={len(best)}")
     print(f"selected_angiosperm_bp={total_bp}")
     print(f"selected_angiosperm_Gbp={total_bp / 1e9:.3f}")
-    print(f"forced_major_plants={len(FORCED_MAJOR_PLANT_ACCESSIONS)}")
+    print(f"forced_major_plants={len(FORCED_MAJOR_PLANTS)}")
     print(f"selected_total_bp={selected_bp}")
     print(f"selected_total_Gbp={selected_bp / 1e9:.3f}")
     print(f"written_fastas={len(fasta_paths)}")
