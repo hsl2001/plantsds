@@ -24,8 +24,7 @@ static void print_usage(void) {
          "  -t: step size in bp (default: 0 [auto: 33%% of window size])\n"
          "  -b: minimum valid bases per window (default: 0 [auto: 25%% of "
          "window size])\n"
-         "  -c: minimum copies per genome/file to report (default: 2 "
-         "[1=duplication map, >=3=polyploid])\n"
+         "  -c: minimum copies per genome/file to report (default: 1)\n"
          "  -m: filter soft-masked bases (treat lowercase a/c/g/t as invalid)\n"
          "  -o: output file prefix (default: segtrace)\n"
          "  -p: number of threads (default: 8)\n"
@@ -54,7 +53,7 @@ int main(int argc, char **argv) {
   uint32_t kmer_size = 19;
   uint64_t scale = 16;
   size_t window_size = 1024, step_size = 0, min_bases = 0;
-  uint32_t min_copies = 2;
+  uint32_t min_copies = 1;
   const char *out_prefix = "segtrace";
   int n_threads = 8, filter_masked = 0;
 
