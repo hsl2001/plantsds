@@ -61,7 +61,7 @@ int main(int argc, char **argv) {
   /* 단일 대시 옵션 파싱 (ketopt: getopt의 경량 대체) */
   ketopt_t opt = KETOPT_INIT;
   int c;
-    while ((c = ketopt(&opt, argc, argv, 1, "k:s:w:t:b:c:o:p:mh", 0)) >= 0) {
+  while ((c = ketopt(&opt, argc, argv, 1, "k:s:w:t:b:c:o:p:mh", 0)) >= 0) {
     if (c == 'h') {
       print_usage();
       return 0;
@@ -83,8 +83,7 @@ int main(int argc, char **argv) {
       n_threads = atoi(opt.arg);
       if (n_threads < 1)
         n_threads = 1;
-    }
-    else if (c == 'm')
+    } else if (c == 'm')
       filter_masked = 1;
     else
       return 1;
@@ -92,8 +91,6 @@ int main(int argc, char **argv) {
   /* 자동 파라미터 결정:
    * step_size는 윈도우의 1/3 (인접 윈도우가 3배 중첩),
    * min_bases는 윈도우의 1/4 (N이 75% 이상인 윈도우는 스케치하지 않음) */
-  if (min_copies < 1)
-    min_copies = 1;
   if (step_size == 0)
     step_size = window_size / 3;
   if (min_bases == 0)
@@ -203,7 +200,7 @@ static inline uint32_t normalize_sampled_hash(uint32_t hash,
  * 정규(canonical) 해시가 threshold 미만인 k-mer만 샘플링한다.
  * (threshold = UINT32_MAX/scale이므로 전체의 1/scale. minimizer처럼 서열 내용과
  *  무관하게 해시값 기준으로 선택하므로 두 서열에서 같은 k-mer가 선택됨이 보장됨)
- * 채택된 해시는 정렬+중복 제거 후 out_hashes에 저장 (최대 2048개). */
+ * 채택된 해시는 정렬+중복 제거 후 out_hashes에 저장한다. */
 static inline void extract_hash_direct(const Segtrace *r, uint32_t *out_hashes,
                                        size_t *out_size, uint32_t threshold,
                                        const uint8_t *seq, size_t len) {
@@ -249,7 +246,7 @@ static inline void extract_hash_direct(const Segtrace *r, uint32_t *out_hashes,
        * 퍼뜨린 뒤 threshold 미만이면 스케치에 채택 */
       uint64_t canonical = (f_hash < r_hash) ? f_hash : r_hash;
       uint32_t h = mix_hash(canonical, r->hash_seed);
-      if (h < threshold && count < 2048) {
+      if (h < threshold && count < MAX_SKETCH_SIZE) {
         out_hashes[count++] = normalize_sampled_hash(h, threshold);
       }
     }
@@ -268,7 +265,7 @@ static inline void extract_hash_direct(const Segtrace *r, uint32_t *out_hashes,
   *out_size = count;
 }
 
-/* kt_for 스레드 작업: 염색체의 한 chunk 구간을 담당해 윈도우를 step_size씩
+/* 스레드 풀 작업: 염색체의 한 chunk 구간을 담당해 윈도우를 step_size씩
  * 이동하며 스케치를 만든다. 스레드 간 충돌을 피하기 위해 결과는 job 내부의
  * 로컬 배열에 쌓고, 종료 후 메인 스레드가 전역 배열로 병합한다. */
 static void seq_chunk_worker(void *data, long i, int tid) {
@@ -279,7 +276,7 @@ static void seq_chunk_worker(void *data, long i, int tid) {
   uint32_t current_window_idx =
       (uint32_t)(job->chunk_start_idx / job->step_size);
 
-  uint32_t local_hashes[2048];
+  uint32_t local_hashes[MAX_SKETCH_SIZE];
 
   size_t idx = job->chunk_start_idx;
   size_t valid_bases = 0;
@@ -338,6 +335,8 @@ GlobalWindows extract_all_windows(char **files, int num_files,
                                   void *thread_pool) {
   fprintf(stderr, "[segtrace] Extracting windows across genomes...\n");
   GlobalWindows gw = {0};
+  size_t num_all_hashes = 0, cap_all_hashes = 0;
+  size_t cap_sketches = 0, cap_seqs = 0;
   uint32_t threshold = (uint32_t)(UINT32_MAX / scale);
 
   for (int f = 0; f < num_files; f++) {
@@ -360,7 +359,7 @@ GlobalWindows extract_all_windows(char **files, int num_files,
       if (len < window_size)
         continue;
 
-      DA_RESERVE(gw.seq_lens, gw.cap_seqs, gw.num_seqs + 1);
+      DA_RESERVE(gw.seq_lens, cap_seqs, gw.num_seqs + 1);
       gw.seq_lens[gw.num_seqs].genome = strdup(bname);
       gw.seq_lens[gw.num_seqs].seq = strdup(ks->name.s);
       gw.seq_lens[gw.num_seqs].file_id = (uint32_t)f;
@@ -368,12 +367,10 @@ GlobalWindows extract_all_windows(char **files, int num_files,
 
       uint8_t *seq_ptr = (uint8_t *)ks->seq.s;
 
-      size_t est_windows =
-          (len >= window_size) ? ((len - window_size) / step_size + 1) : 0;
-      DA_RESERVE(gw.coords, gw.cap_sketches,
-                 gw.num_sketches + est_windows + 16);
-      DA_RESERVE(gw.all_hashes, gw.cap_all_hashes,
-                 gw.num_all_hashes + (est_windows + 16) * 96);
+      size_t seq_windows = (len - window_size) / step_size + 1;
+      DA_RESERVE(gw.coords, cap_sketches, gw.num_sketches + seq_windows);
+      DA_RESERVE(gw.all_hashes, cap_all_hashes,
+             num_all_hashes + seq_windows * 96);
 
       /* 병렬화를 위해 염색체를 chunk로 분할.
        * 스레드 수의 4배로 쪼개 부하 균형을 맞추고 최소 100kb를 보장하며,
@@ -414,14 +411,14 @@ GlobalWindows extract_all_windows(char **files, int num_files,
       for (size_t j = 0; j < num_jobs; j++) {
         SeqChunkJob *job = &jobs[j];
         if (job->num_coords > 0) {
-          DA_RESERVE(gw.all_hashes, gw.cap_all_hashes,
-                     gw.num_all_hashes + job->num_hashes);
-          DA_RESERVE(gw.coords, gw.cap_sketches,
-                     gw.num_sketches + job->num_coords);
-          size_t base_h_offset = gw.num_all_hashes;
+          DA_RESERVE(gw.all_hashes, cap_all_hashes,
+               num_all_hashes + job->num_hashes);
+          DA_RESERVE(gw.coords, cap_sketches,
+               gw.num_sketches + job->num_coords);
+          size_t base_h_offset = num_all_hashes;
           memcpy(gw.all_hashes + base_h_offset, job->hashes,
                  job->num_hashes * sizeof(uint32_t));
-          gw.num_all_hashes += job->num_hashes;
+          num_all_hashes += job->num_hashes;
 
           size_t base_c_offset = gw.num_sketches;
           for (size_t k = 0; k < job->num_coords; k++) {
@@ -589,8 +586,7 @@ static void count_bucket_entries(void *data, long idx, int tid) {
       size_t partition = hash_partition(hash);
       if (partition >= build->batch_start + build->batch_count)
         break;
-      if (partition >= build->batch_start)
-        counts[partition - build->batch_start]++;
+      counts[partition - build->batch_start]++;
       pos++;
     }
   }
@@ -614,11 +610,9 @@ static void scatter_bucket_entries(void *data, long idx, int tid) {
       size_t partition = hash_partition(hash);
       if (partition >= build->batch_start + build->batch_count)
         break;
-      if (partition >= build->batch_start) {
-        size_t local_partition = partition - build->batch_start;
-        build->entries[offsets[local_partition]++] =
-            (HashWindowEntry){hash, (uint32_t)win};
-      }
+      size_t local_partition = partition - build->batch_start;
+      build->entries[offsets[local_partition]++] =
+          (HashWindowEntry){hash, (uint32_t)win};
       pos++;
     }
     build->win_curr_pos[win] = pos;
@@ -779,7 +773,6 @@ CandidateGraph discover_and_compute(const uint32_t *all_hashes,
       bucket->size = 0;
       for (size_t block = 0; block < n_blocks; block++)
         bucket->size += block_offsets[block * batch_count + local];
-      bucket->cap = bucket->size;
       total_entries += bucket->size;
     }
 
@@ -1057,9 +1050,9 @@ void write_dup_bed(const char *out_prefix, const SegtraceDupRegion *dup_regions,
   for (size_t k = 0; k < n_merged; k++) {
     if (dup_regions[k].end - dup_regions[k].start >= min_sd_len) {
       uint32_t seq_i = dup_regions[k].seq_id;
-                  fprintf(out_bed, "%s-%s\t%zu\t%zu\t%u\n", seq_lens[seq_i].genome,
-              seq_lens[seq_i].seq, dup_regions[k].start, dup_regions[k].end,
-                    dup_regions[k].cluster_id);
+      fprintf(out_bed, "%s-%s\t%zu\t%zu\t%u\n", seq_lens[seq_i].genome,
+            seq_lens[seq_i].seq, dup_regions[k].start, dup_regions[k].end,
+            dup_regions[k].cluster_id);
     }
   }
   fclose(out_bed);
@@ -1157,7 +1150,7 @@ static inline uint64_t splitmix64(uint64_t x) {
  * 여러 worker가 락 없이 공유한다. */
 int bloom_test_and_set(uint64_t *bloom, uint64_t key) {
   uint64_t h = splitmix64(key);
-  uint32_t word_idx = (uint32_t)h & BLOOM_WORD_MASK;
+  uint32_t word_idx = (uint32_t)h & (BLOOM_NUM_WORDS - 1);
   uint64_t bits = (UINT64_C(1) << ((h >> 22) & 63)) |
                   (UINT64_C(1) << ((h >> 36) & 63)) |
                   (UINT64_C(1) << ((h >> 50) & 63));

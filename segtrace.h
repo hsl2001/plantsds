@@ -51,16 +51,14 @@ extern "C" {
 #define MAX_KMER_FREQ 16
 #define MAX_PAIR_COMPARISONS 2
 #define MAX_COLLINEAR_LOOKAHEAD 8
+#define MAX_SKETCH_SIZE 2048
 #define MIN_SD_LEN 1000
 #define MIN_IDENTITY 0.8
 
 #define CANDIDATE_SCORE_SHIFT 28
 #define CANDIDATE_WINDOW_MASK ((UINT32_C(1) << CANDIDATE_SCORE_SHIFT) - 1)
 
-#define BLOOM_SIZE_BITS (UINT32_C(1) << 28)
-#define BLOOM_WORD_BITS 64
-#define BLOOM_NUM_WORDS (BLOOM_SIZE_BITS / BLOOM_WORD_BITS)
-#define BLOOM_WORD_MASK (BLOOM_NUM_WORDS - 1)
+#define BLOOM_NUM_WORDS (UINT32_C(1) << 22)
 
 // ==============================================================
 // CORE DATA STRUCTURES
@@ -117,19 +115,14 @@ typedef struct {
 typedef struct {
   HashWindowEntry *entries;
   size_t size;
-  size_t cap;
 } PartitionBucket;
 
 typedef struct {
   uint32_t *all_hashes;
-  size_t num_all_hashes;
-  size_t cap_all_hashes;
   WindowCoord *coords;
   size_t num_sketches;
-  size_t cap_sketches;
   GenomeSeqLen *seq_lens;
   size_t num_seqs;
-  size_t cap_seqs;
 } GlobalWindows;
 
 typedef struct {
