@@ -31,7 +31,7 @@ COLS = ["qseqid", "sseqid", "pident", "length", "mismatch", "gapopen",
 def parse_args():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--bed", default="ANGIOSPERM_FAMILY.dup.bed")
-    p.add_argument("--summary-tsv", default="angiosperm_family_min.tsv", help="TSV with accession,fasta columns")
+    p.add_argument("--summary-tsv", default="selected/angiosperm_family_complete.tsv", help="TSV with accession,fasta columns")
     p.add_argument("--output-dir", default="results/numt_nupt")
     p.add_argument("--threads", type=int, default=16)
     p.add_argument("--evalue", type=float, default=1e-5, help="single blastn evalue threshold")

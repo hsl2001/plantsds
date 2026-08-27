@@ -10,14 +10,15 @@ WALLTIME="${WALLTIME:-96:00:00}"
 
 mkdir -p "$LOGDIR"
 cd "$WORKDIR"
-mkdir -p selected results
+mkdir -p selected results selected/clean_fasta
 
 python3 ./select_angiosperm_family.py \
   --dataset-dir ./eukaryotic_data/ncbi_dataset/data \
   --report ./eukaryotic_data/ncbi_dataset/data/assembly_data_report.jsonl \
   --taxonomy-cache ./selected/taxonomy_rank_lineage.tsv \
+  --clean-dir ./selected/clean_fasta \
   --out ./selected/angiosperm_family.files \
-  --summary ./selected/angiosperm_family_min.tsv
+  --summary ./selected/angiosperm_family_complete.tsv
 
 qsub -N "$JOB_NAME" \
   -l nodes=node02:ppn=${THREADS} \
