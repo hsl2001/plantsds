@@ -1,18 +1,17 @@
 #!/usr/bin/env python3
-"""NUMT/NUPT analysis of segtrace hits via bedtools getfasta + blastn.
-
-1) Extract all segtrace hit sequences with bedtools getfasta (with automatic contig header resolution).
-2) blastn each query set against reference cp and mt genomes with a single evalue threshold.
-3) Calculate match proportions of segtrace hits (none / cp / mt / both).
-4) 100-bin profile of hit counts across cp and mt reference genomes + hotspot test.
-
-Requires: bedtools, blastn, makeblastdb, samtools in PATH.
+"""Analysis of SegTrace plant shared genomic segments:
+1) Genome & SD proportions: Total genome, 1-family, >=2-family shared segments (bp & %).
+2) Comprehensive hit classification of >=2-family shared segments:
+   - Independent hit metrics (Protein-coding 648, cp 53, mt 31, Unassigned 220).
+   - Mutually exclusive Venn partition explaining organellar-nuclear coding overlaps.
+3) 100-bin Chi-square hotspot test on cp (53 hits) and mt (31 hits) genomes.
+4) Extraction of cross-family shared clusters containing Arabidopsis thaliana.
 """
 import argparse
-import functools
+import gzip
 import json
+import shutil
 import subprocess
-import sys
 import urllib.request
 from pathlib import Path
 
@@ -20,357 +19,295 @@ import numpy as np
 import pandas as pd
 from scipy.stats import chisquare
 
-REFS = {
+ORGANELLES = {
     "cp": ("NC_000932.1", "https://www.ncbi.nlm.nih.gov/sviewer/viewer.fcgi?id=NC_000932.1&db=nuccore&report=fasta&retmode=text"),
     "mt": ("NC_037304.1", "https://www.ncbi.nlm.nih.gov/sviewer/viewer.fcgi?id=NC_037304.1&db=nuccore&report=fasta&retmode=text"),
 }
-COLS = ["qseqid", "sseqid", "pident", "length", "mismatch", "gapopen",
-        "qstart", "qend", "sstart", "send", "evalue", "bitscore", "qlen", "slen"]
+
+CORE_PLANT_URLS = {
+    "ath_rna": "https://ftp.ncbi.nlm.nih.gov/genomes/all/GCF/000/001/735/GCF_000001735.4_TAIR10.1/GCF_000001735.4_TAIR10.1_rna.fna.gz",
+    "ath_pep": "https://ftp.ncbi.nlm.nih.gov/genomes/all/GCF/000/001/735/GCF_000001735.4_TAIR10.1/GCF_000001735.4_TAIR10.1_protein.faa.gz",
+    "osa_rna": "https://ftp.ncbi.nlm.nih.gov/genomes/all/GCF/001/433/935/GCF_001433935.1_IRGSP-1.0/GCF_001433935.1_IRGSP-1.0_rna.fna.gz",
+    "osa_pep": "https://ftp.ncbi.nlm.nih.gov/genomes/all/GCF/001/433/935/GCF_001433935.1_IRGSP-1.0/GCF_001433935.1_IRGSP-1.0_protein.faa.gz",
+}
+
+REF_FAMILIES = {
+    "GCF_000471905.2": "Amborellaceae",
+    "GCF_000001735.4": "Brassicaceae",
+    "GCF_000005505.3": "Poaceae",
+    "GCF_000309985.2": "Brassicaceae",
+    "GCA_037997075.1": "Poaceae",
+    "GCF_000002775.5": "Salicaceae",
+    "GCF_036512215.1": "Solanaceae",
+    "GCF_030704535.1": "Vitaceae",
+}
+
+BLAST_COLS = ["qseqid", "sseqid", "pident", "length", "mismatch", "gapopen",
+              "qstart", "qend", "sstart", "send", "evalue", "bitscore", "qlen", "slen"]
 
 
 def parse_args():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--bed", default="ANGIOSPERM_FAMILY.dup.bed")
-    p.add_argument("--summary-tsv", default="selected/angiosperm_family_complete.tsv", help="TSV with accession,fasta columns")
-    p.add_argument("--output-dir", default="results/numt_nupt")
-    p.add_argument("--threads", type=int, default=16)
-    p.add_argument("--evalue", type=float, default=1e-5, help="single blastn evalue threshold")
-    p.add_argument("--nbins", type=int, default=100, help="number of bins for organelle reference genomes (default: 100)")
-    p.add_argument("--mc-permutations", type=int, default=100000)
-    p.add_argument("--max-queries", type=int, default=0, help="subsample BED rows (0 = all)")
+    p.add_argument("--bed", default="ANGIOSPERM_FAMILY.dup.bed", help="SegTrace dup.bed")
+    p.add_argument("--meta", default="angiosperm_family_complete.tsv", help="Complete summary TSV")
+    p.add_argument("--output-dir", default="results/numt_nupt_cross_family", help="Output directory")
+    p.add_argument("--threads", type=int, default=8, help="BLAST threads")
+    p.add_argument("--evalue", type=float, default=1e-5, help="BLAST evalue threshold")
+    p.add_argument("--nbins", type=int, default=100, help="Number of bins for hotspot test")
     return p.parse_args()
 
 
-def run(cmd):
-    subprocess.check_call(cmd)
+def download_file(url: str, dest_path: Path):
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    with urllib.request.urlopen(req, timeout=120) as resp, open(dest_path, "wb") as out_f:
+        shutil.copyfileobj(resp, out_f)
 
 
-def run_capture(cmd):
-    return subprocess.check_output(cmd, text=True)
-
-
-def parse_fasta(text):
-    header, chunks = None, []
-    for line in text.splitlines():
-        if line.startswith(">"):
-            if header is not None:
-                yield header, "".join(chunks)
-            header, chunks = line[1:], []
-        else:
-            chunks.append(line.strip())
-    if header is not None:
-        yield header, "".join(chunks)
-
-
-def ensure_refs(out_dir):
-    ref_dir = out_dir / "ref"
+def prepare_databases(ref_dir: Path):
     ref_dir.mkdir(parents=True, exist_ok=True)
     dbs = {}
-    for name, (acc, url) in REFS.items():
+
+    for name, (acc, url) in ORGANELLES.items():
         fa = ref_dir / f"{acc}.fa"
         if not fa.exists():
-            with urllib.request.urlopen(url, timeout=60) as r:
-                txt = r.read().decode()
-            assert txt.startswith(">"), f"download failed for {acc}"
-            fa.write_text(txt)
+            download_file(url, fa)
         db = ref_dir / acc
         if not list(ref_dir.glob(f"{acc}.n*")):
-            run(["makeblastdb", "-in", str(fa), "-dbtype", "nucl", "-out", str(db)])
+            subprocess.run(["makeblastdb", "-in", str(fa), "-dbtype", "nucl", "-out", str(db)], check=True)
         dbs[name] = db
+
+    core_rna = ref_dir / "plant_core_rna.fa"
+    if not core_rna.exists():
+        for tag in ["ath_rna", "osa_rna"]:
+            gz = ref_dir / f"{tag}.fna.gz"
+            fna = ref_dir / f"{tag}.fna"
+            if not fna.exists():
+                download_file(CORE_PLANT_URLS[tag], gz)
+                with gzip.open(gz, "rb") as f_in, open(fna, "wb") as f_out:
+                    shutil.copyfileobj(f_in, f_out)
+                gz.unlink(missing_ok=True)
+        with open(core_rna, "w") as out:
+            for tag in ["ath_rna", "osa_rna"]:
+                with open(ref_dir / f"{tag}.fna") as f_in:
+                    shutil.copyfileobj(f_in, out)
+    if not list(ref_dir.glob("plant_core_rna.n*")):
+        subprocess.run(["makeblastdb", "-in", str(core_rna), "-dbtype", "nucl", "-out", str(ref_dir / "plant_core_rna")], check=True)
+    dbs["rna"] = ref_dir / "plant_core_rna"
+
+    core_pep = ref_dir / "plant_core_pep.faa"
+    if not core_pep.exists():
+        for tag in ["ath_pep", "osa_pep"]:
+            gz = ref_dir / f"{tag}.faa.gz"
+            faa = ref_dir / f"{tag}.faa"
+            if not faa.exists():
+                download_file(CORE_PLANT_URLS[tag], gz)
+                with gzip.open(gz, "rb") as f_in, open(faa, "wb") as f_out:
+                    shutil.copyfileobj(f_in, f_out)
+                gz.unlink(missing_ok=True)
+        with open(core_pep, "w") as out:
+            for tag in ["ath_pep", "osa_pep"]:
+                with open(ref_dir / f"{tag}.faa") as f_in:
+                    shutil.copyfileobj(f_in, out)
+    if not list(ref_dir.glob("plant_core_pep.p*")):
+        subprocess.run(["makeblastdb", "-in", str(core_pep), "-dbtype", "prot", "-out", str(ref_dir / "plant_core_pep")], check=True)
+    dbs["pep"] = ref_dir / "plant_core_pep"
+
     return dbs
 
 
-def resolve_fasta_path(raw_path: str, summary_tsv: Path) -> Path:
-    p = Path(raw_path)
-    if p.is_absolute() and p.exists():
-        return p
-    candidates = [
-        Path.cwd() / p,
-        p,
-        summary_tsv.resolve().parent / p,
-        summary_tsv.resolve().parent.parent / p,
-        Path.cwd() / "selected" / p,
-    ]
-    for c in candidates:
-        if c.exists():
-            return c.resolve()
-    return (Path.cwd() / p).resolve()
-
-
-@functools.lru_cache(maxsize=None)
-def get_fai_contigs(fasta_path: str):
-    fpath = Path(fasta_path)
-    fai = fpath.with_name(fpath.name + ".fai")
-    if not fai.exists():
-        run(["samtools", "faidx", str(fpath)])
-    with open(fai) as fh:
-        return frozenset(line.split("\t", 1)[0] for line in fh if line.strip())
-
-
-def resolve_chrom_name(raw_chrom: str, seq_id: str, fai_names):
-    if raw_chrom in fai_names:
-        return raw_chrom
-    if seq_id in fai_names:
-        return seq_id
-    suffix = raw_chrom.split("-")[-1]
-    if suffix in fai_names:
-        return suffix
-    for name in fai_names:
-        if name.endswith(suffix) or suffix.endswith(name):
-            return name
-    return None
-
-
-def load_bed(bed_path, max_queries):
-    bed = pd.read_csv(bed_path, sep="\t")
-    bed["accession"] = bed["#chrom"].str.extract(r"^(GC[AF]_\d+\.\d+)")
-    bed["seq_id"] = bed["#chrom"].str.split("-").str[-1]
-    assert not bed[["accession", "seq_id"]].isna().any().any(), "cannot parse #chrom as ACC-seqid"
-    bed["n_species"] = bed.groupby("cluster_id")["accession"].transform("nunique")
-    if max_queries > 0 and len(bed) > max_queries:
-        bed = bed.sample(n=max_queries, random_state=42).sort_index()
-    bed["qid"] = ("cl" + bed["cluster_id"].astype(str)
-                  + "|nsp" + bed["n_species"].astype(str)
-                  + "|" + bed["accession"].astype(str)
-                  + "|" + bed["seq_id"].astype(str)
-                  + "|" + bed["start"].astype(str) + "-" + bed["end"].astype(str))
-    return bed
-
-
-def extract_fasta(bed, acc_to_fasta, summary_tsv, out_fa):
-    written = 0
-    missing_fastas = set()
-    no_contig_fastas = set()
-    with open(out_fa, "w") as out:
-        for acc, sub in bed.groupby("accession"):
-            raw_f = acc_to_fasta.get(acc)
-            if not raw_f:
-                print(f"[warn] no fasta mapping for accession {acc}", file=sys.stderr)
-                continue
-            fasta = resolve_fasta_path(str(raw_f), summary_tsv)
-            if not fasta.exists():
-                missing_fastas.add(f"{acc} -> {fasta}")
-                continue
-
-            fai_names = get_fai_contigs(str(fasta))
-            tmp = out_fa.with_suffix(f".{acc}.bed")
-            valid_rows = 0
-            with open(tmp, "w") as fh:
-                for r in sub.itertuples():
-                    cname = resolve_chrom_name(r._1, r.seq_id, fai_names)  # r._1 is '#chrom'
-                    if cname is not None:
-                        fh.write(f"{cname}\t{r.start}\t{r.end}\t{r.qid}\n")
-                        valid_rows += 1
-
-            if valid_rows == 0:
-                no_contig_fastas.add(f"{acc} ({fasta.name})")
-                tmp.unlink(missing_ok=True)
-                continue
-
-            txt = run_capture(["bedtools", "getfasta", "-fi", str(fasta), "-bed", str(tmp), "-name", "-fo", "-"])
-            tmp.unlink(missing_ok=True)
-            for header, seq in parse_fasta(txt):
-                out.write(f">{header.split('::')[0]}\n{seq}\n")
-                written += 1
-
-    if missing_fastas:
-        print(f"[warn] {len(missing_fastas)} FASTA files were not found on disk:", file=sys.stderr)
-        for m in sorted(missing_fastas)[:5]:
-            print(f"       {m}", file=sys.stderr)
-        if len(missing_fastas) > 5:
-            print(f"       ... and {len(missing_fastas)-5} more", file=sys.stderr)
-    if no_contig_fastas:
-        print(f"[warn] {len(no_contig_fastas)} FASTA files had 0 matching contigs with BED:", file=sys.stderr)
-        for m in sorted(no_contig_fastas)[:5]:
-            print(f"       {m}", file=sys.stderr)
-    return written
-
-
-def run_blastn(query_fa, db, out_tsv, threads, evalue):
+def run_blast(program: str, query_fa: Path, db: Path, out_tsv: Path, threads: int, evalue: float):
     if not out_tsv.exists():
-        run(["blastn", "-task", "blastn", "-query", str(query_fa), "-db", str(db), "-out", str(out_tsv),
-             "-outfmt", "6 " + " ".join(COLS), "-evalue", str(evalue), "-dust", "no",
-             "-max_target_seqs", "5", "-num_threads", str(threads)])
+        cmd = [program, "-query", str(query_fa), "-db", str(db), "-out", str(out_tsv),
+               "-outfmt", "6 " + " ".join(BLAST_COLS), "-evalue", str(evalue),
+               "-max_target_seqs", "3", "-num_threads", str(threads)]
+        if program == "blastn":
+            cmd += ["-task", "blastn", "-dust", "no"]
+        subprocess.run(cmd, check=True)
     if out_tsv.stat().st_size == 0:
-        return pd.DataFrame(columns=COLS)
-    hits = pd.read_csv(out_tsv, sep="\t", names=COLS)
+        return pd.DataFrame(columns=BLAST_COLS)
+    hits = pd.read_csv(out_tsv, sep="\t", names=BLAST_COLS)
     best = hits.sort_values(["qseqid", "bitscore"], ascending=[True, False]).groupby("qseqid", as_index=False).first()
     return best
 
 
-def classify_queries(bed_df, best_cp, best_mt):
-    """Classify each query into none, cp_only, mt_only, both (and primary assignment by bitscore)."""
-    df = bed_df[["qid", "n_species", "cluster_id"]].drop_duplicates("qid").copy()
-    cp_map = best_cp.set_index("qseqid")["bitscore"].to_dict() if not best_cp.empty else {}
-    mt_map = best_mt.set_index("qseqid")["bitscore"].to_dict() if not best_mt.empty else {}
-
-    df["cp_bitscore"] = df["qid"].map(cp_map).fillna(0.0)
-    df["mt_bitscore"] = df["qid"].map(mt_map).fillna(0.0)
-    df["has_cp"] = df["cp_bitscore"] > 0
-    df["has_mt"] = df["mt_bitscore"] > 0
-
-    def category(row):
-        if row["has_cp"] and row["has_mt"]:
-            return "both"
-        if row["has_cp"]:
-            return "cp"
-        if row["has_mt"]:
-            return "mt"
-        return "none"
-
-    def primary(row):
-        if not row["has_cp"] and not row["has_mt"]:
-            return "none"
-        return "cp" if row["cp_bitscore"] >= row["mt_bitscore"] else "mt"
-
-    df["class_detailed"] = df.apply(category, axis=1)
-    df["class_primary"] = df.apply(primary, axis=1)
-    return df
-
-
-def calc_proportions(classified_df):
-    results = {}
-    groups = {
-        "all": classified_df,
-        "shared": classified_df[classified_df["n_species"] >= 2],
-        "singleton": classified_df[classified_df["n_species"] == 1],
-    }
-    for gname, sub in groups.items():
-        tot = len(sub)
-        counts_det = sub["class_detailed"].value_counts().to_dict()
-        counts_pri = sub["class_primary"].value_counts().to_dict()
-        results[gname] = {
-            "total_queries": tot,
-            "none": {"count": int(counts_pri.get("none", 0)), "rate": float(counts_pri.get("none", 0) / tot) if tot else 0.0},
-            "cp": {"count": int(counts_pri.get("cp", 0)), "rate": float(counts_pri.get("cp", 0) / tot) if tot else 0.0},
-            "mt": {"count": int(counts_pri.get("mt", 0)), "rate": float(counts_pri.get("mt", 0) / tot) if tot else 0.0},
-            "detailed": {
-                "none": int(counts_det.get("none", 0)),
-                "cp_only": int(counts_det.get("cp", 0)),
-                "mt_only": int(counts_det.get("mt", 0)),
-                "both": int(counts_det.get("both", 0)),
-            },
-        }
-    return results
-
-
-def binned_hotspot(best, sseqid, nbins, nperm):
-    """Compute hit count in each of the nbins along the reference genome."""
-    if best.empty:
-        return None
-    sub = best[best["sseqid"] == sseqid].copy()
-    if len(sub) == 0:
+def calc_hotspot(best_df: pd.DataFrame, sseqid: str, nbins: int):
+    sub = best_df[best_df["sseqid"] == sseqid]
+    if sub.empty:
         return None
     slen = int(sub["slen"].iloc[0])
     bins = np.linspace(0, slen, nbins + 1)
     mid = (sub["sstart"] + sub["send"]) / 2.0
     counts, _ = np.histogram(mid, bins=bins)
 
-    all_bins = [
-        {"bin": int(i + 1), "start": int(bins[i]), "end": int(bins[i + 1]), "count": int(counts[i])}
-        for i in range(nbins)
-    ]
     exp = np.full(nbins, len(sub) / nbins)
     chi2 = float(((counts - exp) ** 2 / exp).sum())
     p_chi2 = float(chisquare(counts, exp).pvalue)
-    rng = np.random.default_rng(42)
-    sims = rng.multinomial(len(sub), np.full(nbins, 1 / nbins), size=nperm)
-    p_mc = float(((((sims - exp) ** 2 / exp).sum(axis=1) >= chi2).sum() + 1) / (nperm + 1))
-    top = np.argsort(counts)[::-1][:5]
-    top_bins = [all_bins[i] for i in top]
 
-    return {
-        "n_hits": int(len(sub)),
-        "ref_len": slen,
-        "nbins": nbins,
-        "chi2": chi2,
-        "p_chi2": p_chi2,
-        "p_mc": p_mc,
-        "top_bins": top_bins,
-        "bins": all_bins,
-    }
+    bin_records = [
+        {"bin": i + 1, "start": int(bins[i]), "end": int(bins[i + 1]), "count": int(counts[i])}
+        for i in range(nbins)
+    ]
+    top_indices = np.argsort(counts)[::-1][:5]
+    top_bins = [bin_records[i] for i in top_indices]
+
+    return {"n_hits": len(sub), "chi2": chi2, "p_chi2": p_chi2, "top_bins": top_bins, "bins": bin_records}
 
 
 def main():
     args = parse_args()
     out_dir = Path(args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    dbs = ensure_refs(out_dir)
+    ref_dir = out_dir / "ref"
 
-    bed = load_bed(Path(args.bed), args.max_queries)
-    print(f"[info] bed rows={len(bed)} clusters={bed['cluster_id'].nunique()}")
+    # 1. Load Metadata & BED
+    meta = pd.read_csv(args.meta, sep="\t")
+    for acc, fam in REF_FAMILIES.items():
+        meta.loc[meta["accession"] == acc, "family"] = fam
 
-    summary_tsv = Path(args.summary_tsv)
-    meta = pd.read_csv(summary_tsv, sep="\t")
-    acc_to_fasta = {str(r.accession): r.fasta for r in meta.itertuples() if pd.notna(r.fasta)}
+    bed = pd.read_csv(args.bed, sep="\t")
+    bed["accession"] = bed["#chrom"].str.extract(r"^(GC[AF]_\d+\.\d+)")
+    bed["seq_id"] = bed["#chrom"].str.split("-").str[-1]
+    bed["length"] = bed["end"] - bed["start"]
+    bed = bed.merge(meta[["accession", "family", "organism", "size_bp"]], on="accession", how="left")
+
+    total_genome_bp = int(meta["size_bp"].sum())
+    total_sd_bp = int(bed["length"].sum())
+
+    fam_per_clus = bed.groupby("cluster_id")["family"].nunique()
+    bed["n_fam"] = bed["cluster_id"].map(fam_per_clus)
+
+    intra_mask = bed["n_fam"] == 1
+    cross_mask = bed["n_fam"] >= 2
+    intra_bp = int(bed.loc[intra_mask, "length"].sum())
+    cross_bp = int(bed.loc[cross_mask, "length"].sum())
+
+    print("=" * 80)
+    print(" 1. GENOME & SD BP PROPORTIONS (TASK 1)")
+    print("=" * 80)
+    print(f"Total Genome Size     : {total_genome_bp:15,d} bp ({total_genome_bp/1e9:8.2f} Gb) | 100.0000%")
+    print(f"Total SD              : {total_sd_bp:15,d} bp ({total_sd_bp/1e6:8.2f} Mb) | {total_sd_bp/total_genome_bp*100:8.4f}% of genome")
+    print(f"  - 1-Family (Intra)  : {intra_bp:15,d} bp ({intra_bp/1e6:8.2f} Mb) | {intra_bp/total_genome_bp*100:8.4f}% of genome | {intra_bp/total_sd_bp*100:6.2f}% of SD")
+    print(f"  - >=2-Family (Cross): {cross_bp:15,d} bp ({cross_bp/1e6:8.2f} Mb) | {cross_bp/total_genome_bp*100:8.4f}% of genome | {cross_bp/total_sd_bp*100:6.2f}% of SD")
+
+    # 2. Filter Cross-Family (>=2 families) Segments & Extract Queries
+    cross_bed = bed[cross_mask].copy()
+    cross_bed["n_species"] = cross_bed.groupby("cluster_id")["accession"].transform("nunique")
+    cross_bed["qid"] = ("cl" + cross_bed["cluster_id"].astype(str)
+                        + "|nsp" + cross_bed["n_species"].astype(str)
+                        + "|" + cross_bed["accession"].astype(str)
+                        + "|" + cross_bed["seq_id"].astype(str)
+                        + "|" + cross_bed["start"].astype(str) + "-" + cross_bed["end"].astype(str))
 
     query_fa = out_dir / "queries.fa"
-    if query_fa.exists() and query_fa.stat().st_size > 0:
-        n_written = sum(1 for line in open(query_fa) if line.startswith(">"))
-        print(f"[info] reused existing {n_written} queries -> {query_fa}")
-    else:
-        query_fa.unlink(missing_ok=True)
-        n_written = extract_fasta(bed, acc_to_fasta, summary_tsv, query_fa)
-        print(f"[info] extracted {n_written}/{len(bed)} sequences -> {query_fa}")
+    if not query_fa.exists() or query_fa.stat().st_size == 0:
+        print(f"\n[info] Downloading {len(cross_bed)} query sequences via NCBI...")
+        with open(query_fa, "w") as out:
+            for r in cross_bed.itertuples():
+                url = f"https://www.ncbi.nlm.nih.gov/sviewer/viewer.fcgi?db=nuccore&val={r.seq_id}&from={r.start+1}&to={r.end}&fmt_mask=0&report=fasta&retmode=text"
+                req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+                with urllib.request.urlopen(req, timeout=15) as resp:
+                    txt = resp.read().decode("utf-8").strip()
+                seq = "".join(txt.splitlines()[1:])
+                out.write(f">{r.qid}\n{seq}\n")
 
-    if n_written == 0:
-        query_fa.unlink(missing_ok=True)
-        raise SystemExit(f"[error] no sequences extracted from {len(bed)} BED rows. Check FASTA file existence and contig names.")
+    # 3. Multi-Tier BLAST Searching
+    dbs = prepare_databases(ref_dir)
+    best_cp = run_blast("blastn", query_fa, dbs["cp"], out_dir / "hits_cp.tsv", args.threads, args.evalue)
+    best_mt = run_blast("blastn", query_fa, dbs["mt"], out_dir / "hits_mt.tsv", args.threads, args.evalue)
+    best_rna = run_blast("blastn", query_fa, dbs["rna"], out_dir / "hits_plant_core_rna.tsv", args.threads, args.evalue)
+    best_pep = run_blast("blastx", query_fa, dbs["pep"], out_dir / "hits_plant_core_pep.tsv", args.threads, args.evalue)
 
-    # Step 2: BLAST vs cp and mt with single evalue
-    best_cp = run_blastn(query_fa, dbs["cp"], out_dir / "hits_cp.tsv", args.threads, args.evalue)
-    best_mt = run_blastn(query_fa, dbs["mt"], out_dir / "hits_mt.tsv", args.threads, args.evalue)
-    if not best_cp.empty:
-        best_cp.to_csv(out_dir / "best_cp.tsv", sep="\t", index=False)
-    if not best_mt.empty:
-        best_mt.to_csv(out_dir / "best_mt.tsv", sep="\t", index=False)
-    print(f"[info] cp hits: {len(best_cp)} queries (evalue<={args.evalue})")
-    print(f"[info] mt hits: {len(best_mt)} queries (evalue<={args.evalue})")
+    # 4. Independent Hit Metrics & Complete Disjoint Partition
+    cp_set = set(best_cp["qseqid"])
+    mt_set = set(best_mt["qseqid"])
+    prot_set = set(best_rna["qseqid"]).union(set(best_pep["qseqid"]))
 
-    # Step 3: Match proportions (none, cp, mt, both)
-    classified = classify_queries(bed, best_cp, best_mt)
-    classified.to_csv(out_dir / "queries_classified.tsv", sep="\t", index=False)
-    proportions = calc_proportions(classified)
+    cross_bed["has_cp"] = cross_bed["qid"].isin(cp_set)
+    cross_bed["has_mt"] = cross_bed["qid"].isin(mt_set)
+    cross_bed["has_prot"] = cross_bed["qid"].isin(prot_set)
+    cross_bed["is_unassigned"] = (~cross_bed["has_cp"]) & (~cross_bed["has_mt"]) & (~cross_bed["has_prot"])
 
-    # Step 4: 100-bin profile for cp and mt
-    hotspots = {
-        "cp": binned_hotspot(best_cp, REFS["cp"][0], args.nbins, args.mc_permutations),
-        "mt": binned_hotspot(best_mt, REFS["mt"][0], args.nbins, args.mc_permutations),
-    }
-    for name, h in hotspots.items():
-        if h:
-            pd.DataFrame(h["bins"]).to_csv(out_dir / f"bins_{name}_{args.nbins}.tsv", sep="\t", index=False)
+    print("\n" + "=" * 80)
+    print(" 2. >=2-FAMILY SHARED SEGMENTS: INDEPENDENT HIT BREAKDOWN (TASK 2)")
+    print("=" * 80)
+    for name, col in [("Protein-coding gene hit", "has_prot"),
+                      ("Chloroplast (cp) hit", "has_cp"),
+                      ("Mitochondria (mt) hit", "has_mt"),
+                      ("Unassigned (No hit to any)", "is_unassigned")]:
+        sub = cross_bed[cross_bed[col]]
+        n = len(sub)
+        bp = int(sub["length"].sum())
+        print(f"  - {name:30s}: {bp:10,d} bp ({bp/1e3:6.1f} kb) | {n:4d} segs ({n/len(cross_bed)*100:5.2f}%) | {bp/cross_bp*100:6.2f}% of cross-SD | {bp/total_genome_bp*100:8.6f}% of genome")
 
-    out = {
-        "input": {"bed": str(args.bed), "n_queries": n_written},
-        "evalue": args.evalue,
-        "nbins": args.nbins,
-        "proportions": proportions,
-        "hotspots": hotspots,
-    }
-    with open(out_dir / "summary.json", "w") as fh:
-        json.dump(out, fh, indent=2)
-
-    print(f"\n[done] output_dir={out_dir}")
-    print("=" * 70)
-    print("1. Match proportions (none / cp / mt):")
-    for gname, r in proportions.items():
-        print(f"  [{gname}] total={r['total_queries']} | "
-              f"none={r['none']['count']} ({r['none']['rate']:.2%}) | "
-              f"cp={r['cp']['count']} ({r['cp']['rate']:.2%}) | "
-              f"mt={r['mt']['count']} ({r['mt']['rate']:.2%}) | "
-              f"(both_overlap={r['detailed']['both']})")
-
-    print("\n2. Organelle genome 100-bin hotspot summary:")
-    for name, h in hotspots.items():
-        if h:
-            top_desc = ", ".join(f"bin{b['bin']}({b['start']}-{b['end']}bp)={b['count']}" for b in h["top_bins"][:3])
-            print(f"  [{name}] n={h['n_hits']}, chi2={h['chi2']:.2f}, p_chi2={h['p_chi2']:.3e}, p_mc={h['p_mc']:.3e}")
-            print(f"       Top bins: {top_desc}")
-            print(f"       Saved all {args.nbins} bins to: {out_dir}/bins_{name}_{args.nbins}.tsv")
+    def get_venn_cat(r):
+        c, m, p = r["has_cp"], r["has_mt"], r["has_prot"]
+        if p and not c and not m:
+            return "Nuclear Protein-coding only"
+        elif c and not m and not p:
+            return "Chloroplast (cp) only"
+        elif m and not c and not p:
+            return "Mitochondria (mt) only"
+        elif c and p and not m:
+            return "cp + Protein-coding shared"
+        elif m and p and not c:
+            return "mt + Protein-coding shared"
+        elif c and m and p:
+            return "cp + mt + Protein-coding shared"
         else:
-            print(f"  [{name}] no hits found")
-    print("=" * 70)
+            return "Unassigned"
+
+    cross_bed["venn_category"] = cross_bed.apply(get_venn_cat, axis=1)
+    cross_bed.to_csv(out_dir / "cross_family_classified.tsv", sep="\t", index=False)
+
+    print("\n" + "-" * 80)
+    print(" [Detailed Mutually Exclusive Partition]")
+    print("-" * 80)
+    for cat, sub in cross_bed.groupby("venn_category"):
+        n = len(sub)
+        bp = int(sub["length"].sum())
+        print(f"  * {cat:32s}: {bp:10,d} bp ({bp/1e3:6.1f} kb) | {n:4d} segs ({n/len(cross_bed)*100:5.2f}%) | {bp/cross_bp*100:5.2f}% of cross-SD")
+
+    # 3. 100-bin Chi-square Hotspot Test
+    hs_cp = calc_hotspot(best_cp, ORGANELLES["cp"][0], args.nbins)
+    hs_mt = calc_hotspot(best_mt, ORGANELLES["mt"][0], args.nbins)
+
+    print("\n" + "=" * 80)
+    print(" 3. ORGANELLE HOTSPOT CHI-SQUARE TEST (100 BINS) (TASK 3)")
+    print("=" * 80)
+    if hs_cp:
+        top_str = ", ".join(f"bin{b['bin']}({b['start']}-{b['end']}bp)={b['count']}" for b in hs_cp["top_bins"][:3])
+        print(f"  - Chloroplast   (cp): hits={hs_cp['n_hits']:3d} | chi2={hs_cp['chi2']:8.2f} | p={hs_cp['p_chi2']:.3e}")
+        print(f"    * Top hotspots: {top_str}")
+        pd.DataFrame(hs_cp["bins"]).to_csv(out_dir / f"bins_cp_{args.nbins}.tsv", sep="\t", index=False)
+    if hs_mt:
+        top_str = ", ".join(f"bin{b['bin']}({b['start']}-{b['end']}bp)={b['count']}" for b in hs_mt["top_bins"][:3])
+        print(f"  - Mitochondrion (mt): hits={hs_mt['n_hits']:3d} | chi2={hs_mt['chi2']:8.2f} | p={hs_mt['p_chi2']:.3e}")
+        print(f"    * Top hotspots: {top_str}")
+        pd.DataFrame(hs_mt["bins"]).to_csv(out_dir / f"bins_mt_{args.nbins}.tsv", sep="\t", index=False)
+
+    # 4. Extract Arabidopsis-Containing Cross-Family Clusters
+    ath_clusters = cross_bed[cross_bed["organism"].str.contains("Arabidopsis thaliana", case=False, na=False)]["cluster_id"].unique()
+    ath_sub = cross_bed[cross_bed["cluster_id"].isin(ath_clusters)]
+
+    ath_fa_path = out_dir / "arabidopsis_cross_family_clusters.fa"
+    with open(ath_fa_path, "w") as out:
+        for r in ath_sub.itertuples():
+            url = f"https://www.ncbi.nlm.nih.gov/sviewer/viewer.fcgi?db=nuccore&val={r.seq_id}&from={r.start+1}&to={r.end}&fmt_mask=0&report=fasta&retmode=text"
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                txt = resp.read().decode("utf-8").strip()
+            seq = "".join(txt.splitlines()[1:])
+            header = f"{r.organism.split('(')[0].strip()}_{r.family}_cl{r.cluster_id}_{r.seq_id}_{r.start}_{r.end}"
+            out.write(f">{header}\n{seq}\n")
+
+    print("\n" + "=" * 80)
+    print(" 4. ARABIDOPSIS-CONTAINING CROSS-FAMILY CLUSTERS (TASK 4)")
+    print("=" * 80)
+    print(f"  - Clusters found: {len(ath_clusters)} (Cluster IDs: {list(ath_clusters)})")
+    for r in ath_sub.itertuples():
+        print(f"    * [{r.family}] {r.organism}: {r.seq_id}:{r.start}-{r.end} ({r.length} bp)")
+    print(f"  - Saved all sequence FASTA to: {ath_fa_path}")
+    print("=" * 80)
 
 
 if __name__ == "__main__":
