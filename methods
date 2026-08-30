@@ -103,11 +103,11 @@ Let a segment occur at sequencing depth lambda (expected number of reads coverin
 
 Haploid coverage estimation
 
-SegTrace builds a histogram of group sizes (reads per distinct sketch per slot). By analogy with k-mer spectrum methods such as GenomeScope, the most common segments in a genome are 1-copy, so the first peak (smallest mode) of this histogram estimates the haploid coverage C1 in slot units. Because each slot observes 1/16 of all reads and each read belongs to exactly one slot, the per-slot count is itself an unbiased estimate of the whole-segment read count, and C1 is taken directly as the modal count.
+Grouping proceeds in two passes. The first pass sorts sketches by (size, slot, fingerprint) and collapses identical entries, giving one row per (segment, slot) whose count is the number of reads observed in that slot. The second pass re-sorts these rows by (size, fingerprint) alone and sums the 16 slot counts into a total read count N per distinct segment. The histogram over the per-slot counts from the first pass is then used for coverage estimation: by analogy with k-mer spectrum methods such as GenomeScope, the most common segments in a genome are 1-copy, so the mode of the per-slot count histogram estimates the haploid coverage C1. Because each read belongs to exactly one slot and slots partition the reads of a segment, the modal slot count is an unbiased estimate of the total read count of a 1-copy segment, so C1 is taken directly as the modal count.
 
 Copy-number call
 
-For each distinct sketch, SegTrace sums its slot counts to a total read count N and reports
+For each distinct segment with total read count N, SegTrace reports
 
   copies = round(N / C1).
 

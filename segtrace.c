@@ -916,6 +916,15 @@ static int compare_read_group(const void *a, const void *b) {
   return CMP(ga->fingerprint, gb->fingerprint);
 }
 
+/* 슬롯을 무시하고 스케치 자체만 비교 (슬롯 합산용 2단계 정렬) */
+static int compare_read_group_noslot(const void *a, const void *b) {
+  const ReadGroupStat *ga = (const ReadGroupStat *)a,
+                      *gb = (const ReadGroupStat *)b;
+  if (ga->sketch_size != gb->sketch_size)
+    return CMP(ga->sketch_size, gb->sketch_size);
+  return CMP(ga->fingerprint, gb->fingerprint);
+}
+
 /* 스케치가 완전히 같은 read를 그룹화해 그룹 크기(관측 개수)를 구한다.
  * (sketch_size, fingerprint)로 정렬하면 동일 스케치가 연속 run을 이루고,
  * run 크기가 곧 그 세그먼트를 커버하는 read 수다. 빈 스케치는 제외한다.
@@ -949,7 +958,8 @@ size_t group_identical_reads(const uint32_t *all_hashes,
 
   qsort(groups, n_groups, sizeof(ReadGroupStat), compare_read_group);
 
-  /* 동일 (size, sample_idx, fingerprint) run을 하나의 그룹으로 압축 */
+  /* 1단계: 동일 (size, sample_idx, fingerprint) run을 하나의 슬롯 그룹으로
+   * 압축. 슬롯 그룹의 count가 곧 그 슬롯에서 관측된 read 수다 */
   size_t out = 0;
   size_t i = 0;
   while (i < n_groups) {
@@ -960,6 +970,26 @@ size_t group_identical_reads(const uint32_t *all_hashes,
       j++;
     groups[out] = groups[i];
     groups[out].count = (uint32_t)(j - i);
+    out++;
+    i = j;
+  }
+  n_groups = out;
+
+  /* 2단계: 슬롯 키를 제외하고 (size, fingerprint)만으로 다시 정렬해
+   * 같은 스케치의 16개 슬롯을 하나의 세그먼트로 합친다 */
+  qsort(groups, n_groups, sizeof(ReadGroupStat), compare_read_group_noslot);
+  out = 0;
+  i = 0;
+  while (i < n_groups) {
+    size_t j = i + 1;
+    uint64_t total = groups[i].count;
+    while (j < n_groups && groups[j].sketch_size == groups[i].sketch_size &&
+           groups[j].fingerprint == groups[i].fingerprint) {
+      total += groups[j].count;
+      j++;
+    }
+    groups[out] = groups[i];
+    groups[out].count = (uint32_t)total;
     out++;
     i = j;
   }
@@ -1036,31 +1066,20 @@ void write_read_seg_bed(const char *out_prefix, const WindowCoord *coords,
   (void)window_size;
   fprintf(out, "#chrom\tstart\tend\tread_count\test_depth\test_copies\n");
 
-  /* 그룹은 (sketch_size, sample_idx, fingerprint) 순으로 정렬되어 있다.
-   * 같은 (sketch_size, fingerprint)의 연속 슬롯을 하나로 합친다. */
-  size_t i = 0;
-  while (i < n_groups) {
-    size_t j = i + 1;
-    uint64_t total = groups[i].count;
-    while (j < n_groups &&
-           groups[j].sketch_size == groups[i].sketch_size &&
-           groups[j].fingerprint == groups[i].fingerprint) {
-      total += groups[j].count;
-      j++;
-    }
-
-    double depth = (double)total;
+  /* group_identical_reads가 이미 슬롯을 합산해 그룹당 총 read 수를
+   * 넣어두었으므로, 여기서는 그룹당 한 행만 출력하면 된다 */
+  for (size_t i = 0; i < n_groups; i++) {
+    const ReadGroupStat *g = &groups[i];
+    double depth = (double)g->count;
     uint32_t copies = haploid_coverage > 0.0
                           ? (uint32_t)(depth / haploid_coverage + 0.5)
                           : 1;
-    if (copies >= min_copies) {
-      const ReadGroupStat *g = &groups[i];
-      uint32_t seq_i = coords[g->window_id].seq_id;
-      fprintf(out, "%s-%s\t0\t%u\t%llu\t%.1f\t%u\n", seq_lens[seq_i].genome,
-              seq_lens[seq_i].seq, (uint32_t)g->read_len,
-              (unsigned long long)total, depth, copies);
-    }
-    i = j;
+    if (copies < min_copies)
+      continue;
+    uint32_t seq_i = coords[g->window_id].seq_id;
+    fprintf(out, "%s-%s\t0\t%u\t%u\t%.1f\t%u\n", seq_lens[seq_i].genome,
+            seq_lens[seq_i].seq, (uint32_t)g->read_len, g->count, depth,
+            copies);
   }
   fclose(out);
 }
