@@ -96,22 +96,15 @@ int main(int argc, char **argv) {
       return 1;
   }
   g_segtrace_read_mode = read_mode;
-  /* read 모드에서는 윈도우/스텝을 사용자가 신경 쓸 필요가 없다:
-   * window_size = 0이 "레코드 전체가 윈도우 하나"라는 뜻의 내부 신호이고,
-   * step_size는 read 경계가 곧 윈도우 경계이므로 쓰이지 않는다.
-   * -w/-t를 함께 줘도 read 모드에서는 무시한다 */
-  if (read_mode) {
-    window_size = 0;
-    step_size = 0;
-  }
   /* 자동 파라미터 결정:
    * step_size는 윈도우의 1/3 (인접 윈도우가 3배 중첩),
    * min_bases는 윈도우의 1/4 (N이 75% 이상인 윈도우는 스케치하지 않음).
-   * read 모드에서는 step이 쓰이지 않으므로 건너뛴다 */
-  if (!read_mode && step_size == 0)
+   * read 모드도 같은 기본 윈도잉을 쓰되, 사용자가 -w/-t/-b를 주면
+   * 그대로 따른다 (read 안에서도 윈도잉이 가능해야 하므로) */
+  if (step_size == 0)
     step_size = window_size / 3;
   if (min_bases == 0)
-    min_bases = read_mode ? 1 : window_size / 4;
+    min_bases = window_size / 4;
   if (opt.ind == argc) {
     fprintf(stderr, "[ERROR] Input FASTA files are required.\n");
     return 1;
@@ -134,17 +127,17 @@ int main(int argc, char **argv) {
 
   void *thread_pool = n_threads > 1 ? kt_forpool_init(n_threads) : NULL;
 
-  /* [1단계] 모든 FASTA를 윈도우(read 모드에서는 read) 단위로 나누고 각
-   * 단위의 스케치(해시 집합) 추출 */
+  /* [1단계] 모든 입력을 윈도우 단위로 나누고 각 윈도우의 스케치 추출.
+   * read 모드에서도 read를 윈도우로 자르므로(각 read가 하나의 서열)
+   * 메모리 사용량은 윈도우 모드와 동일한 청크 파이프라인에 의해 제한된다 */
   GlobalWindows gw =
       extract_all_windows(files, num_files, &r, scale, window_size,
                           step_size, min_bases, n_threads, thread_pool);
 
   if (read_mode) {
-    /* read 모드: 동일 스케치를 가진 read를 그룹화해 그룹 크기(관측 개수)를
-     * 구하고, 크기-1 그룹의 봉우리로 배수체(haploid) 커버리지를 추정한다.
-     * 세그먼트 복제수 = round(그룹 크기 * scale / C1):
-     * 스케치당 기대 개수는 ~lambda/s 이므로 실제 깊이 lambda = 크기 * scale */
+    /* read 모드: 동일 스케치를 가진 윈도우를 그룹화해 그룹 크기(관측
+     * 개수)를 구하고, 그룹 크기 히스토그램의 첫 봉우리로 배수체(haploid)
+     * 커버리지 C1을 추정한다. 세그먼트 복제수 = round(그룹 크기 / C1). */
     ReadGroupStat *groups = NULL;
     size_t n_groups = group_identical_reads(gw.all_hashes, gw.coords,
                                             gw.num_sketches, n_threads,
@@ -159,7 +152,7 @@ int main(int argc, char **argv) {
             "haploid coverage ~ %.2fx\n",
             gw.num_sketches, n_groups, hap_cov);
     write_read_seg_bed(out_prefix, gw.coords, gw.seq_lens, groups, n_groups,
-                       scale, window_size, hap_cov, min_copies);
+                       scale, window_size, step_size, hap_cov, min_copies);
 
     free(groups);
     free(gw.all_hashes);
@@ -352,7 +345,6 @@ static void seq_chunk_worker(void *data, long i, int tid) {
     wc->seq_id = job->seq_id;
     wc->window_idx = current_window_idx;
     wc->sketch_size = (uint16_t)sketch_size;
-    /* read 모드(step_size >= window_size)에서는 윈도우 길이 = read 길이 */
     wc->read_len = (uint32_t)job->window_size;
     wc->sample_idx = 0;
 
@@ -409,8 +401,8 @@ GlobalWindows extract_all_windows(char **files, int num_files,
 
     while (kseq_read(ks) >= 0) {
       size_t len = ks->seq.l;
-      /* read 모드에서는 어떤 길이의 레코드도 하나의 스케치로 취급한다 */
-      if (window_size && len < window_size)
+      /* 윈도우 크기보다 짧은 서열(read 포함)은 스케치할 수 없으므로 건너뛴다 */
+      if (len < window_size)
         continue;
 
       DA_RESERVE(gw.seq_lens, cap_seqs, gw.num_seqs + 1);
@@ -421,32 +413,27 @@ GlobalWindows extract_all_windows(char **files, int num_files,
 
       uint8_t *seq_ptr = (uint8_t *)ks->seq.s;
 
-      /* window_size == 0 (read 모드): 서열 전체가 윈도우 하나 */
-      size_t eff_window = window_size ? window_size : len;
-      size_t eff_step = window_size ? step_size : len;
-      size_t seq_windows =
-          window_size ? (len - window_size) / step_size + 1 : 1;
+      size_t seq_windows = (len - window_size) / step_size + 1;
       DA_RESERVE(gw.coords, cap_sketches, gw.num_sketches + seq_windows);
       DA_RESERVE(gw.all_hashes, cap_all_hashes,
              num_all_hashes + seq_windows * 96);
 
-      /* 병렬화를 위해 염색체를 chunk로 분할.
+      /* 병렬화를 위해 서열을 chunk로 분할.
        * 스레드 수의 4배로 쪼개 부하 균형을 맞추고 최소 100kb를 보장하며,
        * step_size의 배수로 맞춰 chunk 경계에서도 윈도우 인덱스가 어긋나지 않게 함 */
       size_t chunk_size = len / ((size_t)n_threads * 4);
       if (chunk_size < 100000)
         chunk_size = 100000;
-      chunk_size = ((chunk_size + eff_step - 1) / eff_step) * eff_step;
+      chunk_size = ((chunk_size + step_size - 1) / step_size) * step_size;
 
       size_t cap_jobs = 16, num_jobs = 0;
       SeqChunkJob *jobs = malloc(cap_jobs * sizeof(SeqChunkJob));
 
-      /* read 모드(step >= window)에서는 read 전체가 하나의 윈도우이므로
-       * 마지막 위치 len - window도 포함해야 read가 누락되지 않는다 */
-      for (size_t c_start = 0;; c_start += chunk_size) {
+      for (size_t c_start = 0; c_start + window_size <= len;
+           c_start += chunk_size) {
         /* chunk 끝을 window_size - step_size만큼 연장해 경계에 걸친 윈도우가
          * 누락되지 않도록 한다 (인접 chunk와 겹침) */
-        size_t c_end = c_start + chunk_size + eff_window - eff_step;
+        size_t c_end = c_start + chunk_size + window_size - step_size;
         if (c_end > len)
           c_end = len;
 
@@ -454,8 +441,8 @@ GlobalWindows extract_all_windows(char **files, int num_files,
         jobs[num_jobs++] = (SeqChunkJob){.r = r,
                                          .threshold = threshold,
                                          .scale = scale,
-                                         .window_size = eff_window,
-                                         .step_size = eff_step,
+                                         .window_size = window_size,
+                                         .step_size = step_size,
                                          .min_bases = min_bases,
                                          .seq_id = seq_id,
                                          .seq_ptr = seq_ptr,
@@ -1059,7 +1046,7 @@ double estimate_haploid_coverage(const ReadGroupStat *groups, size_t n_groups,
 void write_read_seg_bed(const char *out_prefix, const WindowCoord *coords,
                         const GenomeSeqLen *seq_lens,
                         const ReadGroupStat *groups, size_t n_groups,
-                        uint64_t scale, size_t window_size,
+                        uint64_t scale, size_t window_size, size_t step_size,
                         double haploid_coverage, uint32_t min_copies) {
   if (n_groups == 0)
     return;
@@ -1074,14 +1061,12 @@ void write_read_seg_bed(const char *out_prefix, const WindowCoord *coords,
     return;
   }
 
-  /* scale/window_size는 현재 출력에 쓰이지 않지만, 추정기와 시그니처를
-   * 맞추기 위해 유지한다 */
   (void)scale;
-  (void)window_size;
-  fprintf(out, "#chrom\tstart\tend\tread_count\test_depth\test_copies\n");
+  fprintf(out, "#chrom\tstart\tend\twindow_count\test_depth\test_copies\n");
 
-  /* group_identical_reads가 이미 슬롯을 합산해 그룹당 총 read 수를
-   * 넣어두었으므로, 여기서는 그룹당 한 행만 출력하면 된다 */
+  /* group_identical_reads가 이미 슬롯을 합산해 그룹당 총 관측 수를
+   * 넣어두었다. 각 그룹은 동일 스케치를 공유하는 윈도우들의 집합이고,
+   * 대표 윈도우의 좌표(read 이름 + 윈도우 오프셋)를 출력한다 */
   for (size_t i = 0; i < n_groups; i++) {
     const ReadGroupStat *g = &groups[i];
     double depth = (double)g->count;
@@ -1090,10 +1075,13 @@ void write_read_seg_bed(const char *out_prefix, const WindowCoord *coords,
                           : 1;
     if (copies < min_copies)
       continue;
-    uint32_t seq_i = coords[g->window_id].seq_id;
-    fprintf(out, "%s-%s\t0\t%u\t%u\t%.1f\t%u\n", seq_lens[seq_i].genome,
-            seq_lens[seq_i].seq, (uint32_t)g->read_len, g->count, depth,
-            copies);
+    const WindowCoord *wc = &coords[g->window_id];
+    uint32_t seq_i = wc->seq_id;
+    /* start는 시퀀스(read) 안에서의 bp 오프셋, end는 윈도우 끝 */
+    size_t start = (size_t)wc->window_idx * step_size;
+    size_t end = start + window_size;
+    fprintf(out, "%s-%s\t%zu\t%zu\t%u\t%.1f\t%u\n", seq_lens[seq_i].genome,
+            seq_lens[seq_i].seq, start, end, g->count, depth, copies);
   }
   fclose(out);
 }
@@ -1305,9 +1293,10 @@ size_t filter_regions_by_copy_count(SegtraceDupRegion *regions, size_t n,
   return out_count;
 }
 
-/* 최종 구간을 "<prefix>.dup.bed"에 기록.
+/* 최종 구간을 "<prefix>.seg.bed"에 기록.
  * chrom 컬럼은 "파일명-서열명" 형태, 4번째 컬럼은 클러스터 id.
- * min_sd_len 미만의 짧은 구간은 출력하지 않는다 */
+ * read 모드의 .seg.bed와 파일명을 통일해 후속 파이프라인이 하나의
+ * 이름 규칙만 알면 되게 한다. min_sd_len 미만의 짧은 구간은 출력하지 않음 */
 void write_dup_bed(const char *out_prefix, const SegtraceDupRegion *dup_regions,
                    size_t n_merged, const GenomeSeqLen *seq_lens,
                    size_t min_sd_len) {
@@ -1315,7 +1304,7 @@ void write_dup_bed(const char *out_prefix, const SegtraceDupRegion *dup_regions,
     return;
 
   char path_buf[PATH_MAX];
-  snprintf(path_buf, sizeof(path_buf), "%s.dup.bed", out_prefix);
+  snprintf(path_buf, sizeof(path_buf), "%s.seg.bed", out_prefix);
   FILE *out_bed = fopen(path_buf, "w");
   if (!out_bed) {
     fprintf(stderr, "[ERROR] Cannot open output file: %s\n", path_buf);

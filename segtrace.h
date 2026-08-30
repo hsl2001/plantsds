@@ -235,7 +235,7 @@ double estimate_haploid_coverage(const ReadGroupStat *groups, size_t n_groups,
 void write_read_seg_bed(const char *out_prefix, const WindowCoord *coords,
                         const GenomeSeqLen *seq_lens,
                         const ReadGroupStat *groups, size_t n_groups,
-                        uint64_t scale, size_t window_size,
+                        uint64_t scale, size_t window_size, size_t step_size,
                         double haploid_coverage, uint32_t min_copies);
 
 // 5. REGION CLUSTERING, COPY FILTERING & OUTPUT
