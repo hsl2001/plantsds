@@ -98,8 +98,8 @@ typedef struct {
   uint32_t seq_id;
   uint64_t sketch_offset;
   uint32_t window_idx;
+  uint32_t read_len;   /* read mode: read length in bp (0 in window mode) */
   uint16_t sketch_size;
-  uint16_t read_len;   /* read mode: read length in bp, capped at 65535 */
   uint32_t sample_idx; /* read mode: sample slot from first sampled hash */
 } WindowCoord;
 
@@ -131,8 +131,8 @@ typedef struct {
   uint32_t window_id;   /* representative window (= one read) of the group */
   uint32_t count;       /* number of reads sharing the sketch */
   uint64_t fingerprint; /* FNV-1a fingerprint over the sorted sketch */
+  uint32_t read_len;    /* read length in bp */
   uint16_t sketch_size; /* number of sampled hashes in the read sketch */
-  uint16_t read_len;    /* read length in bp, capped at 65535 */
   uint32_t sample_idx;  /* sample slot derived from the first sampled hash */
 } ReadGroupStat;
 

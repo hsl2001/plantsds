@@ -106,8 +106,9 @@ int main(int argc, char **argv) {
   }
   /* 자동 파라미터 결정:
    * step_size는 윈도우의 1/3 (인접 윈도우가 3배 중첩),
-   * min_bases는 윈도우의 1/4 (N이 75% 이상인 윈도우는 스케치하지 않음) */
-  if (step_size == 0)
+   * min_bases는 윈도우의 1/4 (N이 75% 이상인 윈도우는 스케치하지 않음).
+   * read 모드에서는 step이 쓰이지 않으므로 건너뛴다 */
+  if (!read_mode && step_size == 0)
     step_size = window_size / 3;
   if (min_bases == 0)
     min_bases = read_mode ? 1 : window_size / 4;
@@ -352,8 +353,7 @@ static void seq_chunk_worker(void *data, long i, int tid) {
     wc->window_idx = current_window_idx;
     wc->sketch_size = (uint16_t)sketch_size;
     /* read 모드(step_size >= window_size)에서는 윈도우 길이 = read 길이 */
-    wc->read_len = (uint16_t)(job->window_size > 65535 ? 65535
-                                                       : job->window_size);
+    wc->read_len = (uint32_t)job->window_size;
     wc->sample_idx = 0;
 
     size_t h_idx = job->num_hashes;
@@ -953,7 +953,7 @@ size_t group_identical_reads(const uint32_t *all_hashes,
                              sketch_fingerprint(
                                  all_hashes + coords[i].sketch_offset,
                                  coords[i].sketch_size),
-                             coords[i].sketch_size, coords[i].read_len,
+                             coords[i].read_len, coords[i].sketch_size,
                              coords[i].sample_idx}));
   }
   if (n_groups == 0) {
@@ -994,7 +994,7 @@ size_t group_identical_reads(const uint32_t *all_hashes,
       j++;
     }
     groups[out] = groups[i];
-    /* 슬롯 합산이 uint32를 넘는 극端한 심층 데이터에서는 포화시킨다 */
+    /* 슬롯 합산이 uint32를 넘는 극단적인 심층 데이터에서는 포화시킨다 */
     groups[out].count =
         total > UINT32_MAX ? UINT32_MAX : (uint32_t)total;
     out++;
@@ -1016,6 +1016,9 @@ size_t group_identical_reads(const uint32_t *all_hashes,
  * 돌려준다. */
 double estimate_haploid_coverage(const ReadGroupStat *groups, size_t n_groups,
                                  uint64_t scale, size_t window_size) {
+  /* scale과 window_size는 현재 추정기가 쓰지 않지만, 향후 스케치 크기 기반
+   * 추정으로 확장할 때 시그니처를 유지하기 위해 남겨둔다 */
+  (void)scale;
   (void)window_size;
   if (n_groups == 0)
     return 0.0;
@@ -1045,7 +1048,6 @@ double estimate_haploid_coverage(const ReadGroupStat *groups, size_t n_groups,
   /* 슬롯당 count가 곧 전체 read 수의 추정치다 (각 read가 정확히 하나의
    * 슬롯에만 속하므로 슬롯당 count 평균은 전체 count의 불편 추정량).
    * 별도 환산 없이 mode 자체가 haploid 세그먼트의 read 수다. */
-  (void)scale;
   return (double)mode;
 }
 
@@ -1072,6 +1074,8 @@ void write_read_seg_bed(const char *out_prefix, const WindowCoord *coords,
     return;
   }
 
+  /* scale/window_size는 현재 출력에 쓰이지 않지만, 추정기와 시그니처를
+   * 맞추기 위해 유지한다 */
   (void)scale;
   (void)window_size;
   fprintf(out, "#chrom\tstart\tend\tread_count\test_depth\test_copies\n");
