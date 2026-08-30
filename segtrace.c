@@ -345,7 +345,6 @@ static void seq_chunk_worker(void *data, long i, int tid) {
     wc->seq_id = job->seq_id;
     wc->window_idx = current_window_idx;
     wc->sketch_size = (uint16_t)sketch_size;
-    wc->read_len = (uint32_t)job->window_size;
     wc->sample_idx = 0;
 
     size_t h_idx = job->num_hashes;
@@ -940,8 +939,7 @@ size_t group_identical_reads(const uint32_t *all_hashes,
                              sketch_fingerprint(
                                  all_hashes + coords[i].sketch_offset,
                                  coords[i].sketch_size),
-                             coords[i].read_len, coords[i].sketch_size,
-                             coords[i].sample_idx}));
+                             coords[i].sketch_size, coords[i].sample_idx}));
   }
   if (n_groups == 0) {
     *out_groups = groups;
