@@ -87,8 +87,8 @@ typedef struct {
   uint64_t sketch_offset;
   uint32_t window_idx;
   uint16_t sketch_size;
-  uint16_t read_len;   /* read 모드: read 길이 bp (65535에서 포화) */
-  uint32_t sample_idx; /* read 모드: 동일 스케치 내 샘플 인덱스 (s개 슬롯) */
+  uint16_t read_len;   /* read mode: read length in bp, capped at 65535 */
+  uint32_t sample_idx; /* read mode: sample slot from first sampled hash */
 } WindowCoord;
 
 typedef struct {

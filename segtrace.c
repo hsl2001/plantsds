@@ -989,7 +989,9 @@ size_t group_identical_reads(const uint32_t *all_hashes,
       j++;
     }
     groups[out] = groups[i];
-    groups[out].count = (uint32_t)total;
+    /* 슬롯 합산이 uint32를 넘는 극端한 심층 데이터에서는 포화시킨다 */
+    groups[out].count =
+        total > UINT32_MAX ? UINT32_MAX : (uint32_t)total;
     out++;
     i = j;
   }
@@ -1025,7 +1027,9 @@ double estimate_haploid_coverage(const ReadGroupStat *groups, size_t n_groups,
   for (size_t i = 0; i < n_groups; i++)
     hist[groups[i].count]++;
 
-  /* 최빈 count (동률이면 더 작은 count) */
+  /* 최빈 count. count=1(한 번만 관측된 read)은 대부분 시퀀싱 오류
+   * k-mer/리드이므로 genomescope 관례에 따라 후보에서 제외하고
+   * count>=2부터 최빈값을 찾는다. 모든 그룹이 count=1이면 mode=1이다 */
   size_t mode = 1;
   for (size_t i = 2; i <= max_count; i++)
     if (hist[i] > hist[mode])
