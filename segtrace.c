@@ -29,8 +29,8 @@ static void print_usage(void) {
          "  -b: minimum valid bases per window (default: 0 [auto: 25%% of "
          "window size])\n"
          "  -c: minimum copies per genome/file to report (default: 1)\n"
-         "  -r: read mode - each FASTA/FASTQ record is one segment; estimate "
-         "copy number from sketch sampling depth vs haploid coverage\n"
+         "  -r: read mode - each FASTA/FASTQ record is one segment; window "
+         "and step are set automatically (window = whole record)\n"
          "  -m: filter soft-masked bases (treat lowercase a/c/g/t as invalid)\n"
          "  -o: output file prefix (default: segtrace)\n"
          "  -p: number of threads (default: 8)\n"
@@ -96,10 +96,17 @@ int main(int argc, char **argv) {
       return 1;
   }
   g_segtrace_read_mode = read_mode;
+  /* read 모드에서는 윈도우/스텝을 사용자가 신경 쓸 필요가 없다:
+   * window_size = 0이 "레코드 전체가 윈도우 하나"라는 뜻의 내부 신호이고,
+   * step_size는 read 경계가 곧 윈도우 경계이므로 쓰이지 않는다.
+   * -w/-t를 함께 줘도 read 모드에서는 무시한다 */
+  if (read_mode) {
+    window_size = 0;
+    step_size = 0;
+  }
   /* 자동 파라미터 결정:
    * step_size는 윈도우의 1/3 (인접 윈도우가 3배 중첩),
-   * min_bases는 윈도우의 1/4 (N이 75% 이상인 윈도우는 스케치하지 않음)
-   * read 모드에서는 윈도우가 곧 read 전체이므로 step은 사용되지 않는다 */
+   * min_bases는 윈도우의 1/4 (N이 75% 이상인 윈도우는 스케치하지 않음) */
   if (step_size == 0)
     step_size = window_size / 3;
   if (min_bases == 0)
@@ -492,19 +499,17 @@ GlobalWindows extract_all_windows(char **files, int num_files,
     gzclose(fp);
   }
 
-  /* read 모드: 동일 스케치를 가진 read를 16개 샘플 슬롯으로 나눠
-   * 그룹 크기 해상도를 높인다. 첫 샘플 해시의 상위 4비트로 슬롯을 정하면
-   * 같은 스케치는 항상 같은 슬롯에 들어가고, 슬롯당 read 수의 기대치는
-   * 전체 깊이의 1/16이 된다. 깊이 C1인 haploid 세그먼트도 슬롯당
-   * C1/16개로 나뉘어, 전체를 하나로 묶을 때보다 이산 최빈값 해상도가
-   * 좋아진다. */
+  /* read 모드: 동일 스케치를 가진 read를 READ_SAMPLE_SLOTS개 샘플 슬롯으로
+   * 나눠 그룹 크기 해상도를 높인다. 첫 샘플 해시의 상위 4비트로 슬롯을
+   * 정하면 같은 스케치는 항상 같은 슬롯에 들어가고, 슬롯당 read 수의
+   * 기대치는 전체 깊이의 1/READ_SAMPLE_SLOTS가 된다. */
   if (g_segtrace_read_mode) {
     for (size_t i = 0; i < gw.num_sketches; i++) {
       WindowCoord *wc = &gw.coords[i];
       if (wc->sketch_size == 0)
         continue;
       uint32_t first = gw.all_hashes[wc->sketch_offset];
-      wc->sample_idx = first >> 28;
+      wc->sample_idx = first >> READ_SLOT_SHIFT;
     }
   }
   return gw;
@@ -1001,13 +1006,14 @@ size_t group_identical_reads(const uint32_t *all_hashes,
 
 /* 그룹 크기(관측 read 수) 히스토그램의 첫 번째(최소 크기) 봉우리를 찾아
  * 배수체(haploid) 커버리지로 삼는다.
- * 수학적 근거: 샘플 슬롯 하나당 세그먼트의 관측 수는 대략 Poisson(lambda)
- * (lambda = 세그먼트 깊이 x 슬롯 점유율). 유전체에서 가장 흔한 세그먼트는
- * 1-copy(haploid)이므로 count 히스토그램의 최빈값이 C1의 슬롯당 값이다.
- * 슬롯 수를 s로 나눈 비율로 환산하면 C1 ~= mode * (슬롯 환산 계수).
- * 여기서는 슬롯이 전체의 1/16을 보므로 C1 ~= mode * 16.
- * genomescope가 k-mer 빈도 히스토그램의 첫 봉우리를 쓰는 것과 같은 원리다.
- * 추정이 불가능하면(그룹 없음) 0을 돌려준다. */
+ * 수학적 근거: 각 read는 첫 샘플 해시의 상위 4비트가 가리키는 정확히
+ * 하나의 슬롯에 속하므로, 슬롯들은 한 세그먼트의 read를 서로 겹치지 않게
+ * 분할한다. 따라서 슬롯당 관측수는 전체 read 수의 불편 추정량이고,
+ * 슬롯당 관측수 히스토그램의 최빈값이 곧 1-copy(haploid) 세그먼트의
+ * 총 read 수 C1이다 (genomescope가 k-mer 빈도 히스토그램의 첫 봉우리를
+ * 쓰는 것과 같은 원리). 유전체에서 가장 흔한 세그먼트가 1-copy라는
+ * 가정이 성립할 때만 유효하다. 추정이 불가능하면(그룹 없음) 0을
+ * 돌려준다. */
 double estimate_haploid_coverage(const ReadGroupStat *groups, size_t n_groups,
                                  uint64_t scale, size_t window_size) {
   (void)window_size;
