@@ -93,6 +93,30 @@ If at least one locus survives copy-number filtering, SegTrace creates <prefix>.
 
 and contains four columns. The chrom field is <genome basename>-<FASTA sequence name>. Start and end are zero-based, half-open coordinates. The fourth column is the cluster identifier. The output contains no subcluster identifier, strand, similarity score, or alignment.
 
+Read mode (-r)
+
+Read mode reinterprets every FASTA/FASTQ record as one segment and sketches the whole record instead of sliding windows. Records shorter than the k-mer size receive an empty sketch and are ignored. All other steps reuse the same scaled-MinHash sketch and hash-index machinery.
+
+Sampling depth and copy number
+
+Let a segment occur at sequencing depth lambda (expected number of reads covering it). A read is sketched by scaled MinHash with scale s, which retains a hash h when h < theta = floor((2^32-1)/s). Because mixed hashes are uniform over [0, 2^32), the first sampled hash of a sketch falls into one of 16 equal-width quantiles with probability 1/16 each. SegTrace assigns every non-empty sketch to one of 16 sample slots by the top 4 bits of its first sampled hash. Identical sequences produce identical sketches and therefore always land in the same slot. The number of reads observed in one slot for a segment at depth lambda is approximately Poisson(lambda/16), so summing the 16 slot counts recovers an unbiased estimate of lambda with 16-fold finer resolution than the raw sketch occupancy.
+
+Haploid coverage estimation
+
+SegTrace builds a histogram of group sizes (reads per distinct sketch per slot). By analogy with k-mer spectrum methods such as GenomeScope, the most common segments in a genome are 1-copy, so the first peak (smallest mode) of this histogram estimates the haploid coverage C1 in slot units. Because each slot observes 1/16 of all reads and each read belongs to exactly one slot, the per-slot count is itself an unbiased estimate of the whole-segment read count, and C1 is taken directly as the modal count.
+
+Copy-number call
+
+For each distinct sketch, SegTrace sums its slot counts to a total read count N and reports
+
+  copies = round(N / C1).
+
+This is defined even when the minimum copy threshold is 1 (-c 1), because the denominator comes from the coverage peak rather than from within-cluster counting. Segments whose copy call is below the -c threshold are omitted from the output.
+
+Memory bound
+
+Read mode stores one 24-byte record per sketched read and one 32-byte entry per non-empty sketch. No read-pair comparison is performed, so memory grows linearly with the number of reads, not with the number of read pairs. The Bloom filters, candidate arrays, and locus-clustering structures of window mode are not allocated in read mode.
+
 Before writing a locus, SegTrace applies the minimum length
 
 L_min = min(W, 1,000 bp).
