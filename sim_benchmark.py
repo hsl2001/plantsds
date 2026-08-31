@@ -566,7 +566,7 @@ def run_segtrace(args: argparse.Namespace, paths: SimulationPaths, work_dir: Pat
     if segtrace_bin is None:
         return tool_missing(tool, args.segtrace_bin)
     prefix = work_dir / "segtrace"
-    prediction = prefix.with_suffix(".dup.bed")
+    prediction = prefix.with_suffix(".seg.bed")
     command = [
         str(segtrace_bin), "-k", str(args.kmer), "-s", str(args.scale), "-w", str(args.window_size),
         "-t", str(args.step_size), "-c", str(args.min_report_copies), "-p", str(args.threads),

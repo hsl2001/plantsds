@@ -48,7 +48,7 @@ BLAST_COLS = ["qseqid", "sseqid", "pident", "length", "mismatch", "gapopen",
 
 def parse_args():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--bed", default="ANGIOSPERM_FAMILY.dup.bed", help="SegTrace dup.bed")
+    p.add_argument("--bed", default="ANGIOSPERM_FAMILY.seg.bed", help="SegTrace seg.bed")
     p.add_argument("--meta", default="angiosperm_family_complete.tsv", help="Complete summary TSV")
     p.add_argument("--output-dir", default="results/numt_nupt_cross_family", help="Output directory")
     p.add_argument("--threads", type=int, default=8, help="BLAST threads")

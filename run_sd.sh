@@ -266,7 +266,7 @@ for t in "${TARGET_LIST[@]}"; do
     fi
 
     out_prefix="${RESULTS_DIR}/${t}_sd"
-    bed_out="${out_prefix}.dup.bed"
+    bed_out="${out_prefix}.seg.bed"
 
     echo ""
     echo ">>> Running Segtrace for [$t] ($(get_target_info "$t" "desc"))"

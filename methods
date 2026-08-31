@@ -87,11 +87,41 @@ Window sketching is parallelized within each sequence. For a sequence of length 
 Candidate discovery is parallelized over hash partitions within each batch. Threads own their candidate arrays and Bloom filters, so candidate insertion does not require a shared lock. Each Bloom filter occupies 8 MiB. Partition buckets are released after their batch is processed. Locus construction, partner selection, Union-Find clustering, copy-number filtering, and output are performed serially.
 
 Output
-If at least one locus survives copy-number filtering, SegTrace creates <prefix>.dup.bed. If no locus survives, it does not create an output file. The file begins with the header
+If at least one locus survives copy-number filtering, SegTrace creates <prefix>.seg.bed. If no locus survives, it does not create an output file. The file begins with the header
 
 #chrom\tstart\tend\tcluster_id
 
 and contains four columns. The chrom field is <genome basename>-<FASTA sequence name>. Start and end are zero-based, half-open coordinates. The fourth column is the cluster identifier. The output contains no subcluster identifier, strand, similarity score, or alignment.
+
+Read mode (-r)
+
+Read mode analyzes segments at the read level while still windowing every record: each FASTA/FASTQ record is treated as one sequence and is cut into the same sliding windows (default W = 1,024 bp, step = W/3) as a genome, so a long read contributes multiple windows and a segment that occurs at several offsets inside a read is resolved into separate window groups. Windowing reads instead of treating a whole read as one sketch is what lets the method see repeated segments inside a read and keeps memory on the same chunked pipeline as genome mode. The -w/-t/-b options apply to reads exactly as to genomes. The design follows the request that a segment observed 100 times at haploid coverage 50x must be reported as a 2-copy segment, and that this must remain well defined at -c 1 because copy number is inferred from coverage, not from counting loci inside a cluster.
+
+Pipeline
+
+1. Windowing and sketching. Each record is windowed with the same canonical ntHash + scaled threshold sampling as genome mode; a record shorter than W is skipped. Because each read is one sequence, the per-sequence chunking path bounds peak memory exactly as in genome mode, and no whole-read record is kept beyond its windows.
+2. Sample slots. Every non-empty window sketch is assigned to one of READ_SAMPLE_SLOTS = 16 slots by the top 4 bits of its first sampled hash. Identical window sequences produce identical sketches, hence the same slot, with probability 1.
+3. Exact grouping (no all-pairs comparison). One 32-byte record per sketched window is created, holding (sketch size, slot, FNV-1a fingerprint of the sorted sketch, representative window id). Sorting by (size, slot, fingerprint) collapses identical per-slot sketches in one run; re-sorting by (size, fingerprint) then sums the 16 slot counts into the total observation count N of that window segment. Two windows with different sequences share a complete sketch only if all of their sampled k-mers collide, which needs 4^k >> number of windows; the 64-bit fingerprint adds a collision probability of about 2^-64 per pair of distinct sketches.
+4. Haploid coverage. A histogram of the per-segment total counts is built, and its first peak — the smallest count with maximal frequency, excluding count 1 as sequencing-error noise — is taken as the haploid coverage C1, exactly as GenomeScope takes the first peak of a k-mer spectrum. The underlying assumption is that 1-copy window segments are the most frequent class in the input.
+5. Copy number. Each window segment gets copies = round(N / C1) and is written to <prefix>.seg.bed with the representative window coordinates (chrom = file-read, start/end = window offset within the read) and columns window_count, est_depth, est_copies. Segments with copies < c are omitted; at the default -c 1 every segment is reported with its copy estimate.
+
+Output files
+
+Both modes now write <prefix>.seg.bed. Genome mode writes merged duplicate loci with a cluster_id column; read mode writes one row per distinct window segment with read-level coordinates and copy-number columns. Downstream scripts (run_sd.sh, sim_benchmark.py, hyp.py, convert_dup_to_sedef.sh) read the .seg.bed name.
+
+Why 16 slots
+
+The slot count is not arbitrary. The mixed 32-bit hash is uniform over [0, 2^32), so the top 4 bits of the first sampled hash form exactly 16 equal-width quantiles, each hit with probability 1/16; extracting them costs a single shift with no extra hashing. A slot therefore observes an unbiased 1/16 subsample of the windows of every segment, and summing the 16 slot counts is an unbiased estimate of the total count N. The number 16 balances two effects: more slots give finer per-slot count resolution (reducing Poisson discretization error when the modal count is small, since the relative error of the mode scales as ~1/sqrt(C1)), while fewer slots keep the per-slot group table small. Sixteen is also the largest power of two whose quantile width 2^32/16 is exact, so no slot is biased by rounding.
+
+Mathematical justification
+
+Claim 1 (unbiased depth). Let a window segment be covered by M windows across all reads and let X_t be the number of its windows in slot t. Because the first sampled hash is uniform, P(window in slot t) = 1/16, so E[X_t] = M/16 and E[sum_t X_t] = M. The slot sum N is therefore an unbiased estimator of M.
+
+Claim 2 (modal count = haploid coverage). If 1-copy window segments are the most frequent segment class, the histogram of N has its first mode at the total window count of 1-copy segments, which is the haploid coverage C1. This is the same estimator as the first peak of a k-mer spectrum in GenomeScope, with windows instead of k-mers.
+
+Claim 3 (copy call). For a c-copy segment, E[N] = c * C1, so E[N] / C1 = c and round(N / C1) is a consistent estimator of the integer copy number as C1 grows. At -c 1 the call is still defined because C1 comes from the global coverage peak, not from within-cluster locus counts.
+
+Claim 4 (memory). Read mode stores one 24-byte WindowCoord plus its sketch hashes per window, and one 32-byte group record per distinct sketch; no pair is ever materialized, so memory is O(number of windows + number of distinct segments), independent of the quadratic number of window pairs. The Bloom filters and candidate arrays of genome mode are not allocated in read mode.
 
 Before writing a locus, SegTrace applies the minimum length
 

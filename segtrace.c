@@ -6,6 +6,10 @@
 #include "klib/kseq.h"
 #include "segtrace.h"
 
+/* read 모드(-r) 플래그. extract_all_windows가 윈도우 대신 read 전체를
+ * 스케치하도록 전환한다 */
+int g_segtrace_read_mode = 0;
+
 /* kseq 리더 인스턴스화: gzread 기반이라 일반/gzip FASTA 모두 읽을 수 있다 */
 KSEQ_INIT(gzFile, gzread)
 
@@ -25,6 +29,8 @@ static void print_usage(void) {
          "  -b: minimum valid bases per window (default: 0 [auto: 25%% of "
          "window size])\n"
          "  -c: minimum copies per genome/file to report (default: 1)\n"
+         "  -r: read mode - each FASTA/FASTQ record is one segment; window "
+         "and step are set automatically (window = whole record)\n"
          "  -m: filter soft-masked bases (treat lowercase a/c/g/t as invalid)\n"
          "  -o: output file prefix (default: segtrace)\n"
          "  -p: number of threads (default: 8)\n"
@@ -55,12 +61,12 @@ int main(int argc, char **argv) {
   size_t window_size = 1024, step_size = 0, min_bases = 0;
   uint32_t min_copies = 1;
   const char *out_prefix = "segtrace";
-  int n_threads = 8, filter_masked = 0;
+  int n_threads = 8, filter_masked = 0, read_mode = 0;
 
   /* 단일 대시 옵션 파싱 (ketopt: getopt의 경량 대체) */
   ketopt_t opt = KETOPT_INIT;
   int c;
-  while ((c = ketopt(&opt, argc, argv, 1, "k:s:w:t:b:c:o:p:mh", 0)) >= 0) {
+  while ((c = ketopt(&opt, argc, argv, 1, "k:s:w:t:b:c:o:p:rmh", 0)) >= 0) {
     if (c == 'h') {
       print_usage();
       return 0;
@@ -84,12 +90,17 @@ int main(int argc, char **argv) {
         n_threads = 1;
     } else if (c == 'm')
       filter_masked = 1;
+    else if (c == 'r')
+      read_mode = 1;
     else
       return 1;
   }
+  g_segtrace_read_mode = read_mode;
   /* 자동 파라미터 결정:
    * step_size는 윈도우의 1/3 (인접 윈도우가 3배 중첩),
-   * min_bases는 윈도우의 1/4 (N이 75% 이상인 윈도우는 스케치하지 않음) */
+   * min_bases는 윈도우의 1/4 (N이 75% 이상인 윈도우는 스케치하지 않음).
+   * read 모드도 같은 기본 윈도잉을 쓰되, 사용자가 -w/-t/-b를 주면
+   * 그대로 따른다 (read 안에서도 윈도잉이 가능해야 하므로) */
   if (step_size == 0)
     step_size = window_size / 3;
   if (min_bases == 0)
@@ -116,10 +127,43 @@ int main(int argc, char **argv) {
 
   void *thread_pool = n_threads > 1 ? kt_forpool_init(n_threads) : NULL;
 
-  /* [1단계] 모든 FASTA를 윈도우 단위로 나누고 각 윈도우의 스케치(해시 집합) 추출 */
+  /* [1단계] 모든 입력을 윈도우 단위로 나누고 각 윈도우의 스케치 추출.
+   * read 모드에서도 read를 윈도우로 자르므로(각 read가 하나의 서열)
+   * 메모리 사용량은 윈도우 모드와 동일한 청크 파이프라인에 의해 제한된다 */
   GlobalWindows gw =
       extract_all_windows(files, num_files, &r, scale, window_size,
                           step_size, min_bases, n_threads, thread_pool);
+
+  if (read_mode) {
+    /* read 모드: 동일 스케치를 가진 윈도우를 그룹화해 그룹 크기(관측
+     * 개수)를 구하고, 그룹 크기 히스토그램의 첫 봉우리로 배수체(haploid)
+     * 커버리지 C1을 추정한다. 세그먼트 복제수 = round(그룹 크기 / C1). */
+    ReadGroupStat *groups = NULL;
+    size_t n_groups = group_identical_reads(gw.all_hashes, gw.coords,
+                                            gw.num_sketches, n_threads,
+                                            thread_pool, &groups);
+    if (thread_pool)
+      kt_forpool_destroy(thread_pool);
+
+    double hap_cov =
+        estimate_haploid_coverage(groups, n_groups, scale, window_size);
+    fprintf(stderr,
+            "[segtrace] Read mode: %zu windows, %zu distinct segments, "
+            "haploid coverage ~ %.2fx\n",
+            gw.num_sketches, n_groups, hap_cov);
+    write_read_seg_bed(out_prefix, gw.coords, gw.seq_lens, groups, n_groups,
+                       scale, window_size, step_size, hap_cov, min_copies);
+
+    free(groups);
+    free(gw.all_hashes);
+    free(gw.coords);
+    for (size_t i = 0; i < gw.num_seqs; i++) {
+      free(gw.seq_lens[i].genome);
+      free(gw.seq_lens[i].seq);
+    }
+    free(gw.seq_lens);
+    return 0;
+  }
 
   /* [2단계] 해시를 공유하는 윈도우 쌍을 후보로 찾고 유사도(공유 해시 수) 계산 */
   fprintf(stderr,
@@ -301,6 +345,7 @@ static void seq_chunk_worker(void *data, long i, int tid) {
     wc->seq_id = job->seq_id;
     wc->window_idx = current_window_idx;
     wc->sketch_size = (uint16_t)sketch_size;
+    wc->sample_idx = 0;
 
     size_t h_idx = job->num_hashes;
     if (sketch_size > 0) {
@@ -355,6 +400,7 @@ GlobalWindows extract_all_windows(char **files, int num_files,
 
     while (kseq_read(ks) >= 0) {
       size_t len = ks->seq.l;
+      /* 윈도우 크기보다 짧은 서열(read 포함)은 스케치할 수 없으므로 건너뛴다 */
       if (len < window_size)
         continue;
 
@@ -371,7 +417,7 @@ GlobalWindows extract_all_windows(char **files, int num_files,
       DA_RESERVE(gw.all_hashes, cap_all_hashes,
              num_all_hashes + seq_windows * 96);
 
-      /* 병렬화를 위해 염색체를 chunk로 분할.
+      /* 병렬화를 위해 서열을 chunk로 분할.
        * 스레드 수의 4배로 쪼개 부하 균형을 맞추고 최소 100kb를 보장하며,
        * step_size의 배수로 맞춰 chunk 경계에서도 윈도우 인덱스가 어긋나지 않게 함 */
       size_t chunk_size = len / ((size_t)n_threads * 4);
@@ -382,7 +428,7 @@ GlobalWindows extract_all_windows(char **files, int num_files,
       size_t cap_jobs = 16, num_jobs = 0;
       SeqChunkJob *jobs = malloc(cap_jobs * sizeof(SeqChunkJob));
 
-      for (size_t c_start = 0; c_start <= len - window_size;
+      for (size_t c_start = 0; c_start + window_size <= len;
            c_start += chunk_size) {
         /* chunk 끝을 window_size - step_size만큼 연장해 경계에 걸친 윈도우가
          * 누락되지 않도록 한다 (인접 chunk와 겹침) */
@@ -393,6 +439,7 @@ GlobalWindows extract_all_windows(char **files, int num_files,
         DA_RESERVE(jobs, cap_jobs, num_jobs + 1);
         jobs[num_jobs++] = (SeqChunkJob){.r = r,
                                          .threshold = threshold,
+                                         .scale = scale,
                                          .window_size = window_size,
                                          .step_size = step_size,
                                          .min_bases = min_bases,
@@ -400,6 +447,8 @@ GlobalWindows extract_all_windows(char **files, int num_files,
                                          .seq_ptr = seq_ptr,
                                          .chunk_start_idx = c_start,
                                          .chunk_end_idx = c_end};
+        if (c_end >= len)
+          break;
       }
 
       /* chunk들을 스레드 풀로 병렬 스케치 */
@@ -434,6 +483,20 @@ GlobalWindows extract_all_windows(char **files, int num_files,
     }
     kseq_destroy(ks);
     gzclose(fp);
+  }
+
+  /* read 모드: 동일 스케치를 가진 read를 READ_SAMPLE_SLOTS개 샘플 슬롯으로
+   * 나눠 그룹 크기 해상도를 높인다. 첫 샘플 해시의 상위 4비트로 슬롯을
+   * 정하면 같은 스케치는 항상 같은 슬롯에 들어가고, 슬롯당 read 수의
+   * 기대치는 전체 깊이의 1/READ_SAMPLE_SLOTS가 된다. */
+  if (g_segtrace_read_mode) {
+    for (size_t i = 0; i < gw.num_sketches; i++) {
+      WindowCoord *wc = &gw.coords[i];
+      if (wc->sketch_size == 0)
+        continue;
+      uint32_t first = gw.all_hashes[wc->sketch_offset];
+      wc->sample_idx = first >> READ_SLOT_SHIFT;
+    }
   }
   return gw;
 }
@@ -814,8 +877,215 @@ CandidateGraph discover_and_compute(const uint32_t *all_hashes,
 }
 
 // ==============================================================
-// SECTION 4: CLUSTERING, LOCUS MERGING & COPY FILTERING
+// SECTION 3b: READ-MODE EXACT GROUPING & COVERAGE-BASED COPY NUMBER
 // ==============================================================
+
+/* 스케치(정렬된 해시 배열)의 FNV-1a 지문.
+ * 스케치는 정규화된 32비트 해시의 정렬 배열이므로 같은 스케치는 항상 같은
+ * 지문을 가지고, 다른 스케치가 같은 지문을 가질 확률은 ~2^-64이다.
+ * 지문 비교만으로 그룹화하므로 해시 항목 배열을 추가로 만들지 않아
+ * 메모리가 O(윈도우 수)에 머문다. */
+static uint64_t sketch_fingerprint(const uint32_t *h, size_t n) {
+  uint64_t fp = UINT64_C(1469598103934665603);
+  for (size_t i = 0; i < n; i++) {
+    uint32_t v = h[i];
+    for (int b = 0; b < 4; b++) {
+      fp ^= (v >> (b * 8)) & 0xff;
+      fp *= UINT64_C(1099511628211);
+    }
+  }
+  return fp;
+}
+
+static int compare_read_group(const void *a, const void *b) {
+  const ReadGroupStat *ga = (const ReadGroupStat *)a,
+                      *gb = (const ReadGroupStat *)b;
+  if (ga->sketch_size != gb->sketch_size)
+    return CMP(ga->sketch_size, gb->sketch_size);
+  if (ga->sample_idx != gb->sample_idx)
+    return CMP(ga->sample_idx, gb->sample_idx);
+  return CMP(ga->fingerprint, gb->fingerprint);
+}
+
+/* 슬롯을 무시하고 스케치 자체만 비교 (슬롯 합산용 2단계 정렬) */
+static int compare_read_group_noslot(const void *a, const void *b) {
+  const ReadGroupStat *ga = (const ReadGroupStat *)a,
+                      *gb = (const ReadGroupStat *)b;
+  if (ga->sketch_size != gb->sketch_size)
+    return CMP(ga->sketch_size, gb->sketch_size);
+  return CMP(ga->fingerprint, gb->fingerprint);
+}
+
+/* 스케치가 완전히 같은 read를 그룹화해 그룹 크기(관측 개수)를 구한다.
+ * (sketch_size, fingerprint)로 정렬하면 동일 스케치가 연속 run을 이루고,
+ * run 크기가 곧 그 세그먼트를 커버하는 read 수다. 빈 스케치는 제외한다.
+ * k-mer 스페이스가 충분히 크므로 (4^k >> 윈도우 수) 서열이 다른 두 read가
+ * 완전히 같은 스케치를 가질 확률은 무시할 수 있다. */
+size_t group_identical_reads(const uint32_t *all_hashes,
+                             const WindowCoord *coords, size_t n_windows,
+                             int n_threads, void *thread_pool,
+                             ReadGroupStat **out_groups) {
+  fprintf(stderr, "[segtrace] Grouping reads by identical sketches...\n");
+  (void)n_threads;
+  (void)thread_pool;
+
+  ReadGroupStat *groups = NULL;
+  size_t n_groups = 0, cap_groups = 0;
+  for (size_t i = 0; i < n_windows; i++) {
+    if (coords[i].sketch_size == 0)
+      continue;
+    DA_PUSH(groups, n_groups, cap_groups,
+            ((ReadGroupStat){(uint32_t)i, 1,
+                             sketch_fingerprint(
+                                 all_hashes + coords[i].sketch_offset,
+                                 coords[i].sketch_size),
+                             coords[i].sketch_size, coords[i].sample_idx}));
+  }
+  if (n_groups == 0) {
+    *out_groups = groups;
+    return 0;
+  }
+
+  qsort(groups, n_groups, sizeof(ReadGroupStat), compare_read_group);
+
+  /* 1단계: 동일 (size, sample_idx, fingerprint) run을 하나의 슬롯 그룹으로
+   * 압축. 슬롯 그룹의 count가 곧 그 슬롯에서 관측된 read 수다 */
+  size_t out = 0;
+  size_t i = 0;
+  while (i < n_groups) {
+    size_t j = i + 1;
+    while (j < n_groups && groups[j].sketch_size == groups[i].sketch_size &&
+           groups[j].sample_idx == groups[i].sample_idx &&
+           groups[j].fingerprint == groups[i].fingerprint)
+      j++;
+    groups[out] = groups[i];
+    groups[out].count = (uint32_t)(j - i);
+    out++;
+    i = j;
+  }
+  n_groups = out;
+
+  /* 2단계: 슬롯 키를 제외하고 (size, fingerprint)만으로 다시 정렬해
+   * 같은 스케치의 16개 슬롯을 하나의 세그먼트로 합친다 */
+  qsort(groups, n_groups, sizeof(ReadGroupStat), compare_read_group_noslot);
+  out = 0;
+  i = 0;
+  while (i < n_groups) {
+    size_t j = i + 1;
+    uint64_t total = groups[i].count;
+    while (j < n_groups && groups[j].sketch_size == groups[i].sketch_size &&
+           groups[j].fingerprint == groups[i].fingerprint) {
+      total += groups[j].count;
+      j++;
+    }
+    groups[out] = groups[i];
+    /* 슬롯 합산이 uint32를 넘는 극단적인 심층 데이터에서는 포화시킨다 */
+    groups[out].count =
+        total > UINT32_MAX ? UINT32_MAX : (uint32_t)total;
+    out++;
+    i = j;
+  }
+  *out_groups = groups;
+  return out;
+}
+
+/* 그룹 크기(관측 read 수) 히스토그램의 첫 번째(최소 크기) 봉우리를 찾아
+ * 배수체(haploid) 커버리지로 삼는다.
+ * 수학적 근거: 각 read는 첫 샘플 해시의 상위 4비트가 가리키는 정확히
+ * 하나의 슬롯에 속하므로, 슬롯들은 한 세그먼트의 read를 서로 겹치지 않게
+ * 분할한다. 따라서 슬롯당 관측수는 전체 read 수의 불편 추정량이고,
+ * 슬롯당 관측수 히스토그램의 최빈값이 곧 1-copy(haploid) 세그먼트의
+ * 총 read 수 C1이다 (genomescope가 k-mer 빈도 히스토그램의 첫 봉우리를
+ * 쓰는 것과 같은 원리). 유전체에서 가장 흔한 세그먼트가 1-copy라는
+ * 가정이 성립할 때만 유효하다. 추정이 불가능하면(그룹 없음) 0을
+ * 돌려준다. */
+double estimate_haploid_coverage(const ReadGroupStat *groups, size_t n_groups,
+                                 uint64_t scale, size_t window_size) {
+  /* scale과 window_size는 현재 추정기가 쓰지 않지만, 향후 스케치 크기 기반
+   * 추정으로 확장할 때 시그니처를 유지하기 위해 남겨둔다 */
+  (void)scale;
+  (void)window_size;
+  if (n_groups == 0)
+    return 0.0;
+
+  uint32_t max_count = 0;
+  for (size_t i = 0; i < n_groups; i++)
+    if (groups[i].count > max_count)
+      max_count = groups[i].count;
+
+  size_t *hist = calloc((size_t)max_count + 1, sizeof(size_t));
+  if (!hist) {
+    fprintf(stderr, "[ERROR] Memory allocation failed\n");
+    exit(1);
+  }
+  for (size_t i = 0; i < n_groups; i++)
+    hist[groups[i].count]++;
+
+  /* 최빈 count. count=1(한 번만 관측된 read)은 대부분 시퀀싱 오류
+   * k-mer/리드이므로 genomescope 관례에 따라 후보에서 제외하고
+   * count>=2부터 최빈값을 찾는다. 모든 그룹이 count=1이면 mode=1이다 */
+  size_t mode = 1;
+  for (size_t i = 2; i <= max_count; i++)
+    if (hist[i] > hist[mode])
+      mode = i;
+  free(hist);
+
+  /* 슬롯당 count가 곧 전체 read 수의 추정치다 (각 read가 정확히 하나의
+   * 슬롯에만 속하므로 슬롯당 count 평균은 전체 count의 불편 추정량).
+   * 별도 환산 없이 mode 자체가 haploid 세그먼트의 read 수다. */
+  return (double)mode;
+}
+
+/* read 모드 출력: 각 그룹(고유 세그먼트)을 대표 read 이름으로 BED에 쓴다.
+ * 그룹은 (스케치, 슬롯) 단위로 나뉘어 있으므로, 같은 스케치의 슬롯들을
+ * 합쳐 전체 read 수를 복원한 뒤 복제수 = round(총 read 수 / C1)를 계산한다.
+ * C1은 estimate_haploid_coverage가 준 슬롯 환산 haploid 깊이.
+ * copy < min_copies인 그룹은 제외한다 (기본 -c 1이면 모두 출력). */
+void write_read_seg_bed(const char *out_prefix, const WindowCoord *coords,
+                        const GenomeSeqLen *seq_lens,
+                        const ReadGroupStat *groups, size_t n_groups,
+                        uint64_t scale, size_t window_size, size_t step_size,
+                        double haploid_coverage, uint32_t min_copies) {
+  if (n_groups == 0)
+    return;
+  if (min_copies < 1)
+    min_copies = 1;
+
+  char path_buf[PATH_MAX];
+  snprintf(path_buf, sizeof(path_buf), "%s.seg.bed", out_prefix);
+  FILE *out = fopen(path_buf, "w");
+  if (!out) {
+    fprintf(stderr, "[ERROR] Cannot open output file: %s\n", path_buf);
+    return;
+  }
+
+  (void)scale;
+  fprintf(out, "#chrom\tstart\tend\twindow_count\test_depth\test_copies\n");
+
+  /* group_identical_reads가 이미 슬롯을 합산해 그룹당 총 관측 수를
+   * 넣어두었다. 각 그룹은 동일 스케치를 공유하는 윈도우들의 집합이고,
+   * 대표 윈도우의 좌표(read 이름 + 윈도우 오프셋)를 출력한다 */
+  for (size_t i = 0; i < n_groups; i++) {
+    const ReadGroupStat *g = &groups[i];
+    double depth = (double)g->count;
+    uint32_t copies = haploid_coverage > 0.0
+                          ? (uint32_t)(depth / haploid_coverage + 0.5)
+                          : 1;
+    if (copies < min_copies)
+      continue;
+    const WindowCoord *wc = &coords[g->window_id];
+    uint32_t seq_i = wc->seq_id;
+    /* start는 시퀀스(read) 안에서의 bp 오프셋, end는 윈도우 끝 */
+    size_t start = (size_t)wc->window_idx * step_size;
+    size_t end = start + window_size;
+    fprintf(out, "%s-%s\t%zu\t%zu\t%u\t%.1f\t%u\n", seq_lens[seq_i].genome,
+            seq_lens[seq_i].seq, start, end, g->count, depth, copies);
+  }
+  fclose(out);
+}
+
+
+
 
 /* 인코딩된 값에서 윈도우 id(하위 28비트) 추출 */
 static inline uint32_t candidate_window(uint32_t encoded) {
@@ -1021,9 +1291,10 @@ size_t filter_regions_by_copy_count(SegtraceDupRegion *regions, size_t n,
   return out_count;
 }
 
-/* 최종 구간을 "<prefix>.dup.bed"에 기록.
+/* 최종 구간을 "<prefix>.seg.bed"에 기록.
  * chrom 컬럼은 "파일명-서열명" 형태, 4번째 컬럼은 클러스터 id.
- * min_sd_len 미만의 짧은 구간은 출력하지 않는다 */
+ * read 모드의 .seg.bed와 파일명을 통일해 후속 파이프라인이 하나의
+ * 이름 규칙만 알면 되게 한다. min_sd_len 미만의 짧은 구간은 출력하지 않음 */
 void write_dup_bed(const char *out_prefix, const SegtraceDupRegion *dup_regions,
                    size_t n_merged, const GenomeSeqLen *seq_lens,
                    size_t min_sd_len) {
@@ -1031,7 +1302,7 @@ void write_dup_bed(const char *out_prefix, const SegtraceDupRegion *dup_regions,
     return;
 
   char path_buf[PATH_MAX];
-  snprintf(path_buf, sizeof(path_buf), "%s.dup.bed", out_prefix);
+  snprintf(path_buf, sizeof(path_buf), "%s.seg.bed", out_prefix);
   FILE *out_bed = fopen(path_buf, "w");
   if (!out_bed) {
     fprintf(stderr, "[ERROR] Cannot open output file: %s\n", path_buf);

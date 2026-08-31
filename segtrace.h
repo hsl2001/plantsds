@@ -59,6 +59,18 @@ extern "C" {
 
 #define BLOOM_NUM_WORDS (UINT32_C(1) << 22)
 
+/* Read-mode sample slots: 첫 샘플 해시의 상위 log2(N) 비트로 N개 슬롯 중
+ * 하나에 read를 배정한다. 16 = 2^4인 이유:
+ *  (1) 해시 상위 4비트 추출이 shift 한 번이라 추가 해싱 비용이 없고,
+ *  (2) 슬롯당 기대 관측수가 전체 깊이의 1/16이 되어 Poisson 이산화로
+ *      인한 최빈값 해상도 손실(~1/sqrt(C1/16))과 슬롯당 그룹 수 증가
+ *      (메모리) 사이의 균형점이며,
+ *  (3) 슬롯 크기가 해시 범위의 정확히 1/16이어서 편향이 없다.
+ * 깊이 C1인 세그먼트의 슬롯당 관측수는 근사적으로 Poisson(C1/16)이고,
+ * 16개 슬롯의 합은 C1의 불편 추정량이다. */
+#define READ_SAMPLE_SLOTS 16
+#define READ_SLOT_SHIFT (32 - 4) /* 상위 4비트 = log2(READ_SAMPLE_SLOTS) */
+
 // ==============================================================
 // CORE DATA STRUCTURES
 // ==============================================================
@@ -87,6 +99,7 @@ typedef struct {
   uint64_t sketch_offset;
   uint32_t window_idx;
   uint16_t sketch_size;
+  uint32_t sample_idx; /* read mode: sample slot from first sampled hash */
 } WindowCoord;
 
 typedef struct {
@@ -112,6 +125,15 @@ typedef struct {
   uint32_t window_id;
 } HashWindowEntry;
 
+/* Read-mode group statistics (one row per distinct sketch x sample slot) */
+typedef struct {
+  uint32_t window_id;   /* representative window (= one read) of the group */
+  uint32_t count;       /* number of reads sharing the sketch */
+  uint64_t fingerprint; /* FNV-1a fingerprint over the sorted sketch */
+  uint16_t sketch_size; /* number of sampled hashes in the read sketch */
+  uint32_t sample_idx;  /* sample slot derived from the first sampled hash */
+} ReadGroupStat;
+
 typedef struct {
   HashWindowEntry *entries;
   size_t size;
@@ -128,6 +150,7 @@ typedef struct {
 typedef struct {
   const Segtrace *r;
   uint32_t threshold;
+  uint64_t scale; /* read 모드: 그룹 크기 해상도를 위한 샘플 슬롯 수 */
   size_t window_size;
   size_t step_size;
   size_t min_bases;
@@ -187,6 +210,8 @@ GlobalWindows extract_all_windows(char **files, int num_files,
                                   size_t window_size, size_t step_size,
                                   size_t min_bases, int n_threads,
                                   void *thread_pool);
+/* read 모드일 때만 켜는 전역 플래그: 윈도우=read 전체, 샘플 슬롯 사용 */
+extern int g_segtrace_read_mode;
 
 // 4. DISCOVERY & DISTANCE COMPUTATION
 CandidateGraph discover_and_compute(const uint32_t *all_hashes,
@@ -196,6 +221,20 @@ CandidateGraph discover_and_compute(const uint32_t *all_hashes,
                                     uint32_t kmer_size,
                                     void *thread_pool);
 void free_candidate_graph(CandidateGraph *graph);
+
+/* Read mode: group identical sketches, estimate haploid coverage from the
+ * size-1 group peak, and write per-segment copy-number calls. */
+size_t group_identical_reads(const uint32_t *all_hashes,
+                             const WindowCoord *coords, size_t n_windows,
+                             int n_threads, void *thread_pool,
+                             ReadGroupStat **out_groups);
+double estimate_haploid_coverage(const ReadGroupStat *groups, size_t n_groups,
+                                 uint64_t scale, size_t window_size);
+void write_read_seg_bed(const char *out_prefix, const WindowCoord *coords,
+                        const GenomeSeqLen *seq_lens,
+                        const ReadGroupStat *groups, size_t n_groups,
+                        uint64_t scale, size_t window_size, size_t step_size,
+                        double haploid_coverage, uint32_t min_copies);
 
 // 5. REGION CLUSTERING, COPY FILTERING & OUTPUT
 void build_duplicate_loci(const CandidateGraph *graph, size_t num_windows,
