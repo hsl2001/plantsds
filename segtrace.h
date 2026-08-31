@@ -202,7 +202,7 @@ double estimate_haploid_coverage(const uint32_t *all_hashes,
 void write_read_seg_bed(const char *out_prefix,
                         const SegtraceDupRegion *regions, size_t n_regions,
                         const GenomeSeqLen *seq_lens,
-                        double haploid_coverage, uint32_t min_copies);
+                        double haploid_coverage, size_t min_sd_len);
 
 // 5. REGION CLUSTERING, COPY FILTERING & OUTPUT
 void build_duplicate_loci(const CandidateGraph *graph, size_t num_windows,

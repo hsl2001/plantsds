@@ -24,7 +24,7 @@ static void print_usage(void) {
          "  -t: step size in bp (default: 0 [auto: 33%% of window size])\n"
          "  -b: minimum valid bases per window (default: 0 [auto: 25%% of "
          "window size])\n"
-         "  -c: minimum estimated copies to report (default: 1)\n"
+         "  -c: minimum loci per input file to report (default: 1)\n"
          "  -r: long-read mode - window each FASTA/FASTQ record and group "
          "similar collinear windows\n"
          "  -m: filter soft-masked bases (treat lowercase a/c/g/t as invalid)\n"
@@ -176,20 +176,21 @@ int main(int argc, char **argv) {
   free(gw.coords);
   gw.coords = NULL;
 
+  /* [5단계] 유전체당 복제 수(min_copies) 미만인 클러스터 그룹 제거 */
+  size_t n_filtered =
+      filter_regions_by_copy_count(dup_regions, n_dup_regions, min_copies);
+
   if (read_mode) {
     fprintf(stderr,
             "[segtrace] Read mode: %zu loci, haploid coverage ~ %.2fx\n",
-            n_dup_regions, hap_cov);
-    write_read_seg_bed(out_prefix, dup_regions, n_dup_regions, gw.seq_lens,
-                       hap_cov, min_copies);
+            n_filtered, hap_cov);
+    write_read_seg_bed(out_prefix, dup_regions, n_filtered, gw.seq_lens,
+                       hap_cov, window_size < MIN_SD_LEN ? window_size
+                                                         : MIN_SD_LEN);
     free(dup_regions);
     free_global_windows(&gw);
     return 0;
   }
-
-  /* [5단계] 유전체당 복제 수(min_copies) 미만인 클러스터 그룹 제거 */
-  size_t n_filtered =
-      filter_regions_by_copy_count(dup_regions, n_dup_regions, min_copies);
 
   /* [6단계] BED 형식으로 출력 (최소 SD 길이 미만 구간은 제외) */
   write_dup_bed(out_prefix, dup_regions, n_filtered, gw.seq_lens,
@@ -927,11 +928,9 @@ double estimate_haploid_coverage(const uint32_t *all_hashes,
 void write_read_seg_bed(const char *out_prefix,
                         const SegtraceDupRegion *regions, size_t n_regions,
                         const GenomeSeqLen *seq_lens,
-                        double haploid_coverage, uint32_t min_copies) {
+                        double haploid_coverage, size_t min_sd_len) {
   if (n_regions == 0)
     return;
-  if (min_copies < 1)
-    min_copies = 1;
 
   char path_buf[PATH_MAX];
   snprintf(path_buf, sizeof(path_buf), "%s.seg.bed", out_prefix);
@@ -951,8 +950,10 @@ void write_read_seg_bed(const char *out_prefix,
     uint32_t copies = haploid_coverage > 0.0
                           ? (uint32_t)(depth / haploid_coverage + 0.5)
                           : 1;
-    if (copies >= min_copies) {
-      const SegtraceDupRegion *region = &regions[i];
+    for (size_t k = i; k < j; k++) {
+      const SegtraceDupRegion *region = &regions[k];
+      if (region->end - region->start < min_sd_len)
+        continue;
       uint32_t seq_i = region->seq_id;
       fprintf(out, "%s-%s\t%zu\t%zu\t%u\t%.1f\t%u\n",
               seq_lens[seq_i].genome, seq_lens[seq_i].seq, region->start,

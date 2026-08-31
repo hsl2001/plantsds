@@ -106,4 +106,4 @@ Pipeline
 
 Output files
 
-Both modes write <prefix>.seg.bed. Genome mode writes merged loci with a cluster_id column. Read mode writes one row per cluster with representative long-read coordinates and the columns window_count, est_depth, and est_copies. Clusters below c estimated copies are omitted.
+Both modes write <prefix>.seg.bed. Genome mode writes merged loci with a cluster_id column. Read mode writes the same filtered loci with representative cluster depth and the columns window_count, est_depth, and est_copies. The -c filter has the same per-input-file locus-count meaning in both modes; only read mode's reported copy number uses haploid k-mer coverage.
