@@ -914,10 +914,12 @@ double estimate_haploid_coverage(const uint32_t *all_hashes,
   }
   free(hashes);
 
-  size_t mode = 1;
+  size_t mode = 1, mode_count = 0;
   for (size_t i = 2; i < MAX_KMER_COVERAGE; i++)
-    if (histogram[i] > histogram[mode])
+    if (histogram[i] > mode_count) {
+      mode_count = histogram[i];
       mode = i;
+    }
   return (double)mode;
 }
 
