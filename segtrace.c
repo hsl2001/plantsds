@@ -24,9 +24,9 @@ static void print_usage(void) {
          "  -t: step size in bp (default: 0 [auto: 33%% of window size])\n"
          "  -b: minimum valid bases per window (default: 0 [auto: 25%% of "
          "window size])\n"
-         "  -c: minimum copies per genome/file to report (default: 1)\n"
-         "  -r: read mode - each FASTA/FASTQ record is one segment; window "
-         "and step are set automatically (window = whole record)\n"
+         "  -c: minimum estimated copies to report (default: 1)\n"
+         "  -r: long-read mode - window each FASTA/FASTQ record and group "
+         "similar collinear windows\n"
          "  -m: filter soft-masked bases (treat lowercase a/c/g/t as invalid)\n"
          "  -o: output file prefix (default: segtrace)\n"
          "  -p: number of threads (default: 8)\n"
@@ -101,6 +101,11 @@ int main(int argc, char **argv) {
     else
       return 1;
   }
+  if (kmer_size == 0 || kmer_size > 64 || scale == 0 ||
+      scale > UINT32_MAX || window_size == 0) {
+    fprintf(stderr, "[ERROR] Invalid kmer, scale, or window size.\n");
+    return 1;
+  }
   /* 자동 파라미터 결정:
    * step_size는 윈도우의 1/3 (인접 윈도우가 3배 중첩),
    * min_bases는 윈도우의 1/4 (N이 75% 이상인 윈도우는 스케치하지 않음).
@@ -108,6 +113,8 @@ int main(int argc, char **argv) {
    * 그대로 따른다 (read 안에서도 윈도잉이 가능해야 하므로) */
   if (step_size == 0)
     step_size = window_size / 3;
+  if (step_size == 0)
+    step_size = 1;
   if (min_bases == 0)
     min_bases = window_size / 4;
   if (opt.ind == argc) {
@@ -149,25 +156,11 @@ int main(int argc, char **argv) {
   if (thread_pool)
     kt_forpool_destroy(thread_pool);
 
-  if (read_mode) {
-    ReadGroupStat *groups = NULL;
-    size_t n_groups =
-        group_similar_reads(&graph, gw.coords, gw.num_sketches, &groups);
-    free_candidate_graph(&graph);
-
-    double hap_cov = estimate_haploid_coverage(groups, n_groups);
-    fprintf(stderr,
-            "[segtrace] Read mode: %zu windows, %zu distinct segments, "
-            "haploid coverage ~ %.2fx\n",
-            gw.num_sketches, n_groups, hap_cov);
-    write_read_seg_bed(out_prefix, gw.coords, gw.seq_lens, groups, n_groups,
-                       window_size, step_size, hap_cov, min_copies);
-
-    free(groups);
-    free_global_windows(&gw);
-    return 0;
-  }
-
+  double hap_cov = read_mode
+                       ? estimate_haploid_coverage(
+                             gw.all_hashes, gw.coords, gw.num_sketches,
+                             window_size, step_size)
+                       : 0.0;
   free(gw.all_hashes); /* 이후 단계에서는 원본 해시 배열이 필요 없음 */
   gw.all_hashes = NULL;
 
@@ -182,6 +175,17 @@ int main(int argc, char **argv) {
 
   free(gw.coords);
   gw.coords = NULL;
+
+  if (read_mode) {
+    fprintf(stderr,
+            "[segtrace] Read mode: %zu loci, haploid coverage ~ %.2fx\n",
+            n_dup_regions, hap_cov);
+    write_read_seg_bed(out_prefix, dup_regions, n_dup_regions, gw.seq_lens,
+                       hap_cov, min_copies);
+    free(dup_regions);
+    free_global_windows(&gw);
+    return 0;
+  }
 
   /* [5단계] 유전체당 복제 수(min_copies) 미만인 클러스터 그룹 제거 */
   size_t n_filtered =
@@ -850,86 +854,79 @@ CandidateGraph discover_and_compute(const uint32_t *all_hashes,
 }
 
 // ==============================================================
-// SECTION 3b: READ-MODE GROUPING & COVERAGE-BASED COPY NUMBER
+// SECTION 3b: READ-MODE K-MER COVERAGE & COPY NUMBER
 // ==============================================================
 
-/* 후보 스케치 간선을 union-find로 연결하고, 연결요소마다 대표 window와
- * 관측 수를 하나씩 만든다. 후보가 없는 window도 깊이 1의 그룹으로 남긴다. */
-size_t group_similar_reads(const CandidateGraph *graph,
-                           const WindowCoord *coords, size_t n_windows,
-                           ReadGroupStat **out_groups) {
-  fprintf(stderr, "[segtrace] Grouping reads by similar sketches...\n");
-  UnionFind uf;
-  init_unionfind(&uf, n_windows);
-  for (int t = 0; t < graph->n_threads; t++)
-    for (size_t i = 0; i < graph->counts[t]; i++)
-      union_unionfind(&uf, graph->pairs[t][i].a, graph->pairs[t][i].b);
-
-  uint32_t *counts = calloc(n_windows, sizeof(*counts));
-  uint32_t *representatives = malloc(n_windows * sizeof(*representatives));
-  if ((n_windows && !counts) || (n_windows && !representatives)) {
-    fprintf(stderr, "[ERROR] Memory allocation failed\n");
-    exit(1);
-  }
+/* 서로 겹치는 window를 중복 계수하지 않도록 각 sequence에서 비중첩 window의
+ * sampled k-mer 빈도를 모아 haploid coverage를 추정한다. */
+double estimate_haploid_coverage(const uint32_t *all_hashes,
+                                 const WindowCoord *coords, size_t n_windows,
+                                 size_t window_size, size_t step_size) {
+  size_t total_hashes = 0, last_seq = SIZE_MAX, next_start = 0;
   for (size_t i = 0; i < n_windows; i++) {
-    if (coords[i].sketch_size == 0)
-      continue;
-    uint32_t root = find_unionfind(&uf, (uint32_t)i);
-    if (counts[root]++ == 0)
-      representatives[root] = (uint32_t)i;
+    const WindowCoord *wc = &coords[i];
+    if (wc->seq_id != last_seq) {
+      last_seq = wc->seq_id;
+      next_start = 0;
+    }
+    size_t start = (size_t)wc->window_idx * step_size;
+    if (wc->sketch_size && start >= next_start) {
+      total_hashes += wc->sketch_size;
+      next_start = start + window_size;
+    }
   }
-
-  ReadGroupStat *groups = NULL;
-  size_t n_groups = 0, cap_groups = 0;
-  for (size_t i = 0; i < n_windows; i++)
-    if (counts[i] > 0)
-      DA_PUSH(groups, n_groups, cap_groups,
-              ((ReadGroupStat){representatives[i], counts[i]}));
-  free(representatives);
-  free(counts);
-  free_unionfind(&uf);
-  *out_groups = groups;
-  return n_groups;
-}
-
-/* component 크기 히스토그램의 첫 봉우리를 haploid coverage로 쓴다.
- * 1-copy 세그먼트가 가장 흔하다는 가정이 성립하지 않으면 추정은 부정확할 수 있다. */
-double estimate_haploid_coverage(const ReadGroupStat *groups, size_t n_groups) {
-  if (n_groups == 0)
+  if (total_hashes == 0)
     return 0.0;
 
-  uint32_t max_count = 0;
-  for (size_t i = 0; i < n_groups; i++)
-    if (groups[i].count > max_count)
-      max_count = groups[i].count;
-
-  size_t *hist = calloc((size_t)max_count + 1, sizeof(size_t));
-  if (!hist) {
+  uint32_t *hashes = malloc(total_hashes * sizeof(*hashes));
+  if (!hashes) {
     fprintf(stderr, "[ERROR] Memory allocation failed\n");
     exit(1);
   }
-  for (size_t i = 0; i < n_groups; i++)
-    hist[groups[i].count]++;
+  size_t out = 0;
+  last_seq = SIZE_MAX;
+  next_start = 0;
+  for (size_t i = 0; i < n_windows; i++) {
+    const WindowCoord *wc = &coords[i];
+    if (wc->seq_id != last_seq) {
+      last_seq = wc->seq_id;
+      next_start = 0;
+    }
+    size_t start = (size_t)wc->window_idx * step_size;
+    if (wc->sketch_size && start >= next_start) {
+      memcpy(hashes + out, all_hashes + wc->sketch_offset,
+             wc->sketch_size * sizeof(*hashes));
+      out += wc->sketch_size;
+      next_start = start + window_size;
+    }
+  }
+  qsort(hashes, out, sizeof(*hashes), compare_uint32);
 
-  /* 최빈 count. count=1(한 번만 관측된 read)은 대부분 시퀀싱 오류
-   * k-mer/리드이므로 genomescope 관례에 따라 후보에서 제외하고
-   * count>=2부터 최빈값을 찾는다. 모든 그룹이 count=1이면 mode=1이다 */
+  enum { MAX_KMER_COVERAGE = 4096 };
+  size_t histogram[MAX_KMER_COVERAGE] = {0};
+  for (size_t i = 0; i < out;) {
+    size_t j = i + 1;
+    while (j < out && hashes[j] == hashes[i])
+      j++;
+    if (j - i < MAX_KMER_COVERAGE)
+      histogram[j - i]++;
+    i = j;
+  }
+  free(hashes);
+
   size_t mode = 1;
-  for (size_t i = 2; i <= max_count; i++)
-    if (hist[i] > hist[mode])
+  for (size_t i = 2; i < MAX_KMER_COVERAGE; i++)
+    if (histogram[i] > histogram[mode])
       mode = i;
-  free(hist);
-
   return (double)mode;
 }
 
-/* read 모드 출력: 각 스케치 유사도 연결요소를 대표 read 이름으로 BED에 쓴다. */
-void write_read_seg_bed(const char *out_prefix, const WindowCoord *coords,
+/* cluster별 locus depth를 haploid coverage와 비교해 copy number를 계산한다. */
+void write_read_seg_bed(const char *out_prefix,
+                        const SegtraceDupRegion *regions, size_t n_regions,
                         const GenomeSeqLen *seq_lens,
-                        const ReadGroupStat *groups, size_t n_groups,
-                        size_t window_size, size_t step_size,
                         double haploid_coverage, uint32_t min_copies) {
-  if (n_groups == 0)
+  if (n_regions == 0)
     return;
   if (min_copies < 1)
     min_copies = 1;
@@ -944,21 +941,22 @@ void write_read_seg_bed(const char *out_prefix, const WindowCoord *coords,
 
   fprintf(out, "#chrom\tstart\tend\twindow_count\test_depth\test_copies\n");
 
-  for (size_t i = 0; i < n_groups; i++) {
-    const ReadGroupStat *g = &groups[i];
-    double depth = (double)g->count;
+  for (size_t i = 0; i < n_regions;) {
+    size_t j = i + 1;
+    while (j < n_regions && regions[j].cluster_id == regions[i].cluster_id)
+      j++;
+    double depth = (double)(j - i);
     uint32_t copies = haploid_coverage > 0.0
                           ? (uint32_t)(depth / haploid_coverage + 0.5)
                           : 1;
-    if (copies < min_copies)
-      continue;
-    const WindowCoord *wc = &coords[g->window_id];
-    uint32_t seq_i = wc->seq_id;
-    /* start는 시퀀스(read) 안에서의 bp 오프셋, end는 윈도우 끝 */
-    size_t start = (size_t)wc->window_idx * step_size;
-    size_t end = start + window_size;
-    fprintf(out, "%s-%s\t%zu\t%zu\t%u\t%.1f\t%u\n", seq_lens[seq_i].genome,
-            seq_lens[seq_i].seq, start, end, g->count, depth, copies);
+    if (copies >= min_copies) {
+      const SegtraceDupRegion *region = &regions[i];
+      uint32_t seq_i = region->seq_id;
+      fprintf(out, "%s-%s\t%zu\t%zu\t%u\t%.1f\t%u\n",
+              seq_lens[seq_i].genome, seq_lens[seq_i].seq, region->start,
+              region->end, (uint32_t)(j - i), depth, copies);
+    }
+    i = j;
   }
   fclose(out);
 }

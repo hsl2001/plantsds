@@ -95,15 +95,15 @@ and contains four columns. The chrom field is <genome basename>-<FASTA sequence 
 
 Read mode (-r)
 
-Read mode analyzes windows from individual FASTA/FASTQ records. Records are windowed with the same W, T, and base-quality settings as genome mode, so long reads can contribute several independent segments.
+Read mode uses exactly the same windowing, sketch comparison, overlap exclusion, collinear verification, locus merging, and Union-Find clustering as genome mode. FASTA/FASTQ records are treated as long-read sequences, so a record can contribute multiple loci.
 
 Pipeline
 
 1. Every eligible window receives the same canonical ntHash sketch used in genome mode.
-2. Shared sketch hashes discover candidate pairs in bounded hash partitions. A pair is retained when its full sketch intersection meets the existing $MIN_IDENTITY^k$ threshold and has a collinear neighboring match. Overlapping windows on the same long read are excluded as duplicates.
-3. Retained pairs are connected with union-find. Each connected component is one read-level segment group, and its number of windows is the observed depth N.
-4. The first peak of the component-size histogram, excluding count 1 when possible, estimates haploid coverage C1. The estimated copy number is round(N / C1).
+2. Shared sketch hashes discover candidate pairs in bounded hash partitions. A pair is retained when its full sketch intersection meets the existing $MIN_IDENTITY^k$ threshold and has a collinear neighboring match. Overlapping windows on the same read are excluded as duplicates.
+3. Candidate windows are merged into loci and clustered with the same best-partner Union-Find procedure as genome mode.
+4. Only copy-number calculation differs: the sampled k-mer frequency peak estimates haploid coverage C1, and each cluster's locus depth N is converted to round(N / C1).
 
 Output files
 
-Both modes write <prefix>.seg.bed. Genome mode writes merged loci with a cluster_id column. Read mode writes one row per union-find component with representative read coordinates and the columns window_count, est_depth, and est_copies. Components below c estimated copies are omitted.
+Both modes write <prefix>.seg.bed. Genome mode writes merged loci with a cluster_id column. Read mode writes one row per cluster with representative long-read coordinates and the columns window_count, est_depth, and est_copies. Clusters below c estimated copies are omitted.

@@ -112,12 +112,6 @@ typedef struct {
   uint32_t window_id;
 } HashWindowEntry;
 
-/* Read-mode group statistics (one row per sketch-similarity component) */
-typedef struct {
-  uint32_t window_id;
-  uint32_t count;
-} ReadGroupStat;
-
 typedef struct {
   HashWindowEntry *entries;
   size_t size;
@@ -202,14 +196,12 @@ CandidateGraph discover_and_compute(const uint32_t *all_hashes,
                                     void *thread_pool);
 void free_candidate_graph(CandidateGraph *graph);
 
-size_t group_similar_reads(const CandidateGraph *graph,
-                           const WindowCoord *coords, size_t n_windows,
-                           ReadGroupStat **out_groups);
-double estimate_haploid_coverage(const ReadGroupStat *groups, size_t n_groups);
-void write_read_seg_bed(const char *out_prefix, const WindowCoord *coords,
+double estimate_haploid_coverage(const uint32_t *all_hashes,
+                                 const WindowCoord *coords, size_t n_windows,
+                                 size_t window_size, size_t step_size);
+void write_read_seg_bed(const char *out_prefix,
+                        const SegtraceDupRegion *regions, size_t n_regions,
                         const GenomeSeqLen *seq_lens,
-                        const ReadGroupStat *groups, size_t n_groups,
-                        size_t window_size, size_t step_size,
                         double haploid_coverage, uint32_t min_copies);
 
 // 5. REGION CLUSTERING, COPY FILTERING & OUTPUT
