@@ -6,10 +6,6 @@
 #include "klib/kseq.h"
 #include "segtrace.h"
 
-/* read 모드(-r) 플래그. extract_all_windows가 윈도우 대신 read 전체를
- * 스케치하도록 전환한다 */
-int g_segtrace_read_mode = 0;
-
 /* kseq 리더 인스턴스화: gzread 기반이라 일반/gzip FASTA 모두 읽을 수 있다 */
 KSEQ_INIT(gzFile, gzread)
 
@@ -35,6 +31,16 @@ static void print_usage(void) {
          "  -o: output file prefix (default: segtrace)\n"
          "  -p: number of threads (default: 8)\n"
          "  -h, --help: show this help message\n\n");
+}
+
+static void free_global_windows(GlobalWindows *gw) {
+  free(gw->all_hashes);
+  free(gw->coords);
+  for (size_t i = 0; i < gw->num_seqs; i++) {
+    free(gw->seq_lens[i].genome);
+    free(gw->seq_lens[i].seq);
+  }
+  free(gw->seq_lens);
 }
 
 int main(int argc, char **argv) {
@@ -95,7 +101,6 @@ int main(int argc, char **argv) {
     else
       return 1;
   }
-  g_segtrace_read_mode = read_mode;
   /* 자동 파라미터 결정:
    * step_size는 윈도우의 1/3 (인접 윈도우가 3배 중첩),
    * min_bases는 윈도우의 1/4 (N이 75% 이상인 윈도우는 스케치하지 않음).
@@ -134,48 +139,37 @@ int main(int argc, char **argv) {
       extract_all_windows(files, num_files, &r, scale, window_size,
                           step_size, min_bases, n_threads, thread_pool);
 
-  if (read_mode) {
-    /* read 모드: 동일 스케치를 가진 윈도우를 그룹화해 그룹 크기(관측
-     * 개수)를 구하고, 그룹 크기 히스토그램의 첫 봉우리로 배수체(haploid)
-     * 커버리지 C1을 추정한다. 세그먼트 복제수 = round(그룹 크기 / C1). */
-    ReadGroupStat *groups = NULL;
-    size_t n_groups = group_identical_reads(gw.all_hashes, gw.coords,
-                                            gw.num_sketches, n_threads,
-                                            thread_pool, &groups);
-    if (thread_pool)
-      kt_forpool_destroy(thread_pool);
+  /* [2단계] 두 모드가 동일한 스케치 후보 탐색과 유사도 판정을 공유한다. */
+  fprintf(stderr,
+          "[segtrace] Discovering candidates and computing distances...\n");
+  CandidateGraph graph =
+      discover_and_compute(gw.all_hashes, gw.coords, gw.num_sketches,
+                           window_size, step_size, n_threads, r.hash_window,
+                           thread_pool);
+  if (thread_pool)
+    kt_forpool_destroy(thread_pool);
 
-    double hap_cov =
-        estimate_haploid_coverage(groups, n_groups, scale, window_size);
+  if (read_mode) {
+    ReadGroupStat *groups = NULL;
+    size_t n_groups =
+        group_similar_reads(&graph, gw.coords, gw.num_sketches, &groups);
+    free_candidate_graph(&graph);
+
+    double hap_cov = estimate_haploid_coverage(groups, n_groups);
     fprintf(stderr,
             "[segtrace] Read mode: %zu windows, %zu distinct segments, "
             "haploid coverage ~ %.2fx\n",
             gw.num_sketches, n_groups, hap_cov);
     write_read_seg_bed(out_prefix, gw.coords, gw.seq_lens, groups, n_groups,
-                       scale, window_size, step_size, hap_cov, min_copies);
+                       window_size, step_size, hap_cov, min_copies);
 
     free(groups);
-    free(gw.all_hashes);
-    free(gw.coords);
-    for (size_t i = 0; i < gw.num_seqs; i++) {
-      free(gw.seq_lens[i].genome);
-      free(gw.seq_lens[i].seq);
-    }
-    free(gw.seq_lens);
+    free_global_windows(&gw);
     return 0;
   }
 
-  /* [2단계] 해시를 공유하는 윈도우 쌍을 후보로 찾고 유사도(공유 해시 수) 계산 */
-  fprintf(stderr,
-          "[segtrace] Discovering candidates and computing distances...\n");
-  CandidateGraph graph =
-      discover_and_compute(gw.all_hashes, gw.coords, gw.num_sketches,
-                 window_size, step_size, n_threads, r.hash_window,
-                           thread_pool);
-  if (thread_pool)
-    kt_forpool_destroy(thread_pool);
-
   free(gw.all_hashes); /* 이후 단계에서는 원본 해시 배열이 필요 없음 */
+  gw.all_hashes = NULL;
 
   /* [3단계] 후보에 포함된 윈도우를 같은 서열 내에서 연속 구간(locus)으로 병합 */
   SegtraceDupRegion *dup_regions = NULL;
@@ -187,6 +181,7 @@ int main(int argc, char **argv) {
   free_candidate_graph(&graph);
 
   free(gw.coords);
+  gw.coords = NULL;
 
   /* [5단계] 유전체당 복제 수(min_copies) 미만인 클러스터 그룹 제거 */
   size_t n_filtered =
@@ -197,11 +192,7 @@ int main(int argc, char **argv) {
                 window_size < MIN_SD_LEN ? window_size : MIN_SD_LEN);
 
   free(dup_regions);
-  for (size_t i = 0; i < gw.num_seqs; i++) {
-    free(gw.seq_lens[i].genome);
-    free(gw.seq_lens[i].seq);
-  }
-  free(gw.seq_lens);
+  free_global_windows(&gw);
   return 0;
 }
 
@@ -345,8 +336,6 @@ static void seq_chunk_worker(void *data, long i, int tid) {
     wc->seq_id = job->seq_id;
     wc->window_idx = current_window_idx;
     wc->sketch_size = (uint16_t)sketch_size;
-    wc->sample_idx = 0;
-
     size_t h_idx = job->num_hashes;
     if (sketch_size > 0) {
       DA_RESERVE(job->hashes, job->cap_hashes, job->num_hashes + sketch_size);
@@ -439,7 +428,6 @@ GlobalWindows extract_all_windows(char **files, int num_files,
         DA_RESERVE(jobs, cap_jobs, num_jobs + 1);
         jobs[num_jobs++] = (SeqChunkJob){.r = r,
                                          .threshold = threshold,
-                                         .scale = scale,
                                          .window_size = window_size,
                                          .step_size = step_size,
                                          .min_bases = min_bases,
@@ -485,19 +473,6 @@ GlobalWindows extract_all_windows(char **files, int num_files,
     gzclose(fp);
   }
 
-  /* read 모드: 동일 스케치를 가진 read를 READ_SAMPLE_SLOTS개 샘플 슬롯으로
-   * 나눠 그룹 크기 해상도를 높인다. 첫 샘플 해시의 상위 4비트로 슬롯을
-   * 정하면 같은 스케치는 항상 같은 슬롯에 들어가고, 슬롯당 read 수의
-   * 기대치는 전체 깊이의 1/READ_SAMPLE_SLOTS가 된다. */
-  if (g_segtrace_read_mode) {
-    for (size_t i = 0; i < gw.num_sketches; i++) {
-      WindowCoord *wc = &gw.coords[i];
-      if (wc->sketch_size == 0)
-        continue;
-      uint32_t first = gw.all_hashes[wc->sketch_offset];
-      wc->sample_idx = first >> READ_SLOT_SHIFT;
-    }
-  }
   return gw;
 }
 
@@ -712,7 +687,7 @@ static void discover_compute_worker(void *data, long idx, int tid) {
         for (size_t b_idx = a + 1; b_idx < b_max; b_idx++) {
           uint32_t wa = b->entries[a].window_id,
                    wb = b->entries[b_idx].window_id;
-          /* 같은 서열의 겹치는 윈도우끼리는 비교하지 않음 */
+          /* 같은 read/서열의 겹치는 윈도우는 중복 후보이므로 제외한다. */
           if (windows_overlap(w_data, wa, wb))
             continue;
 
@@ -724,12 +699,10 @@ static void discover_compute_worker(void *data, long idx, int tid) {
 
           size_t min_shared = required_shared(w_data, wa, wb);
 
-          /* 전체 스케치 교집합 크기로 유사도 산정. 기준 미달이거나
-           * collinear 이웃이 없으면(고립 매치면) 탈락 */
+              /* 연속된 collinear 이웃이 있는 유사 window 쌍만 유지한다. */
           size_t shared = calculate_window_dist(
               w_data->all_hashes, &w_data->coords[wa], &w_data->coords[wb]);
-          if (shared < min_shared ||
-              !check_collinear_neighbor(w_data, wa, wb))
+              if (shared < min_shared || !check_collinear_neighbor(w_data, wa, wb))
             continue;
 
               /* score = 공유 비율을 0~255로 정규화 (반올림 포함). */
@@ -877,134 +850,51 @@ CandidateGraph discover_and_compute(const uint32_t *all_hashes,
 }
 
 // ==============================================================
-// SECTION 3b: READ-MODE EXACT GROUPING & COVERAGE-BASED COPY NUMBER
+// SECTION 3b: READ-MODE GROUPING & COVERAGE-BASED COPY NUMBER
 // ==============================================================
 
-/* 스케치(정렬된 해시 배열)의 FNV-1a 지문.
- * 스케치는 정규화된 32비트 해시의 정렬 배열이므로 같은 스케치는 항상 같은
- * 지문을 가지고, 다른 스케치가 같은 지문을 가질 확률은 ~2^-64이다.
- * 지문 비교만으로 그룹화하므로 해시 항목 배열을 추가로 만들지 않아
- * 메모리가 O(윈도우 수)에 머문다. */
-static uint64_t sketch_fingerprint(const uint32_t *h, size_t n) {
-  uint64_t fp = UINT64_C(1469598103934665603);
-  for (size_t i = 0; i < n; i++) {
-    uint32_t v = h[i];
-    for (int b = 0; b < 4; b++) {
-      fp ^= (v >> (b * 8)) & 0xff;
-      fp *= UINT64_C(1099511628211);
-    }
+/* 후보 스케치 간선을 union-find로 연결하고, 연결요소마다 대표 window와
+ * 관측 수를 하나씩 만든다. 후보가 없는 window도 깊이 1의 그룹으로 남긴다. */
+size_t group_similar_reads(const CandidateGraph *graph,
+                           const WindowCoord *coords, size_t n_windows,
+                           ReadGroupStat **out_groups) {
+  fprintf(stderr, "[segtrace] Grouping reads by similar sketches...\n");
+  UnionFind uf;
+  init_unionfind(&uf, n_windows);
+  for (int t = 0; t < graph->n_threads; t++)
+    for (size_t i = 0; i < graph->counts[t]; i++)
+      union_unionfind(&uf, graph->pairs[t][i].a, graph->pairs[t][i].b);
+
+  uint32_t *counts = calloc(n_windows, sizeof(*counts));
+  uint32_t *representatives = malloc(n_windows * sizeof(*representatives));
+  if ((n_windows && !counts) || (n_windows && !representatives)) {
+    fprintf(stderr, "[ERROR] Memory allocation failed\n");
+    exit(1);
   }
-  return fp;
-}
-
-static int compare_read_group(const void *a, const void *b) {
-  const ReadGroupStat *ga = (const ReadGroupStat *)a,
-                      *gb = (const ReadGroupStat *)b;
-  if (ga->sketch_size != gb->sketch_size)
-    return CMP(ga->sketch_size, gb->sketch_size);
-  if (ga->sample_idx != gb->sample_idx)
-    return CMP(ga->sample_idx, gb->sample_idx);
-  return CMP(ga->fingerprint, gb->fingerprint);
-}
-
-/* 슬롯을 무시하고 스케치 자체만 비교 (슬롯 합산용 2단계 정렬) */
-static int compare_read_group_noslot(const void *a, const void *b) {
-  const ReadGroupStat *ga = (const ReadGroupStat *)a,
-                      *gb = (const ReadGroupStat *)b;
-  if (ga->sketch_size != gb->sketch_size)
-    return CMP(ga->sketch_size, gb->sketch_size);
-  return CMP(ga->fingerprint, gb->fingerprint);
-}
-
-/* 스케치가 완전히 같은 read를 그룹화해 그룹 크기(관측 개수)를 구한다.
- * (sketch_size, fingerprint)로 정렬하면 동일 스케치가 연속 run을 이루고,
- * run 크기가 곧 그 세그먼트를 커버하는 read 수다. 빈 스케치는 제외한다.
- * k-mer 스페이스가 충분히 크므로 (4^k >> 윈도우 수) 서열이 다른 두 read가
- * 완전히 같은 스케치를 가질 확률은 무시할 수 있다. */
-size_t group_identical_reads(const uint32_t *all_hashes,
-                             const WindowCoord *coords, size_t n_windows,
-                             int n_threads, void *thread_pool,
-                             ReadGroupStat **out_groups) {
-  fprintf(stderr, "[segtrace] Grouping reads by identical sketches...\n");
-  (void)n_threads;
-  (void)thread_pool;
-
-  ReadGroupStat *groups = NULL;
-  size_t n_groups = 0, cap_groups = 0;
   for (size_t i = 0; i < n_windows; i++) {
     if (coords[i].sketch_size == 0)
       continue;
-    DA_PUSH(groups, n_groups, cap_groups,
-            ((ReadGroupStat){(uint32_t)i, 1,
-                             sketch_fingerprint(
-                                 all_hashes + coords[i].sketch_offset,
-                                 coords[i].sketch_size),
-                             coords[i].sketch_size, coords[i].sample_idx}));
-  }
-  if (n_groups == 0) {
-    *out_groups = groups;
-    return 0;
+    uint32_t root = find_unionfind(&uf, (uint32_t)i);
+    if (counts[root]++ == 0)
+      representatives[root] = (uint32_t)i;
   }
 
-  qsort(groups, n_groups, sizeof(ReadGroupStat), compare_read_group);
-
-  /* 1단계: 동일 (size, sample_idx, fingerprint) run을 하나의 슬롯 그룹으로
-   * 압축. 슬롯 그룹의 count가 곧 그 슬롯에서 관측된 read 수다 */
-  size_t out = 0;
-  size_t i = 0;
-  while (i < n_groups) {
-    size_t j = i + 1;
-    while (j < n_groups && groups[j].sketch_size == groups[i].sketch_size &&
-           groups[j].sample_idx == groups[i].sample_idx &&
-           groups[j].fingerprint == groups[i].fingerprint)
-      j++;
-    groups[out] = groups[i];
-    groups[out].count = (uint32_t)(j - i);
-    out++;
-    i = j;
-  }
-  n_groups = out;
-
-  /* 2단계: 슬롯 키를 제외하고 (size, fingerprint)만으로 다시 정렬해
-   * 같은 스케치의 16개 슬롯을 하나의 세그먼트로 합친다 */
-  qsort(groups, n_groups, sizeof(ReadGroupStat), compare_read_group_noslot);
-  out = 0;
-  i = 0;
-  while (i < n_groups) {
-    size_t j = i + 1;
-    uint64_t total = groups[i].count;
-    while (j < n_groups && groups[j].sketch_size == groups[i].sketch_size &&
-           groups[j].fingerprint == groups[i].fingerprint) {
-      total += groups[j].count;
-      j++;
-    }
-    groups[out] = groups[i];
-    /* 슬롯 합산이 uint32를 넘는 극단적인 심층 데이터에서는 포화시킨다 */
-    groups[out].count =
-        total > UINT32_MAX ? UINT32_MAX : (uint32_t)total;
-    out++;
-    i = j;
-  }
+  ReadGroupStat *groups = NULL;
+  size_t n_groups = 0, cap_groups = 0;
+  for (size_t i = 0; i < n_windows; i++)
+    if (counts[i] > 0)
+      DA_PUSH(groups, n_groups, cap_groups,
+              ((ReadGroupStat){representatives[i], counts[i]}));
+  free(representatives);
+  free(counts);
+  free_unionfind(&uf);
   *out_groups = groups;
-  return out;
+  return n_groups;
 }
 
-/* 그룹 크기(관측 read 수) 히스토그램의 첫 번째(최소 크기) 봉우리를 찾아
- * 배수체(haploid) 커버리지로 삼는다.
- * 수학적 근거: 각 read는 첫 샘플 해시의 상위 4비트가 가리키는 정확히
- * 하나의 슬롯에 속하므로, 슬롯들은 한 세그먼트의 read를 서로 겹치지 않게
- * 분할한다. 따라서 슬롯당 관측수는 전체 read 수의 불편 추정량이고,
- * 슬롯당 관측수 히스토그램의 최빈값이 곧 1-copy(haploid) 세그먼트의
- * 총 read 수 C1이다 (genomescope가 k-mer 빈도 히스토그램의 첫 봉우리를
- * 쓰는 것과 같은 원리). 유전체에서 가장 흔한 세그먼트가 1-copy라는
- * 가정이 성립할 때만 유효하다. 추정이 불가능하면(그룹 없음) 0을
- * 돌려준다. */
-double estimate_haploid_coverage(const ReadGroupStat *groups, size_t n_groups,
-                                 uint64_t scale, size_t window_size) {
-  /* scale과 window_size는 현재 추정기가 쓰지 않지만, 향후 스케치 크기 기반
-   * 추정으로 확장할 때 시그니처를 유지하기 위해 남겨둔다 */
-  (void)scale;
-  (void)window_size;
+/* component 크기 히스토그램의 첫 봉우리를 haploid coverage로 쓴다.
+ * 1-copy 세그먼트가 가장 흔하다는 가정이 성립하지 않으면 추정은 부정확할 수 있다. */
+double estimate_haploid_coverage(const ReadGroupStat *groups, size_t n_groups) {
   if (n_groups == 0)
     return 0.0;
 
@@ -1030,21 +920,14 @@ double estimate_haploid_coverage(const ReadGroupStat *groups, size_t n_groups,
       mode = i;
   free(hist);
 
-  /* 슬롯당 count가 곧 전체 read 수의 추정치다 (각 read가 정확히 하나의
-   * 슬롯에만 속하므로 슬롯당 count 평균은 전체 count의 불편 추정량).
-   * 별도 환산 없이 mode 자체가 haploid 세그먼트의 read 수다. */
   return (double)mode;
 }
 
-/* read 모드 출력: 각 그룹(고유 세그먼트)을 대표 read 이름으로 BED에 쓴다.
- * 그룹은 (스케치, 슬롯) 단위로 나뉘어 있으므로, 같은 스케치의 슬롯들을
- * 합쳐 전체 read 수를 복원한 뒤 복제수 = round(총 read 수 / C1)를 계산한다.
- * C1은 estimate_haploid_coverage가 준 슬롯 환산 haploid 깊이.
- * copy < min_copies인 그룹은 제외한다 (기본 -c 1이면 모두 출력). */
+/* read 모드 출력: 각 스케치 유사도 연결요소를 대표 read 이름으로 BED에 쓴다. */
 void write_read_seg_bed(const char *out_prefix, const WindowCoord *coords,
                         const GenomeSeqLen *seq_lens,
                         const ReadGroupStat *groups, size_t n_groups,
-                        uint64_t scale, size_t window_size, size_t step_size,
+                        size_t window_size, size_t step_size,
                         double haploid_coverage, uint32_t min_copies) {
   if (n_groups == 0)
     return;
@@ -1059,12 +942,8 @@ void write_read_seg_bed(const char *out_prefix, const WindowCoord *coords,
     return;
   }
 
-  (void)scale;
   fprintf(out, "#chrom\tstart\tend\twindow_count\test_depth\test_copies\n");
 
-  /* group_identical_reads가 이미 슬롯을 합산해 그룹당 총 관측 수를
-   * 넣어두었다. 각 그룹은 동일 스케치를 공유하는 윈도우들의 집합이고,
-   * 대표 윈도우의 좌표(read 이름 + 윈도우 오프셋)를 출력한다 */
   for (size_t i = 0; i < n_groups; i++) {
     const ReadGroupStat *g = &groups[i];
     double depth = (double)g->count;
