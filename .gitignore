@@ -16,3 +16,4 @@ __pycache__/
 plotting/
 sim_benchmark/
 *.tsv
+*.svg
