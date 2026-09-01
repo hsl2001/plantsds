@@ -156,11 +156,18 @@ int main(int argc, char **argv) {
   if (thread_pool)
     kt_forpool_destroy(thread_pool);
 
-  double hap_cov = read_mode
-                       ? estimate_haploid_coverage(
-                             gw.all_hashes, gw.coords, gw.num_sketches,
-                             window_size, step_size)
-                       : 0.0;
+  double *hap_cov = NULL;
+  if (read_mode) {
+    hap_cov = calloc(num_files, sizeof(*hap_cov));
+    if (!hap_cov) {
+      fprintf(stderr, "[ERROR] Memory allocation failed\n");
+      return 1;
+    }
+    for (int f = 0; f < num_files; f++)
+      hap_cov[f] = estimate_haploid_coverage(
+          gw.all_hashes, gw.coords, gw.num_sketches, gw.seq_lens,
+          (uint32_t)f, window_size, step_size);
+  }
   free(gw.all_hashes); /* 이후 단계에서는 원본 해시 배열이 필요 없음 */
   gw.all_hashes = NULL;
 
@@ -176,26 +183,15 @@ int main(int argc, char **argv) {
   free(gw.coords);
   gw.coords = NULL;
 
-  /* [5단계] 유전체당 복제 수(min_copies) 미만인 클러스터 그룹 제거 */
-  size_t n_filtered =
-      filter_regions_by_copy_count(dup_regions, n_dup_regions, min_copies);
-
-  if (read_mode) {
-    fprintf(stderr,
-            "[segtrace] Read mode: %zu loci, haploid coverage ~ %.2fx\n",
-            n_filtered, hap_cov);
-    write_read_seg_bed(out_prefix, dup_regions, n_filtered, gw.seq_lens,
-                       hap_cov, window_size < MIN_SD_LEN ? window_size
-                                                         : MIN_SD_LEN);
-    free(dup_regions);
-    free_global_windows(&gw);
-    return 0;
-  }
+    /* [5단계] 유전체당 복제 수(min_copies) 미만인 클러스터 그룹 제거 */
+    size_t n_filtered = filter_regions_by_copy_count(
+      dup_regions, n_dup_regions, min_copies, hap_cov);
 
   /* [6단계] BED 형식으로 출력 (최소 SD 길이 미만 구간은 제외) */
   write_dup_bed(out_prefix, dup_regions, n_filtered, gw.seq_lens,
                 window_size < MIN_SD_LEN ? window_size : MIN_SD_LEN);
 
+  free(hap_cov);
   free(dup_regions);
   free_global_windows(&gw);
   return 0;
@@ -854,18 +850,18 @@ CandidateGraph discover_and_compute(const uint32_t *all_hashes,
       .pairs = w.t_pairs, .counts = w.t_n_pairs, .n_threads = n_threads};
 }
 
-// ==============================================================
-// SECTION 3b: READ-MODE K-MER COVERAGE & COPY NUMBER
-// ==============================================================
-
-/* 서로 겹치는 window를 중복 계수하지 않도록 각 sequence에서 비중첩 window의
- * sampled k-mer 빈도를 모아 haploid coverage를 추정한다. */
+/* 파일별로 서로 겹치지 않는 window의 sampled k-mer 빈도를 모아 haploid
+ * coverage를 추정한다. singleton은 시퀀싱 오류가 대부분이므로 제외한다. */
 double estimate_haploid_coverage(const uint32_t *all_hashes,
                                  const WindowCoord *coords, size_t n_windows,
-                                 size_t window_size, size_t step_size) {
+                                 const GenomeSeqLen *seq_lens,
+                                 uint32_t file_id, size_t window_size,
+                                 size_t step_size) {
   size_t total_hashes = 0, last_seq = SIZE_MAX, next_start = 0;
   for (size_t i = 0; i < n_windows; i++) {
     const WindowCoord *wc = &coords[i];
+    if (seq_lens[wc->seq_id].file_id != file_id)
+      continue;
     if (wc->seq_id != last_seq) {
       last_seq = wc->seq_id;
       next_start = 0;
@@ -889,6 +885,8 @@ double estimate_haploid_coverage(const uint32_t *all_hashes,
   next_start = 0;
   for (size_t i = 0; i < n_windows; i++) {
     const WindowCoord *wc = &coords[i];
+    if (seq_lens[wc->seq_id].file_id != file_id)
+      continue;
     if (wc->seq_id != last_seq) {
       last_seq = wc->seq_id;
       next_start = 0;
@@ -923,49 +921,6 @@ double estimate_haploid_coverage(const uint32_t *all_hashes,
     }
   return (double)mode;
 }
-
-/* cluster별 locus depth를 haploid coverage와 비교해 copy number를 계산한다. */
-void write_read_seg_bed(const char *out_prefix,
-                        const SegtraceDupRegion *regions, size_t n_regions,
-                        const GenomeSeqLen *seq_lens,
-                        double haploid_coverage, size_t min_sd_len) {
-  if (n_regions == 0)
-    return;
-
-  char path_buf[PATH_MAX];
-  snprintf(path_buf, sizeof(path_buf), "%s.seg.bed", out_prefix);
-  FILE *out = fopen(path_buf, "w");
-  if (!out) {
-    fprintf(stderr, "[ERROR] Cannot open output file: %s\n", path_buf);
-    return;
-  }
-
-  fprintf(out, "#chrom\tstart\tend\twindow_count\test_depth\test_copies\n");
-
-  for (size_t i = 0; i < n_regions;) {
-    size_t j = i + 1;
-    while (j < n_regions && regions[j].cluster_id == regions[i].cluster_id)
-      j++;
-    double depth = (double)(j - i);
-    uint32_t copies = haploid_coverage > 0.0
-                          ? (uint32_t)(depth / haploid_coverage + 0.5)
-                          : 1;
-    for (size_t k = i; k < j; k++) {
-      const SegtraceDupRegion *region = &regions[k];
-      if (region->end - region->start < min_sd_len)
-        continue;
-      uint32_t seq_i = region->seq_id;
-      fprintf(out, "%s-%s\t%zu\t%zu\t%u\t%.1f\t%u\n",
-              seq_lens[seq_i].genome, seq_lens[seq_i].seq, region->start,
-              region->end, (uint32_t)(j - i), depth, copies);
-    }
-    i = j;
-  }
-  fclose(out);
-}
-
-
-
 
 /* 인코딩된 값에서 윈도우 id(하위 28비트) 추출 */
 static inline uint32_t candidate_window(uint32_t encoded) {
@@ -1133,7 +1088,8 @@ void free_candidate_graph(CandidateGraph *graph) {
  * 탈락한 클러스터로 인해 번호가 듬성듬성해지지 않도록, 살아남은 클러스터만
  * 등장 순서대로 1부터 다시 번호를 매긴다. */
 size_t filter_regions_by_copy_count(SegtraceDupRegion *regions, size_t n,
-                                    uint32_t min_copies) {
+                                    uint32_t min_copies,
+                                    const double *hap_cov) {
   if (n == 0)
     return 0;
   if (min_copies < 1)
@@ -1153,7 +1109,11 @@ size_t filter_regions_by_copy_count(SegtraceDupRegion *regions, size_t n,
       size_t j = i + 1;
       while (j < cj && regions[j].file_id == regions[i].file_id)
         j++;
-      if (j - i >= min_copies) {
+      uint32_t copies =
+          hap_cov && hap_cov[regions[i].file_id] > 0.0
+              ? (uint32_t)((j - i) / hap_cov[regions[i].file_id] + 0.5)
+              : (uint32_t)(j - i);
+        if (copies >= min_copies) {
         for (size_t k = i; k < j; k++) {
           regions[out_count++] = regions[k];
         }

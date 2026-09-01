@@ -195,14 +195,11 @@ CandidateGraph discover_and_compute(const uint32_t *all_hashes,
                                     uint32_t kmer_size,
                                     void *thread_pool);
 void free_candidate_graph(CandidateGraph *graph);
-
 double estimate_haploid_coverage(const uint32_t *all_hashes,
                                  const WindowCoord *coords, size_t n_windows,
-                                 size_t window_size, size_t step_size);
-void write_read_seg_bed(const char *out_prefix,
-                        const SegtraceDupRegion *regions, size_t n_regions,
-                        const GenomeSeqLen *seq_lens,
-                        double haploid_coverage, size_t min_sd_len);
+                                 const GenomeSeqLen *seq_lens,
+                                 uint32_t file_id, size_t window_size,
+                                 size_t step_size);
 
 // 5. REGION CLUSTERING, COPY FILTERING & OUTPUT
 void build_duplicate_loci(const CandidateGraph *graph, size_t num_windows,
@@ -214,7 +211,8 @@ void cluster_duplicate_loci(const CandidateGraph *graph,
                             const WindowCoord *coords,
                             SegtraceDupRegion *regions, size_t n_regions);
 size_t filter_regions_by_copy_count(SegtraceDupRegion *regions, size_t n,
-                                    uint32_t min_copies);
+                                    uint32_t min_copies,
+                                    const double *hap_cov);
 void write_dup_bed(const char *out_prefix, const SegtraceDupRegion *dup_regions,
                    size_t n_merged, const GenomeSeqLen *seq_lens,
                    size_t min_sd_len);

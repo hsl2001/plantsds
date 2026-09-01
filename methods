@@ -102,8 +102,8 @@ Pipeline
 1. Every eligible window receives the same canonical ntHash sketch used in genome mode.
 2. Shared sketch hashes discover candidate pairs in bounded hash partitions. A pair is retained when its full sketch intersection meets the existing $MIN_IDENTITY^k$ threshold and has a collinear neighboring match. Overlapping windows on the same read are excluded as duplicates.
 3. Candidate windows are merged into loci and clustered with the same best-partner Union-Find procedure as genome mode.
-4. Only copy-number calculation differs: the sampled k-mer frequency peak estimates haploid coverage C1, and each cluster's locus depth N is converted to round(N / C1).
+4. Candidate windows are merged into loci. For each input file, the modal non-singleton sampled k-mer multiplicity estimates haploid coverage C1, and the file's locus count N is converted to round(N / C1) before applying -c.
 
 Output files
 
-Both modes write <prefix>.seg.bed. Genome mode writes merged loci with a cluster_id column. Read mode writes the same filtered loci with representative cluster depth and the columns window_count, est_depth, and est_copies. The -c filter has the same per-input-file locus-count meaning in both modes; only read mode's reported copy number uses haploid k-mer coverage.
+Both modes write the same merged-locus BED: #chrom, start, end, and cluster_id. Genome mode applies -c to each per-input-file locus count; read mode applies it to each count divided by that input file's estimated haploid coverage.
