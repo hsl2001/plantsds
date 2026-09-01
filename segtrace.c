@@ -163,10 +163,13 @@ int main(int argc, char **argv) {
       fprintf(stderr, "[ERROR] Memory allocation failed\n");
       return 1;
     }
-    for (int f = 0; f < num_files; f++)
+    for (int f = 0; f < num_files; f++) {
       hap_cov[f] = estimate_haploid_coverage(
           gw.all_hashes, gw.coords, gw.num_sketches, gw.seq_lens,
           (uint32_t)f, window_size, step_size);
+      fprintf(stderr, "[segtrace] %s: haploid coverage ~ %.2fx\n", files[f],
+              hap_cov[f]);
+    }
   }
   free(gw.all_hashes); /* 이후 단계에서는 원본 해시 배열이 필요 없음 */
   gw.all_hashes = NULL;
