@@ -3,7 +3,7 @@ set -euo pipefail
 
 WORKDIR="${WORKDIR:-$(pwd)}"
 LOGDIR="${LOGDIR:-$HOME/log}"
-JOB_NAME="${JOB_NAME:-segtrace-angio-family}"
+JOB_NAME="${JOB_NAME:-segtrace-angio-genus}"
 THREADS="${THREADS:-128}"
 MEM="${MEM:-480gb}"
 WALLTIME="${WALLTIME:-96:00:00}"
@@ -12,13 +12,13 @@ mkdir -p "$LOGDIR"
 cd "$WORKDIR"
 mkdir -p selected results selected/clean_fasta
 
-python3 ./select_angiosperm_family.py \
+python3 ./select_angiosperm_genus.py \
   --dataset-dir ./eukaryotic_data/ncbi_dataset/data \
   --report ./eukaryotic_data/ncbi_dataset/data/assembly_data_report.jsonl \
   --taxonomy-cache ./selected/taxonomy_rank_lineage.tsv \
   --clean-dir ./selected/clean_fasta \
-  --out ./selected/angiosperm_family.files \
-  --summary ./selected/angiosperm_family_complete.tsv
+  --out ./selected/angiosperm_genus.files \
+  --summary ./selected/angiosperm_genus_complete.tsv
 
 qsub -N "$JOB_NAME" \
   -l nodes=node02:ppn=${THREADS} \
@@ -33,12 +33,12 @@ set -euo pipefail
 cd "$WORKDIR"
 mkdir -p results
 
-mapfile -t FASTAS < ./selected/angiosperm_family.files
+mapfile -t FASTAS < ./selected/angiosperm_genus.files
 printf '[segtrace] input FASTA count: %d\n' "${#FASTAS[@]}"
 
 ./time -v ./segtrace \
   -p "$THREADS" \
   -c 1 \
-  -o ./results/ANGIOSPERM_FAMILY \
+  -o ./results/ANGIOSPERM_GENUS \
   "${FASTAS[@]}"
 PBS

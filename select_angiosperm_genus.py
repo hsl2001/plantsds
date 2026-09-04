@@ -12,7 +12,12 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 
 ANGIOSPERM_TAXID = 3398
-VALID_CHR_LEVELS = {"complete genome", "chromosome"}
+LEVEL_SCORE = {
+    "complete genome": 3,
+    "chromosome": 2,
+    "scaffold": 1,
+    "contig": 0,
+}
 
 FORCED_MAJOR_PLANTS = {
     "Am": ("GCF_000471905.2", "Amborella trichopoda"),
@@ -87,8 +92,7 @@ def filter_organelle_from_fasta(in_path: Path, out_path: Path) -> tuple[int, int
 
 
 def completeness_key(record):
-    level = record.get("level", "").lower()
-    level_score = 2 if level == "complete genome" else (1 if level == "chromosome" else 0)
+    level_score = LEVEL_SCORE.get(record.get("level", "").lower(), -1)
     is_ref = 1 if record.get("category", "").lower() in ("reference genome", "representative genome") else 0
     busco = record.get("busco_complete", 0.0)
     scaffold_n50 = record.get("scaffold_n50", 0)
@@ -198,33 +202,35 @@ def read_taxonomy(cache_path):
     return ranks_by_tax, lineage_by_tax
 
 
-def assembly_path(dataset_dir, accession):
-    matches = sorted(glob.glob(str(dataset_dir / accession / "*_genomic.fna*")))
-    return matches[0] if matches else ""
+def build_assembly_index(dataset_dir):
+    """Scan the dataset directory once and map each accession to its FASTA path."""
+    index = {}
+    for path in sorted(glob.glob(str(dataset_dir / "*" / "*_genomic.fna*"))):
+        index.setdefault(Path(path).parent.name, path)
+    return index
 
 
 def available_forced_record(preferred_accession, organism_name, records,
-                            records_by_accession, dataset_dir):
+                            records_by_accession, assembly_index):
     preferred = records_by_accession.get(preferred_accession)
-    if preferred and assembly_path(dataset_dir, preferred_accession):
+    if preferred and assembly_index.get(preferred_accession):
         return preferred
 
+    name_lower = organism_name.lower()
     candidates = [
         record for record in records
-        if record["name"].lower().startswith(organism_name.lower()) and
-        assembly_path(dataset_dir, record["accession"])
+        if record["name"].lower().startswith(name_lower) and
+        assembly_index.get(record["accession"])
     ]
     if not candidates:
-        genus = organism_name.split()[0].lower()
+        genus_prefix = organism_name.split()[0].lower() + " "
         candidates = [
             record for record in records
-            if record["name"].lower().startswith(genus + " ") and
-            assembly_path(dataset_dir, record["accession"])
+            if record["name"].lower().startswith(genus_prefix) and
+            assembly_index.get(record["accession"])
         ]
     if candidates:
-        chr_candidates = [c for c in candidates if c.get("level", "").lower() in VALID_CHR_LEVELS]
-        pool = chr_candidates if chr_candidates else candidates
-        fallback = max(pool, key=completeness_key)
+        fallback = max(candidates, key=completeness_key)
         print(f"[select] {preferred_accession} unavailable; using "
               f"{fallback['accession']} for {organism_name}", file=sys.stderr)
         return fallback
@@ -233,13 +239,13 @@ def available_forced_record(preferred_accession, organism_name, records,
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Select the most complete chromosome-level assembly per angiosperm family and discard organelle genomes."
+        description="Select the most complete assembly per angiosperm genus and discard organelle genomes."
     )
     parser.add_argument("--dataset-dir", default="ncbi_dataset/data")
     parser.add_argument("--report", default=None)
     parser.add_argument("--taxonomy-cache", default="selected/taxonomy_rank_lineage.tsv")
-    parser.add_argument("--out", default="selected/angiosperm_family.files")
-    parser.add_argument("--summary", default="selected/angiosperm_family_complete.tsv")
+    parser.add_argument("--out", default="selected/angiosperm_genus.files")
+    parser.add_argument("--summary", default="selected/angiosperm_genus_complete.tsv")
     parser.add_argument("--clean-dir", default="selected/clean_fasta",
                         help="Directory to save organelle-filtered FASTA files.")
     parser.add_argument("--no-discard-organelle", action="store_true",
@@ -248,8 +254,6 @@ def main():
                         help="Extra assembly accession to force include. May be repeated.")
     parser.add_argument("--allow-missing", action="store_true",
                         help="Do not fail when selected NCBI FASTA files are absent.")
-    parser.add_argument("--allow-lower-levels", action="store_true",
-                        help="Allow scaffold/contig level assemblies if no chromosome level is available.")
     args = parser.parse_args()
 
     dataset_dir = Path(args.dataset_dir)
@@ -262,36 +266,36 @@ def main():
 
     records, taxids = read_records(report_path)
     records_by_accession = {record["accession"]: record for record in records}
+    assembly_index = build_assembly_index(dataset_dir)
     if not taxonomy_cache.exists():
         fetch_taxonomy(taxids, taxonomy_cache)
     ranks_by_tax, lineage_by_tax = read_taxonomy(taxonomy_cache)
 
+    # 각 genus당 가장 complete한 수준(complete>chromosome>scaffold>contig)의 유전체 하나씩 선택
     best = {}
+    best_keys = {}
     for record in records:
         lineage = lineage_by_tax.get(record["tax_id"], set())
         if ANGIOSPERM_TAXID not in lineage:
             continue
-        family = ranks_by_tax.get(record["tax_id"], {}).get("family")
-        if not family:
+        genus = ranks_by_tax.get(record["tax_id"], {}).get("genus")
+        if not genus:
             continue
-        
-        # Chr level 이상 (Chromosome, Complete Genome) 만 사용
-        if not args.allow_lower_levels and record.get("level", "").lower() not in VALID_CHR_LEVELS:
-            continue
-
-        if family not in best or completeness_key(record) > completeness_key(best[family]):
-            best[family] = record
+        key = completeness_key(record)
+        if genus not in best_keys or key > best_keys[genus]:
+            best[genus] = record
+            best_keys[genus] = key
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     summary_path.parent.mkdir(parents=True, exist_ok=True)
     if discard_organelles:
         clean_dir.mkdir(parents=True, exist_ok=True)
 
-    selected = {record["accession"]: ("family_complete", family, record)
-                for family, record in best.items()}
+    selected = {record["accession"]: ("genus_complete", genus, record)
+                for genus, record in best.items()}
     for label, (accession, organism_name) in FORCED_MAJOR_PLANTS.items():
         record = available_forced_record(accession, organism_name, records,
-                                         records_by_accession, dataset_dir)
+                                         records_by_accession, assembly_index)
         if record is None:
             raise SystemExit(f"forced accession for {label} is absent from report: {accession}")
         selected[record["accession"]] = (f"forced_{label}", None, record)
@@ -307,11 +311,11 @@ def main():
 
     with open(summary_path, "w") as summary:
         summary.write(
-            "reason\tfamily_tax_id\tfamily\taccession\tsize_bp\tassembly_level\t"
+            "reason\tgenus_tax_id\tgenus\taccession\tsize_bp\tassembly_level\t"
             "scaffold_n50\tcontig_n50\tbusco_complete\torganism\traw_fasta\tused_fasta\tdiscarded_organelle_count\n"
         )
-        for accession, (reason, family, record) in sorted(selected.items(), key=lambda item: item[1][2]["name"]):
-            raw_fasta = assembly_path(dataset_dir, record["accession"])
+        for accession, (reason, genus, record) in sorted(selected.items(), key=lambda item: item[1][2]["name"]):
+            raw_fasta = assembly_index.get(record["accession"], "")
             used_fasta = ""
             discarded_count = 0
             if raw_fasta:
@@ -333,10 +337,10 @@ def main():
             else:
                 missing.append(record["accession"])
 
-            family_tax_id = family[0] if family else ""
-            family_name = family[1] if family else ""
+            genus_tax_id = genus[0] if genus else ""
+            genus_name = genus[1] if genus else ""
             summary.write(
-                f"{reason}\t{family_tax_id}\t{family_name}\t{record['accession']}\t{record['size']}\t"
+                f"{reason}\t{genus_tax_id}\t{genus_name}\t{record['accession']}\t{record['size']}\t"
                 f"{record['level']}\t{record.get('scaffold_n50', 0)}\t{record.get('contig_n50', 0)}\t"
                 f"{record.get('busco_complete', 0.0)}\t{record['name']}\t{raw_fasta}\t{used_fasta}\t{discarded_count}\n"
             )
@@ -347,7 +351,7 @@ def main():
 
     total_bp = sum(record["size"] for record in best.values())
     selected_bp = sum(record["size"] for _, _, record in selected.values())
-    print(f"selected_families={len(best)}")
+    print(f"selected_genera={len(best)}")
     print(f"selected_angiosperm_bp={total_bp}")
     print(f"selected_angiosperm_Gbp={total_bp / 1e9:.3f}")
     print(f"forced_major_plants={len(FORCED_MAJOR_PLANTS)}")
