@@ -17,3 +17,4 @@ plotting/
 sim_benchmark/
 *.tsv
 *.svg
+segtrace_validation/
