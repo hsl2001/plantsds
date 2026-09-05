@@ -15,6 +15,7 @@ PREFIX="${PREFIX:-$OUTDIR/segtrace}"
 THREADS="${THREADS:-8}"
 MIN_OVERLAP="${MIN_OVERLAP:-0.5}"   # member covered fraction to count as a match
 MIN_IDENT="${MIN_IDENT:-80}"        # BLAST percent-identity cutoff (segtrace ~0.8)
+MIN_HIT_BP="${MIN_HIT_BP:-100}"     # minimum BLAST-hit bp overlapping a member to confirm it
 SEGTRACE_EXTRA="${SEGTRACE_EXTRA:--c 1}"
 N_CLUSTERS="${N_CLUSTERS:-1000}"    # analyze only the N clusters with the shortest longest-member
 
@@ -152,7 +153,7 @@ blastn -task megablast -query "$QUERY" -db "$DB" -num_threads "$THREADS" \
 
 # ------------------------------------------------ 5. match ratio + CSV + graph
 echo "[5/5] Scoring cluster recovery and plotting..."
-python3 - "$MEMBERS" "$BLAST" "$CSV" "$PLOT" "$MIN_OVERLAP" "$MIN_IDENT" <<'PY'
+python3 - "$MEMBERS" "$BLAST" "$CSV" "$PLOT" "$MIN_OVERLAP" "$MIN_IDENT" "$MIN_HIT_BP" <<'PY'
 import csv
 import sys
 from collections import defaultdict
@@ -162,9 +163,10 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
-members_path, blast_path, csv_path, plot_path, min_overlap_s, min_ident_s = sys.argv[1:7]
+members_path, blast_path, csv_path, plot_path, min_overlap_s, min_ident_s, min_hit_bp_s = sys.argv[1:8]
 min_overlap = float(min_overlap_s)
 min_ident = float(min_ident_s)
+min_hit_bp = int(min_hit_bp_s)
 
 members = defaultdict(list)  # cid -> [(chrom, start, end, is_query)]
 with open(members_path) as mh:
@@ -183,13 +185,18 @@ with open(blast_path) as bh:
         hits[(int(f[0][1:]), f[1])].append((min(sstart, send) - 1, max(sstart, send)))
 
 
-def covered(chrom, start, end, intervals):
+def covered(start, end, intervals):
+    # SegTrace regions are window-quantized, so a genuine BLAST core is often much
+    # shorter than the member window. Confirm a member when a hit overlaps it by
+    # >= min_overlap of the SHORTER of (member, hit) and by >= min_hit_bp bases,
+    # rather than demanding the hit cover half of the inflated member window.
     mlen = end - start
     if mlen <= 0:
         return False
     for a, b in intervals:
         overlap = min(end, b) - max(start, a)
-        if overlap > 0 and overlap / mlen >= min_overlap:
+        shorter = min(mlen, b - a)
+        if overlap >= min_hit_bp and shorter > 0 and overlap / shorter >= min_overlap:
             return True
     return False
 
@@ -197,7 +204,7 @@ def covered(chrom, start, end, intervals):
 rows = []
 for cid in sorted(members):
     mem = members[cid]
-    matched = sum(covered(c, s, e, hits.get((cid, c), [])) for c, s, e, _ in mem)
+    matched = sum(covered(s, e, hits.get((cid, c), [])) for c, s, e, _ in mem)
     qchrom = next((c for c, _, _, q in mem if q), mem[0][0])
     rows.append((cid, len(mem), matched, matched / len(mem), qchrom))
 
