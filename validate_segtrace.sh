@@ -16,6 +16,7 @@ THREADS="${THREADS:-8}"
 MIN_OVERLAP="${MIN_OVERLAP:-0.5}"   # member covered fraction to count as a match
 MIN_IDENT="${MIN_IDENT:-80}"        # BLAST percent-identity cutoff (segtrace ~0.8)
 SEGTRACE_EXTRA="${SEGTRACE_EXTRA:--c 1}"
+N_CLUSTERS="${N_CLUSTERS:-1000}"    # analyze only the N clusters with the shortest longest-member
 
 BED="$PREFIX.seg.bed"
 COMBINED="$OUTDIR/combined.fa"
@@ -37,12 +38,13 @@ echo "       clusters: $(awk 'NR>1{print $4}' "$BED" | sort -u | wc -l | tr -d '
 
 # ---------------------------------- 2. combined FASTA (genome-seq ids) + queries
 echo "[2/5] Building combined FASTA and per-cluster representative queries..."
-python3 - "$COMBINED" "$QUERY" "$MEMBERS" "$BED" "${FASTAS[@]}" <<'PY'
+python3 - "$COMBINED" "$QUERY" "$MEMBERS" "$BED" "$N_CLUSTERS" "${FASTAS[@]}" <<'PY'
 import os
 import sys
 
-combined_path, query_path, members_path, bed_path = sys.argv[1:5]
-fastas = sys.argv[5:]
+combined_path, query_path, members_path, bed_path, top_n_s = sys.argv[1:6]
+fastas = sys.argv[6:]
+top_n = int(top_n_s)
 W = 60  # FASTA line width; fixed so we can seek into records by base offset
 
 
@@ -110,12 +112,20 @@ with open(bed_path) as bh:
         f = line.split("\t")
         clusters.setdefault(int(f[3]), []).append((f[0], int(f[1]), int(f[2])))
 
+# Longest member per cluster, then keep the N clusters whose longest member is
+# the shortest (smallest maximum-member length).
+rep = {}  # cid -> (index of longest member, its length)
+for cid, members in clusters.items():
+    qi = max(range(len(members)), key=lambda i: members[i][2] - members[i][1])
+    rep[cid] = (qi, members[qi][2] - members[qi][1])
+selected = sorted(clusters, key=lambda cid: (rep[cid][1], cid))[:top_n]
+
 with open(combined_path, "rb") as cf, open(query_path, "wb") as qf, \
         open(members_path, "w") as mf:
     mf.write("cluster_id\tchrom\tstart\tend\tis_query\n")
-    for cid in sorted(clusters):
+    for cid in sorted(selected):
         members = clusters[cid]
-        qi = max(range(len(members)), key=lambda i: members[i][2] - members[i][1])
+        qi = rep[cid][0]
         qchrom, qs, qe = members[qi]
         off, length = index[qchrom]
         seq = extract(cf, off, length, qs, qe)
@@ -127,7 +137,7 @@ with open(combined_path, "rb") as cf, open(query_path, "wb") as qf, \
         for i, (c, s, e) in enumerate(members):
             mf.write(f"{cid}\t{c}\t{s}\t{e}\t{1 if i == qi else 0}\n")
 
-print(f"       representatives: {len(clusters)}")
+print(f"       clusters total: {len(clusters)}, analyzing shortest {len(selected)}")
 PY
 
 # --------------------------------------------------------- 3. BLAST DB + search
