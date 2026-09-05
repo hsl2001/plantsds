@@ -14,7 +14,7 @@ OUTDIR="${OUTDIR:-segtrace_validation}"
 PREFIX="${PREFIX:-$OUTDIR/segtrace}"
 THREADS="${THREADS:-8}"
 MIN_OVERLAP="${MIN_OVERLAP:-0.5}"   # member covered fraction to count as a match
-MIN_IDENT="${MIN_IDENT:-80}"        # BLAST percent-identity cutoff (segtrace ~0.8)
+MIN_IDENT="${MIN_IDENT:-80}"        # BLAST identity floor; SegTrace detects diverged (<80%) dups, so keep this low
 MIN_HIT_BP="${MIN_HIT_BP:-100}"     # minimum BLAST-hit bp overlapping a member to confirm it
 SEGTRACE_EXTRA="${SEGTRACE_EXTRA:--c 1}"
 N_CLUSTERS="${N_CLUSTERS:-1000}"    # analyze only the N clusters with the shortest longest-member
@@ -146,7 +146,9 @@ echo "[3/5] Building BLAST database..."
 makeblastdb -dbtype nucl -in "$COMBINED" -out "$DB" >/dev/null
 
 echo "[4/5] BLASTing cluster representatives against the genomes..."
-blastn -task megablast -query "$QUERY" -db "$DB" -num_threads "$THREADS" \
+# dc-megablast (discontiguous seeds) finds diverged homology that plain megablast
+# (word size 28) misses entirely for <~90% identity duplications.
+blastn -task dc-megablast -query "$QUERY" -db "$DB" -num_threads "$THREADS" \
   -perc_identity "$MIN_IDENT" -evalue 1e-5 -max_target_seqs 100000 \
   -outfmt '6 qseqid sseqid pident length qstart qend sstart send evalue bitscore' \
   -out "$BLAST"
