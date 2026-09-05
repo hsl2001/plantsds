@@ -19,7 +19,7 @@ static void print_usage(void) {
          "Usage: segtrace [options] fasta1 [fasta2 ...]\n\n"
          "Options:\n"
          "  -k: kmer size (default: 19)\n"
-         "  -s: scale factor (default: 16)\n"
+         "  -s: scale factor (default: 4)\n"
          "  -w: window size in bp (default: 1024)\n"
          "  -t: step size in bp (default: 0 [auto: 33%% of window size])\n"
          "  -b: minimum valid bases per window (default: 0 [auto: 25%% of "
@@ -63,7 +63,7 @@ int main(int argc, char **argv) {
    *   (0이면 윈도우 크기에서 자동 유도)
    * min_copies = 파일(유전체)당 보고할 최소 복제 수 */
   uint32_t kmer_size = 19;
-  uint64_t scale = 16;
+  uint64_t scale = 4;
   size_t window_size = 1024, step_size = 0, min_bases = 0;
   uint32_t min_copies = 1;
   const char *out_prefix = "segtrace";
