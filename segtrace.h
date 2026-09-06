@@ -53,7 +53,7 @@ extern "C" {
 #define MAX_COLLINEAR_LOOKAHEAD 8
 #define MAX_SKETCH_SIZE 2048
 #define MIN_SD_LEN 1000
-#define MIN_IDENTITY 0.6
+#define MIN_IDENTITY 0.8
 
 #define CANDIDATE_WINDOW_MASK UINT32_MAX
 
@@ -211,7 +211,6 @@ void build_duplicate_loci(const CandidateGraph *graph, size_t num_windows,
 void cluster_duplicate_loci(const CandidateGraph *graph,
                             const WindowCoord *coords,
                             SegtraceDupRegion *regions, size_t n_regions);
-size_t merge_collinear_cluster_regions(SegtraceDupRegion *regions, size_t n);
 size_t filter_regions_by_copy_count(SegtraceDupRegion *regions, size_t n,
                                     uint32_t min_copies,
                                     const double *hap_cov);

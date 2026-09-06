@@ -19,7 +19,7 @@ static void print_usage(void) {
          "Usage: segtrace [options] fasta1 [fasta2 ...]\n\n"
          "Options:\n"
          "  -k: kmer size (default: 19)\n"
-         "  -s: scale factor (default: 4)\n"
+         "  -s: scale factor (default: 16)\n"
          "  -w: window size in bp (default: 1024)\n"
          "  -t: step size in bp (default: 0 [auto: 33%% of window size])\n"
          "  -b: minimum valid bases per window (default: 0 [auto: 25%% of "
@@ -63,7 +63,7 @@ int main(int argc, char **argv) {
    *   (0이면 윈도우 크기에서 자동 유도)
    * min_copies = 파일(유전체)당 보고할 최소 복제 수 */
   uint32_t kmer_size = 19;
-  uint64_t scale = 4;
+  uint64_t scale = 16;
   size_t window_size = 1024, step_size = 0, min_bases = 0;
   uint32_t min_copies = 1;
   const char *out_prefix = "segtrace";
@@ -186,14 +186,11 @@ int main(int argc, char **argv) {
   free(gw.coords);
   gw.coords = NULL;
 
-  /* [5단계] 내부 dropout으로 쪼개진 같은 복제본 조각들을 다시 잇는다 */
-  n_dup_regions = merge_collinear_cluster_regions(dup_regions, n_dup_regions);
-
-    /* [6단계] 유전체당 복제 수(min_copies) 미만인 클러스터 그룹 제거 */
+    /* [5단계] 유전체당 복제 수(min_copies) 미만인 클러스터 그룹 제거 */
     size_t n_filtered = filter_regions_by_copy_count(
       dup_regions, n_dup_regions, min_copies, hap_cov);
 
-  /* [7단계] BED 형식으로 출력 (최소 SD 길이 미만 구간은 제외) */
+  /* [6단계] BED 형식으로 출력 (최소 SD 길이 미만 구간은 제외) */
   write_dup_bed(out_prefix, dup_regions, n_filtered, gw.seq_lens,
                 window_size < MIN_SD_LEN ? window_size : MIN_SD_LEN);
 
@@ -1092,33 +1089,6 @@ void free_candidate_graph(CandidateGraph *graph) {
     free(graph->pairs[t]);
   free(graph->pairs);
   free(graph->counts);
-}
-
-/* 한 복제본이 내부 dropout(국소 발산/indel로 스케치 매치가 끊긴 구간) 때문에
- * 여러 조각으로 쪼개지는 것을 되돌린다. regions가 (cluster, file, seq, start)
- * 순으로 정렬돼 있으므로, 같은 클러스터·같은 서열의 인접 조각을 선형으로 훑어
- * 사이 간격이 더 긴 조각 길이 이하이면 한 복제본으로 보고 잇는다.
- * (서로 다른 복제본은 보통 조각 길이보다 훨씬 멀리 떨어져 있어 병합되지 않는다) */
-size_t merge_collinear_cluster_regions(SegtraceDupRegion *regions, size_t n) {
-  if (n == 0)
-    return 0;
-  size_t out = 0;
-  for (size_t i = 1; i < n; i++) {
-    SegtraceDupRegion *prev = &regions[out];
-    SegtraceDupRegion *cur = &regions[i];
-    size_t len_prev = prev->end - prev->start;
-    size_t len_cur = cur->end - cur->start;
-    size_t max_len = len_prev > len_cur ? len_prev : len_cur;
-    size_t gap = cur->start > prev->end ? cur->start - prev->end : 0;
-    if (cur->cluster_id == prev->cluster_id &&
-        cur->seq_id == prev->seq_id && gap <= max_len) {
-      if (cur->end > prev->end)
-        prev->end = cur->end;
-    } else {
-      regions[++out] = *cur;
-    }
-  }
-  return out + 1;
 }
 
 /* 클러스터에 한 개 이상의 파일에서 복제 수가 min_copies 이상인 구간이
