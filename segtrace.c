@@ -186,11 +186,14 @@ int main(int argc, char **argv) {
   free(gw.coords);
   gw.coords = NULL;
 
-    /* [5단계] 유전체당 복제 수(min_copies) 미만인 클러스터 그룹 제거 */
+  /* [5단계] 내부 dropout으로 쪼개진 같은 복제본 조각들을 다시 잇는다 */
+  n_dup_regions = merge_collinear_cluster_regions(dup_regions, n_dup_regions);
+
+    /* [6단계] 유전체당 복제 수(min_copies) 미만인 클러스터 그룹 제거 */
     size_t n_filtered = filter_regions_by_copy_count(
       dup_regions, n_dup_regions, min_copies, hap_cov);
 
-  /* [6단계] BED 형식으로 출력 (최소 SD 길이 미만 구간은 제외) */
+  /* [7단계] BED 형식으로 출력 (최소 SD 길이 미만 구간은 제외) */
   write_dup_bed(out_prefix, dup_regions, n_filtered, gw.seq_lens,
                 window_size < MIN_SD_LEN ? window_size : MIN_SD_LEN);
 
@@ -564,10 +567,17 @@ static inline int check_collinear_neighbor(const DiscoverComputeData *w,
   const int dir_a[] = {1, -1, 1, -1};
   const int dir_b[] = {1, -1, -1, 1};
 
+  /* 한 k-mer 앵커는 겹치는 윈도우 여러 개(간격 < k)에 같이 나타나므로, 앵커를
+   * 공유할 수 없는 비중복 윈도우(오프셋 >= min_step)에서만 collinear 근거를 인정해
+   * 단일 앵커가 여러 윈도우에 걸쳐 만드는 우연한 collinear 매치를 배제한다 */
+  int min_step = (int)((w->window_size - w->kmer_size) / w->step_size) + 1;
+  if (min_step < 1)
+    min_step = 1;
+
   // Pass 1: 정확한 대각선 (indel 없이 양쪽이 같은 step으로 진행하는 경우)
   for (int d = 0; d < 4; d++) {
     int da = dir_a[d], db = dir_b[d];
-    for (int step = 1; step <= MAX_COLLINEAR_LOOKAHEAD; step++) {
+    for (int step = min_step; step <= MAX_COLLINEAR_LOOKAHEAD; step++) {
       long long next_a = (long long)wa + da * step;
       long long next_b = (long long)wb + db * step;
       if (matching_window_pair(w, next_a, next_b, seq_a, seq_b))
@@ -578,8 +588,8 @@ static inline int check_collinear_neighbor(const DiscoverComputeData *w,
   // Pass 2: indel이 낀 대각선 (양쪽의 진행 step이 다른 경우까지 허용)
   for (int d = 0; d < 4; d++) {
     int da = dir_a[d], db = dir_b[d];
-    for (int step_a = 1; step_a <= MAX_COLLINEAR_LOOKAHEAD; step_a++) {
-      for (int step_b = 1; step_b <= MAX_COLLINEAR_LOOKAHEAD; step_b++) {
+    for (int step_a = min_step; step_a <= MAX_COLLINEAR_LOOKAHEAD; step_a++) {
+      for (int step_b = min_step; step_b <= MAX_COLLINEAR_LOOKAHEAD; step_b++) {
         if (step_a == step_b)
           continue;
         long long next_a = (long long)wa + da * step_a;
@@ -745,6 +755,7 @@ CandidateGraph discover_and_compute(const uint32_t *all_hashes,
       .n_windows = n_windows,
       .window_size = window_size,
       .step_size = step_size,
+      .kmer_size = kmer_size,
       /* p_kmer = identity^k: k-mer 하나가 두 서열 간에 보존될 확률.
        * 공유 스케치 수의 기대치는 대략 (스케치 크기) x p_kmer */
       .p_kmer = pow(MIN_IDENTITY, (double)kmer_size),
@@ -1081,6 +1092,33 @@ void free_candidate_graph(CandidateGraph *graph) {
     free(graph->pairs[t]);
   free(graph->pairs);
   free(graph->counts);
+}
+
+/* 한 복제본이 내부 dropout(국소 발산/indel로 스케치 매치가 끊긴 구간) 때문에
+ * 여러 조각으로 쪼개지는 것을 되돌린다. regions가 (cluster, file, seq, start)
+ * 순으로 정렬돼 있으므로, 같은 클러스터·같은 서열의 인접 조각을 선형으로 훑어
+ * 사이 간격이 더 긴 조각 길이 이하이면 한 복제본으로 보고 잇는다.
+ * (서로 다른 복제본은 보통 조각 길이보다 훨씬 멀리 떨어져 있어 병합되지 않는다) */
+size_t merge_collinear_cluster_regions(SegtraceDupRegion *regions, size_t n) {
+  if (n == 0)
+    return 0;
+  size_t out = 0;
+  for (size_t i = 1; i < n; i++) {
+    SegtraceDupRegion *prev = &regions[out];
+    SegtraceDupRegion *cur = &regions[i];
+    size_t len_prev = prev->end - prev->start;
+    size_t len_cur = cur->end - cur->start;
+    size_t max_len = len_prev > len_cur ? len_prev : len_cur;
+    size_t gap = cur->start > prev->end ? cur->start - prev->end : 0;
+    if (cur->cluster_id == prev->cluster_id &&
+        cur->seq_id == prev->seq_id && gap <= max_len) {
+      if (cur->end > prev->end)
+        prev->end = cur->end;
+    } else {
+      regions[++out] = *cur;
+    }
+  }
+  return out + 1;
 }
 
 /* 클러스터에 한 개 이상의 파일에서 복제 수가 min_copies 이상인 구간이

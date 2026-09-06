@@ -149,6 +149,7 @@ typedef struct {
   size_t n_windows;
   size_t window_size;
   size_t step_size;
+  uint32_t kmer_size;
   double p_kmer;
   PartitionBucket *buckets;
   uint64_t *bloom;
@@ -210,6 +211,7 @@ void build_duplicate_loci(const CandidateGraph *graph, size_t num_windows,
 void cluster_duplicate_loci(const CandidateGraph *graph,
                             const WindowCoord *coords,
                             SegtraceDupRegion *regions, size_t n_regions);
+size_t merge_collinear_cluster_regions(SegtraceDupRegion *regions, size_t n);
 size_t filter_regions_by_copy_count(SegtraceDupRegion *regions, size_t n,
                                     uint32_t min_copies,
                                     const double *hap_cov);
