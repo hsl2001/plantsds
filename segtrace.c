@@ -533,7 +533,7 @@ static inline size_t required_shared(const DiscoverComputeData *w, uint32_t wa,
                                      uint32_t wb) {
   size_t max_size = max_sketch_size(w, wa, wb);
   size_t min_shared = (size_t)ceil((double)max_size * w->p_kmer);
-  return min_shared < 3 ? 3 : min_shared;
+  return min_shared < 2 ? 2 : min_shared;
 }
 
 /* collinear 탐색용 헬퍼: (wa, wb)가 배열 범위 안이고, 기대하는 서열 쌍
