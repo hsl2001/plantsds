@@ -19,9 +19,7 @@ from __future__ import annotations
 
 import argparse
 import csv
-import platform
 import random
-import re
 import shutil
 import subprocess
 import sys
@@ -463,6 +461,17 @@ def resolve_executable(name: str) -> Path | None:
     return Path(found) if found else None
 
 
+def process_peak_rss_kb(pid: int) -> int:
+    status_path = Path(f"/proc/{pid}/status")
+    try:
+        for line in status_path.read_text().splitlines():
+            if line.startswith("VmHWM:"):
+                return int(line.split()[1])
+    except (FileNotFoundError, OSError, ValueError, IndexError):
+        pass
+    return 0
+
+
 def profile_command(
     command: list[str],
     work_dir: Path,
@@ -471,63 +480,36 @@ def profile_command(
 ) -> Profile:
     profile_dir = work_dir / "profiles"
     profile_dir.mkdir(exist_ok=True)
-    time_path = profile_dir / f"{label}.time.txt"
     stderr_path = profile_dir / f"{label}.stderr.txt"
-
-    time_bin = Path("/usr/bin/time")
-    if not time_bin.exists():
-        time_bin = Path("./time")
-    time_flag = "-l" if platform.system() == "Darwin" else "-v"
-    wrapped = [str(time_bin), time_flag, "-o", str(time_path), *command]
 
     started = time.perf_counter()
     with stderr_path.open("w") as stderr_handle:
         if stdout_path is None:
-            result = subprocess.run(wrapped, stdout=subprocess.DEVNULL, stderr=stderr_handle, check=False)
+            process = subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=stderr_handle)
         else:
             with stdout_path.open("w") as stdout_handle:
-                result = subprocess.run(wrapped, stdout=stdout_handle, stderr=stderr_handle, check=False)
+                process = subprocess.Popen(command, stdout=stdout_handle, stderr=stderr_handle)
+                max_rss_kb = 0
+                while process.poll() is None:
+                    max_rss_kb = max(max_rss_kb, process_peak_rss_kb(process.pid))
+                    time.sleep(0.01)
+                process.wait()
+        if stdout_path is None:
+            max_rss_kb = 0
+            while process.poll() is None:
+                max_rss_kb = max(max_rss_kb, process_peak_rss_kb(process.pid))
+                time.sleep(0.01)
+            process.wait()
     elapsed = time.perf_counter() - started
 
-    if result.returncode != 0:
-        raise subprocess.CalledProcessError(result.returncode, wrapped)
+    if process.returncode != 0:
+        raise subprocess.CalledProcessError(process.returncode, command)
 
     return Profile(
         wall_seconds=elapsed,
-        max_rss_kb=parse_max_rss(time_path),
+        max_rss_kb=max_rss_kb,
         command=" ".join(command),
     )
-
-
-def parse_wall_seconds(path: Path, fallback: float) -> float:
-    if not path.exists():
-        return fallback
-    text = path.read_text(errors="replace")
-    match = re.search(r"Elapsed \(wall clock\) time .*: (\S+)", text)
-    if not match:
-        return fallback
-    return parse_elapsed(match.group(1))
-
-
-def parse_elapsed(value: str) -> float:
-    parts = value.split(":")
-    if len(parts) == 3:
-        return int(parts[0]) * 3600 + int(parts[1]) * 60 + float(parts[2])
-    if len(parts) == 2:
-        return int(parts[0]) * 60 + float(parts[1])
-    return float(value)
-
-
-def parse_max_rss(path: Path) -> int:
-    if not path.exists():
-        return 0
-    text = path.read_text(errors="replace")
-    linux_match = re.search(r"Maximum resident set size \(kbytes\): (\d+)", text)
-    if linux_match:
-        return int(linux_match.group(1))
-
-    mac_match = re.search(r"^\s*(\d+)\s+maximum resident set size\s*$", text, re.IGNORECASE | re.MULTILINE)
-    return int(mac_match.group(1)) // 1024 if mac_match else 0
 
 
 def empty_bed(path: Path) -> Path:
