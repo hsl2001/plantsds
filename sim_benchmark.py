@@ -36,10 +36,11 @@ import numpy as np
 BASES = b"ACGT"
 BYTE_TO_BASE = bytes(BASES[value & 3] for value in range(256))
 CSV_FIELDS = [
-    "tool", "status", "enabled", "command", "prediction_bed", "error",
+    "tool", "status", "enabled", "prediction_bed", "error",
     "time_perf_seconds", "max_rss_kb",
     "pred_bp", "truth_bp", "intersect_bp", "bp_recall", "bp_precision", "bp_f1",
     "truth_fragments", "pred_fragments", "frag_tp", "frag_fp", "frag_fn", "frag_recall", "frag_precision", "frag_f1",
+    "command",
 ]
 
 

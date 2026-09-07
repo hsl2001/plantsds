@@ -18,3 +18,4 @@ sim_benchmark/
 *.tsv
 *.svg
 segtrace_validation/
+sweep_benchmark/
