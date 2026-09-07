@@ -475,8 +475,10 @@ def profile_command(
     stderr_path = profile_dir / f"{label}.stderr.txt"
 
     time_bin = Path("/usr/bin/time")
+    if not time_bin.exists():
+        time_bin = Path("./time")
     time_flag = "-l" if platform.system() == "Darwin" else "-v"
-    wrapped = [str(time_bin), time_flag, "-o", str(time_path), *command] if time_bin.exists() else command
+    wrapped = [str(time_bin), time_flag, "-o", str(time_path), *command]
 
     started = time.perf_counter()
     with stderr_path.open("w") as stderr_handle:
