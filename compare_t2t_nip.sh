@@ -1,35 +1,65 @@
 #!/usr/bin/env bash
-# Compare SegTrace segments with non-diagonal minimap2 self-alignments.
+# Run SegTrace and an all-mapping minimap2 self-alignment, then compare them.
 #
 # Usage:
-#   ./compare_t2t_nip.sh [minimap2.paf] [segtrace.seg.bed] [output-prefix]
+#   ./compare_t2t_nip.sh [t2t_nip.fasta] [output-prefix]
 #
-# The default inputs are t2t_nip.minimap2.paf and t2t_nip.seg.bed.  Results:
-#   <prefix>.venn.txt
-#   <prefix>.segtrace-specific.tsv
-#   <prefix>.minimap2-specific.tsv
+# The default input is t2t_nip.fasta.  With output prefix t2t_nip, the tool
+# outputs are t2t_nip.seg.bed and t2t_nip.minimap2.paf.  Comparison results are:
+#   <prefix>.compare.venn.txt
+#   <prefix>.compare.segtrace-specific.tsv
+#   <prefix>.compare.minimap2-specific.tsv
 #
-# Matching can be adjusted without editing this script:
-#   MIN_OVERLAP_FRAC=0.5 MIN_OVERLAP_BP=100 MIN_ALIGN_LEN=1000 ./compare_t2t_nip.sh
+# Tool and matching parameters can be adjusted without editing this script:
+#   THREADS=16 MAX_MAPPINGS=1000000 ./compare_t2t_nip.sh t2t_nip.fasta t2t_nip
 set -euo pipefail
 
-PAF=${1:-t2t_nip.minimap2.paf}
-BED=${2:-t2t_nip.seg.bed}
-PREFIX=${3:-t2t_nip.compare}
+FASTA=${1:-t2t_nip.fasta}
+PREFIX=${2:-t2t_nip}
+PAF="${PREFIX}.minimap2.paf"
+BED="${PREFIX}.seg.bed"
+COMPARE_PREFIX="${PREFIX}.compare"
+SEGTRACE_BIN=${SEGTRACE_BIN:-./segtrace}
+MINIMAP2_BIN=${MINIMAP2_BIN:-minimap2}
+THREADS=${THREADS:-8}
+MIN_COPIES=${MIN_COPIES:-2}
+MINIMAP2_PRESET=${MINIMAP2_PRESET:-asm20}
+MAX_MAPPINGS=${MAX_MAPPINGS:-1000000}
 MIN_OVERLAP_FRAC=${MIN_OVERLAP_FRAC:-0.5}
 MIN_OVERLAP_BP=${MIN_OVERLAP_BP:-100}
 MIN_ALIGN_LEN=${MIN_ALIGN_LEN:-1000}
 
-if [[ ! -r "$PAF" ]]; then
-  printf 'error: minimap2 PAF not found or not readable: %s\n' "$PAF" >&2
-  exit 1
-fi
-if [[ ! -r "$BED" ]]; then
-  printf 'error: SegTrace BED not found or not readable: %s\n' "$BED" >&2
+if [[ ! -r "$FASTA" ]]; then
+    printf 'error: FASTA not found or not readable: %s\n' "$FASTA" >&2
   exit 1
 fi
 
-python3 - "$PAF" "$BED" "$PREFIX" "$MIN_OVERLAP_FRAC" "$MIN_OVERLAP_BP" "$MIN_ALIGN_LEN" <<'PY'
+if [[ ! -x "$SEGTRACE_BIN" ]]; then
+    printf 'error: SegTrace executable not found or not executable: %s\n' "$SEGTRACE_BIN" >&2
+    exit 1
+fi
+if ! command -v "$MINIMAP2_BIN" >/dev/null 2>&1; then
+    printf 'error: minimap2 executable not found in PATH: %s\n' "$MINIMAP2_BIN" >&2
+  exit 1
+fi
+
+printf '[1/3] Running SegTrace (-c %s)...\n' "$MIN_COPIES" >&2
+"$SEGTRACE_BIN" -c "$MIN_COPIES" -p "$THREADS" -o "$PREFIX" "$FASTA"
+if [[ ! -s "$BED" ]]; then
+    printf 'error: SegTrace did not produce a non-empty BED: %s\n' "$BED" >&2
+    exit 1
+fi
+
+printf '[2/3] Running minimap2 (%s; all mappings)...\n' "$MINIMAP2_PRESET" >&2
+"$MINIMAP2_BIN" -x "$MINIMAP2_PRESET" -P -p 0 \
+    -N "$MAX_MAPPINGS" -t "$THREADS" "$FASTA" "$FASTA" > "$PAF"
+if [[ ! -s "$PAF" ]]; then
+    printf 'error: minimap2 did not produce a non-empty PAF: %s\n' "$PAF" >&2
+    exit 1
+fi
+
+printf '[3/3] Comparing SegTrace and minimap2 intervals...\n' >&2
+python3 - "$PAF" "$BED" "$COMPARE_PREFIX" "$MIN_OVERLAP_FRAC" "$MIN_OVERLAP_BP" "$MIN_ALIGN_LEN" <<'PY'
 import bisect
 import sys
 from collections import defaultdict
