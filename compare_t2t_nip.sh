@@ -31,8 +31,6 @@ fi
 
 python3 - "$PAF" "$BED" "$PREFIX" "$MIN_OVERLAP_FRAC" "$MIN_OVERLAP_BP" "$MIN_ALIGN_LEN" <<'PY'
 import bisect
-import math
-import os
 import sys
 from collections import defaultdict
 
@@ -74,6 +72,7 @@ def read_paf(path):
     """Return query and target intervals, excluding exact self-diagonal hits."""
     intervals = []
     skipped_diagonal = 0
+    paf_chroms = set()
     with open(path) as handle:
         for line_number, line in enumerate(handle, 1):
             if not line.strip() or line.startswith("#"):
@@ -89,6 +88,7 @@ def read_paf(path):
             except ValueError:
                 print(f"warning: skipping malformed PAF line {line_number}", file=sys.stderr)
                 continue
+            paf_chroms.update((query, target))
             if block_length < min_align_len or qend <= qstart or tend <= tstart:
                 continue
 
@@ -100,7 +100,27 @@ def read_paf(path):
 
             intervals.append((query, qstart, qend, f"{line_number}:query"))
             intervals.append((target, tstart, tend, f"{line_number}:target"))
-    return intervals, skipped_diagonal
+    return intervals, skipped_diagonal, paf_chroms
+
+
+def normalize_bed_intervals(intervals, paf_chroms):
+    """Match prefixed SegTrace names to the corresponding PAF contig names."""
+    normalized = []
+    changed = 0
+    for chrom, start, end, cluster, line_number in intervals:
+        match_chrom = chrom
+        if chrom not in paf_chroms:
+            parts = chrom.split("-")
+            for index in range(1, len(parts)):
+                candidate = "-".join(parts[index:])
+                if candidate in paf_chroms:
+                    match_chrom = candidate
+                    changed += 1
+                    break
+        # Keep the original chromosome for the result TSV, but use match_chrom
+        # for interval comparisons.
+        normalized.append((match_chrom, start, end, cluster, line_number, chrom))
+    return normalized, changed
 
 
 def merge_intervals(intervals):
@@ -148,8 +168,9 @@ def write_tsv(path, header, rows):
             handle.write("\t".join(str(value) for value in row) + "\n")
 
 
-segtrace = read_bed(bed_path)
-minimap2, skipped_diagonal = read_paf(paf_path)
+segtrace_raw = read_bed(bed_path)
+minimap2, skipped_diagonal, paf_chroms = read_paf(paf_path)
+segtrace, normalized_bed_count = normalize_bed_intervals(segtrace_raw, paf_chroms)
 segtrace_coverage = merge_intervals(segtrace)
 minimap2_coverage = merge_intervals(minimap2)
 
@@ -176,7 +197,8 @@ venn_path = f"{prefix}.venn.txt"
 write_tsv(
     segtrace_only_path,
     ("chrom", "start", "end", "cluster_id", "bed_line"),
-    ((chrom, start, end, cluster, line_number) for chrom, start, end, cluster, line_number in segtrace_specific),
+    ((original_chrom, start, end, cluster, line_number)
+     for _, start, end, cluster, line_number, original_chrom in segtrace_specific),
 )
 write_tsv(
     minimap2_only_path,
@@ -208,6 +230,7 @@ minimap2 filter: alignment block length >= {min_align_len} bp; exact same-sequen
 
 Input intervals:
   SegTrace: {len(segtrace)}
+    BED chromosome names normalized to PAF names: {normalized_bed_count}
     minimap2 query/target intervals: {len(minimap2)} ({minimap2_unique_count} unique coordinates)
   exact minimap2 self-diagonal records skipped: {skipped_diagonal}
 
