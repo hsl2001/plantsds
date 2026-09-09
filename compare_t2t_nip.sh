@@ -171,6 +171,33 @@ def merge_intervals(intervals):
     return merged
 
 
+def coverage_venn(first, second):
+    """Return first-only, shared, and second-only covered bases."""
+    first_total = sum(
+        end - start for intervals in first.values() for start, end in intervals
+    )
+    second_total = sum(
+        end - start for intervals in second.values() for start, end in intervals
+    )
+    shared = 0
+    for chrom in set(first) | set(second):
+        left = first.get(chrom, ())
+        right = second.get(chrom, ())
+        i = j = 0
+        while i < len(left) and j < len(right):
+            left_start, left_end = left[i]
+            right_start, right_end = right[j]
+            overlap_start = max(left_start, right_start)
+            overlap_end = min(left_end, right_end)
+            if overlap_start < overlap_end:
+                shared += overlap_end - overlap_start
+            if left_end <= right_end:
+                i += 1
+            else:
+                j += 1
+    return first_total - shared, shared, second_total - shared
+
+
 def interval_matches(interval, merged_other):
     chrom, start, end = interval[:3]
     candidates = merged_other.get(chrom, ())
@@ -241,6 +268,10 @@ minimap2_both = sum(minimap2_matches)
 segtrace_only_count = len(segtrace) - segtrace_both
 minimap2_unique_count = len({interval[:3] for interval in minimap2})
 minimap2_only_count = minimap2_unique_count - len({interval[:3] for interval, matched in zip(minimap2, minimap2_matches) if matched})
+segtrace_only_bp, both_bp, minimap2_only_bp = coverage_venn(
+    segtrace_coverage, minimap2_coverage
+)
+total_bp = segtrace_only_bp + both_bp + minimap2_only_bp
 
 venn = f"""SegTrace vs minimap2 interval comparison
 =========================================
@@ -257,6 +288,26 @@ minimap2 filter: alignment block length >= {min_align_len} bp; exact same-sequen
                  '-.      minimap2 only: {minimap2_only_count:>8}       .-'
                     '---.                         .---'
                         '-----------------------'
+
+SegTrace vs minimap2 base-pair coverage comparison
+==================================================
+Exact overlap of merged coordinates; interval matching thresholds do not apply
+
+                         .-----------------------.
+                    .---'                         '---.
+                 .-'       SegTrace only: {segtrace_only_bp:>12,} bp      '-.
+                /                                             \\
+               /       Both: {both_bp:>12,} bp                 \\
+               \\                                             /
+                \\       minimap2 only: {minimap2_only_bp:>12,} bp       /
+                 '-.                         .-'
+                    '---.                 .---'
+                        '-----------------------'
+
+Base-pair totals:
+    SegTrace covered: {segtrace_only_bp + both_bp:>12,} bp
+    minimap2 covered: {both_bp + minimap2_only_bp:>12,} bp
+    union:            {total_bp:>12,} bp
 
 Input intervals:
     SegTrace merged intervals: {len(segtrace)}
