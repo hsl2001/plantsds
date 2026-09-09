@@ -1132,10 +1132,15 @@ size_t filter_regions_by_copy_count(SegtraceDupRegion *regions, size_t n,
       i = j;
     }
 
-    if (out_count > cluster_out_start) {
+    /* duplication은 정의상 최소 2개 locus가 있어야 하므로, 살아남은 locus가
+     * 1개뿐인 클러스터(내부 tandem repeat 등 partner 없는 singleton)는 버린다.
+     * 유전체 간 1:1 상동(파일별 1 locus x 2파일 = 총 2 locus)은 유지된다. */
+    if (out_count - cluster_out_start >= 2) {
       uint32_t out_cluster_id = next_cluster_id++;
       for (size_t k = cluster_out_start; k < out_count; k++)
         regions[k].cluster_id = out_cluster_id;
+    } else {
+      out_count = cluster_out_start;
     }
     ci = cj;
   }
