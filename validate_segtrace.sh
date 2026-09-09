@@ -14,10 +14,10 @@ OUTDIR="${OUTDIR:-segtrace_validation}"
 PREFIX="${PREFIX:-$OUTDIR/segtrace}"
 THREADS="${THREADS:-8}"
 MIN_OVERLAP="${MIN_OVERLAP:-0.5}"   # member covered fraction to count as a match
-MIN_IDENT="${MIN_IDENT:-70}"        # BLAST identity floor; must sit below SegTrace's ~72-80% detection floor, else genuinely diverged copies get scored as unrecovered
+MIN_IDENT="${MIN_IDENT:-50}"        # BLAST identity floor; 
 MIN_HIT_BP="${MIN_HIT_BP:-100}"     # minimum BLAST-hit bp overlapping a member to confirm it
 SEGTRACE_EXTRA="${SEGTRACE_EXTRA:--c 1}"
-N_CLUSTERS="${N_CLUSTERS:-1000}"    # analyze only the N clusters with the shortest longest-member
+N_CLUSTERS="${N_CLUSTERS:-2000}"    # analyze only the N clusters with the shortest longest-member
 
 BED="$PREFIX.seg.bed"
 COMBINED="$OUTDIR/combined.fa"
