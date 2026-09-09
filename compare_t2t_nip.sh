@@ -14,7 +14,7 @@
 #   <prefix>.compare.minimap2-specific.tsv
 #
 # Tool and matching parameters can be adjusted without editing this script:
-#   THREADS=36 MAX_MAPPINGS=1000000 ./compare_t2t_nip.sh t2t_nip.fasta t2t_nip
+#   THREADS=36 MAX_MAPPINGS=1000000 MINIMAP2_MIN_IDENTITY=80 ./compare_t2t_nip.sh t2t_nip.fasta t2t_nip
 set -euo pipefail
 
 FASTA=${1:-t2t_nip.fasta}
@@ -36,6 +36,13 @@ MAX_MAPPINGS=${MAX_MAPPINGS:-1000000}
 MIN_OVERLAP_FRAC=${MIN_OVERLAP_FRAC:-0.5}
 MIN_OVERLAP_BP=${MIN_OVERLAP_BP:-100}
 MIN_ALIGN_LEN=${MIN_ALIGN_LEN:-1000}
+MINIMAP2_MIN_IDENTITY=${MINIMAP2_MIN_IDENTITY:-60}
+
+if (( MINIMAP2_MIN_IDENTITY < 0 || MINIMAP2_MIN_IDENTITY > 100 )); then
+    printf 'error: MINIMAP2_MIN_IDENTITY must be between 0 and 100: %s\n' \
+        "$MINIMAP2_MIN_IDENTITY" >&2
+    exit 1
+fi
 
 if [[ ! -r "$FASTA" ]]; then
     printf 'error: FASTA not found or not readable: %s\n' "$FASTA" >&2
@@ -97,10 +104,12 @@ awk '
 LC_ALL=C sort --parallel="$THREADS" -k1,1 -k2,2n -k3,3n "$SEG_NORMALIZED" \
     | "$BEDTOOLS_BIN" merge -i - -c 4 -o distinct > "$SEG_MERGED"
 
-# Keep both query and target intervals from every non-diagonal PAF alignment.
-awk -v min_len="$MIN_ALIGN_LEN" '
+# Keep both query and target intervals from non-diagonal PAF alignments that
+# meet the minimum identity and alignment-length thresholds.
+awk -v min_len="$MIN_ALIGN_LEN" -v min_ident="$MINIMAP2_MIN_IDENTITY" '
     BEGIN { OFS = "\t" }
-    NF >= 12 && $11 >= min_len && !($1 == $6 && $3 == $8 && $4 == $9) {
+    NF >= 12 && $11 > 0 && $11 >= min_len && 100 * $10 / $11 >= min_ident \
+        && !($1 == $6 && $3 == $8 && $4 == $9) {
         print $1, $3, $4
         print $6, $8, $9
     }
@@ -114,16 +123,17 @@ if [[ ! -s "$SEG_MERGED" || ! -s "$MINIMAP2_MERGED" ]]; then
 fi
 
 printf '[4/4] Comparing merged SegTrace and minimap2 intervals...\n' >&2
-python3 - "$SEG_MERGED" "$MINIMAP2_MERGED" "$COMPARE_PREFIX" "$MIN_OVERLAP_FRAC" "$MIN_OVERLAP_BP" "$MIN_ALIGN_LEN" <<'PY'
+python3 - "$SEG_MERGED" "$MINIMAP2_MERGED" "$COMPARE_PREFIX" "$MIN_OVERLAP_FRAC" "$MIN_OVERLAP_BP" "$MIN_ALIGN_LEN" "$MINIMAP2_MIN_IDENTITY" <<'PY'
 import bisect
 import sys
 from collections import defaultdict
 
 
-seg_merged_path, minimap2_merged_path, prefix, min_frac_s, min_bp_s, min_align_len_s = sys.argv[1:]
+seg_merged_path, minimap2_merged_path, prefix, min_frac_s, min_bp_s, min_align_len_s, minimap2_min_ident_s = sys.argv[1:]
 min_frac = float(min_frac_s)
 min_bp = int(min_bp_s)
 min_align_len = int(min_align_len_s)
+minimap2_min_ident = float(minimap2_min_ident_s)
 
 if not 0 < min_frac <= 1:
     raise SystemExit("error: MIN_OVERLAP_FRAC must be in (0, 1]")
@@ -276,35 +286,23 @@ total_bp = segtrace_only_bp + both_bp + minimap2_only_bp
 venn = f"""SegTrace vs minimap2 interval comparison
 =========================================
 Matching rule: overlap >= {min_frac:g} of the shorter interval and >= {min_bp} bp
-minimap2 filter: alignment block length >= {min_align_len} bp; exact same-sequence diagonal hits excluded
+minimap2 filter: identity >= {minimap2_min_ident:g}%, alignment block length >= {min_align_len} bp; exact same-sequence diagonal hits excluded
 
-                         .-----------------------.
-                    .---'                         '---.
-                 .-'       SegTrace only: {segtrace_only_count:>8}          '-.
-                /                                             \\
-               /       Both: {segtrace_both:>8} SegTrace intervals             \\
-               \\       Both: {minimap2_both:>8} minimap2 intervals             /
-                \\                                             /
-                 '-.      minimap2 only: {minimap2_only_count:>8}       .-'
-                    '---.                         .---'
-                        '-----------------------'
+Interval totals:
+    SegTrace-only intervals: {segtrace_only_count}
+    Shared SegTrace intervals: {segtrace_both}
+    Shared minimap2 intervals: {minimap2_both}
+    minimap2-only intervals: {minimap2_only_count}
 
 SegTrace vs minimap2 base-pair coverage comparison
 ==================================================
 Exact overlap of merged coordinates; interval matching thresholds do not apply
 
-                         .-----------------------.
-                    .---'                         '---.
-                 .-'       SegTrace only: {segtrace_only_bp:>12,} bp      '-.
-                /                                             \\
-               /       Both: {both_bp:>12,} bp                 \\
-               \\                                             /
-                \\       minimap2 only: {minimap2_only_bp:>12,} bp       /
-                 '-.                         .-'
-                    '---.                 .---'
-                        '-----------------------'
-
 Base-pair totals:
+    SegTrace-only coverage: {segtrace_only_bp:>12,} bp
+    Shared coverage:        {both_bp:>12,} bp
+    minimap2-only coverage: {minimap2_only_bp:>12,} bp
+
     SegTrace covered: {segtrace_only_bp + both_bp:>12,} bp
     minimap2 covered: {both_bp + minimap2_only_bp:>12,} bp
     union:            {total_bp:>12,} bp
