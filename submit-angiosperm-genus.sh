@@ -22,7 +22,6 @@ python3 ./select_angiosperm_genus.py \
 
 qsub -N "$JOB_NAME" \
   -l select=1:ncpus=${THREADS} \
-  -l mem=${MEM} \
   -l walltime=${WALLTIME} \
   -v WORKDIR="${WORKDIR}",THREADS="${THREADS}" \
   -j oe \

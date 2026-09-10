@@ -18,7 +18,6 @@ mkdir -p "$LOGDIR"
 
 qsub -N "$JOB_NAME" \
   -l select=1:ncpus=${THREADS} \
-  -l mem=${MEM} \
   -l walltime=${WALLTIME} \
   -v WORKDIR="${WORKDIR}",THREADS="${THREADS}",OUT_DIR="${OUT_DIR}",ENV_SETUP="${ENV_SETUP}" \
   -j oe \

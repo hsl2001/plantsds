@@ -15,14 +15,13 @@ WALLTIME="${WALLTIME:-96:00:00}"
 ENV_SETUP="${ENV_SETUP:-}"
 
 mkdir -p "$LOGDIR"
-
+  
 echo "#!/usr/bin/env bash
 set -euo pipefail
 cd '$WORKDIR'
 ${ENV_SETUP:+$ENV_SETUP}
 THREADS='$THREADS' ./validate_segtrace.sh" | qsub -N "$JOB_NAME" \
   -l select=1:ncpus=${THREADS} \
-  -l mem=${MEM} \
   -l walltime=${WALLTIME} \
   -v WORKDIR="${WORKDIR}",THREADS="${THREADS}" \
   -j oe \
