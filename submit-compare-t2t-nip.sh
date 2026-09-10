@@ -1,1 +1,0 @@
-echo "cd `pwd`; bash compare_t2t_nip.sh" | qsub -N t2t-nip -l select=1:ncpus=36 -j oe -o ~/log/compare_t2t_nip.log -v WORKDIR=`pwd`

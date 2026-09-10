@@ -26,7 +26,7 @@ MEMBERS="$OUTDIR/cluster_members.tsv"
 DB="$OUTDIR/blastdb/combined"
 BLAST="$OUTDIR/blast_hits.tsv"
 CSV="$OUTDIR/cluster_match_ratio.csv"
-PLOT="$OUTDIR/cluster_match_ratio.png"
+PLOT="$OUTDIR/cluster_match_ratio.svg"
 
 mkdir -p "$OUTDIR" "$OUTDIR/blastdb"
 
