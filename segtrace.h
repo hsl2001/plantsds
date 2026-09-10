@@ -51,13 +51,14 @@ extern "C" {
 #define MAX_KMER_FREQ 120
 #define MAX_PAIR_COMPARISONS 2
 #define MAX_COLLINEAR_LOOKAHEAD 10
-#define MAX_SKETCH_SIZE 2048
+#define MAX_WINDOW_SIZE UINT16_MAX
 #define MIN_SD_LEN 1000
 #define MIN_IDENTITY 0.8
 
 #define CANDIDATE_WINDOW_MASK UINT32_MAX
 
-#define BLOOM_NUM_WORDS (UINT32_C(1) << 22)
+#define MIN_BLOOM_WORDS (UINT32_C(1) << 14)
+#define MAX_BLOOM_WORDS (UINT32_C(1) << 22)
 
 // ==============================================================
 // CORE DATA STRUCTURES
@@ -95,7 +96,7 @@ typedef struct {
   uint32_t file_id;
 } GenomeSeqLen;
 
-typedef struct {
+typedef struct __attribute__((__packed__)) {
   uint32_t a;
   uint32_t b;
   uint8_t score;
@@ -153,6 +154,9 @@ typedef struct {
   double p_kmer;
   PartitionBucket *buckets;
   uint64_t *bloom;
+  size_t bloom_mask;
+  uint64_t *match_cache;
+  size_t match_cache_mask;
   CandidatePair **t_pairs;
   size_t *t_n_pairs;
   size_t *t_cap_pairs;
@@ -172,7 +176,7 @@ void kt_forpool(void *pool, void (*func)(void *, long, int), void *data,
 void get_basename(const char *filename, char *basename, size_t size);
 uint32_t mix_hash(uint64_t hash_value, uint64_t seed);
 uint64_t encode_pair(uint32_t a, uint32_t b);
-int bloom_test_and_set(uint64_t *bloom, uint64_t key);
+int bloom_test_and_set(uint64_t *bloom, size_t mask, uint64_t key);
 int compare_uint32(const void *a, const void *b);
 int compare_hash_entry(const void *a, const void *b);
 

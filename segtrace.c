@@ -20,11 +20,12 @@ static void print_usage(void) {
          "Options:\n"
          "  -k: kmer size (default: 17)\n"
          "  -s: scale factor (default: 16)\n"
-         "  -w: window size in bp (default: 1024)\n"
+         "  -w: window size in bp, k..65535 (default: 1024)\n"
          "  -t: step size in bp (default: 0 [auto: 33%% of window size])\n"
          "  -b: minimum valid bases per window (default: 0 [auto: 25%% of "
          "window size])\n"
-         "  -c: minimum loci per input file to report (default: 1)\n"
+         "  -c: minimum homologous loci per input file (default: 1; at least\n"
+         "      2 loci across inputs; self matches and unique regions excluded)\n"
          "  -r: long-read mode - window each FASTA/FASTQ record and group "
          "similar collinear windows\n"
          "  -m: filter soft-masked bases (treat lowercase a/c/g/t as invalid)\n"
@@ -102,7 +103,8 @@ int main(int argc, char **argv) {
       return 1;
   }
   if (kmer_size == 0 || kmer_size > 64 || scale == 0 ||
-      scale > UINT32_MAX || window_size == 0) {
+      scale > UINT32_MAX || window_size < kmer_size ||
+      window_size > MAX_WINDOW_SIZE) {
     fprintf(stderr, "[ERROR] Invalid kmer, scale, or window size.\n");
     return 1;
   }
@@ -284,7 +286,7 @@ static inline void extract_hash_direct(const Segtrace *r, uint32_t *out_hashes,
        * 퍼뜨린 뒤 threshold 미만이면 스케치에 채택 */
       uint64_t canonical = (f_hash < r_hash) ? f_hash : r_hash;
       uint32_t h = mix_hash(canonical, r->hash_seed);
-      if (h < threshold && count < MAX_SKETCH_SIZE) {
+      if (h < threshold) {
         out_hashes[count++] = normalize_sampled_hash(h, threshold);
       }
     }
@@ -314,7 +316,22 @@ static void seq_chunk_worker(void *data, long i, int tid) {
   uint32_t current_window_idx =
       (uint32_t)(job->chunk_start_idx / job->step_size);
 
-  uint32_t local_hashes[MAX_SKETCH_SIZE];
+  uint32_t *local_hashes = malloc(job->window_size * sizeof(*local_hashes));
+  if (!local_hashes) {
+    fprintf(stderr, "[ERROR] Memory allocation failed\n");
+    exit(1);
+  }
+  uint32_t *ring = job->step_size < job->window_size
+                       ? malloc(job->window_size * sizeof(*ring)) : NULL;
+  if (job->step_size < job->window_size && !ring) {
+    fprintf(stderr, "[ERROR] Memory allocation failed\n");
+    exit(1);
+  }
+  size_t cursor = job->chunk_start_idx;
+  size_t ring_pos = cursor % job->window_size;
+  size_t valid_run = 0;
+  uint64_t forward = 0, reverse = 0;
+  uint32_t kmer = job->r->hash_window;
 
   size_t idx = job->chunk_start_idx;
   size_t valid_bases = 0;
@@ -327,11 +344,63 @@ static void seq_chunk_worker(void *data, long i, int tid) {
   for (; idx + job->window_size <= job->chunk_end_idx;
        idx += job->step_size, current_window_idx++) {
 
+    if (ring) {
+      while (cursor < idx + job->window_size) {
+        int8_t base = job->r->base_lookup[job->seq_ptr[cursor]];
+        uint32_t sampled = UINT32_MAX;
+        if (base < 0) {
+          valid_run = 0;
+          forward = reverse = 0;
+        } else {
+          if (valid_run < kmer) {
+            forward ^= rol64(NTHASH_H[base], kmer - 1 - (uint32_t)valid_run);
+            reverse ^= rol64(NTHASH_H[base ^ 3], (uint32_t)valid_run);
+            valid_run++;
+          } else {
+            int8_t outgoing = job->r->base_lookup[job->seq_ptr[cursor - kmer]];
+            forward = rol64(forward, 1) ^ rol64(NTHASH_H[outgoing], kmer) ^
+                      NTHASH_H[base];
+            reverse = ror64(reverse, 1) ^ ror64(NTHASH_H[outgoing ^ 3], 1) ^
+                      rol64(NTHASH_H[base ^ 3], kmer - 1);
+          }
+          if (valid_run >= kmer) {
+            uint32_t hash = mix_hash(forward < reverse ? forward : reverse,
+                                     job->r->hash_seed);
+            if (hash < job->threshold)
+              sampled = normalize_sampled_hash(hash, job->threshold);
+          }
+        }
+        ring[ring_pos] = sampled;
+        if (++ring_pos == job->window_size)
+          ring_pos = 0;
+        cursor++;
+      }
+    }
+
     /* 유효 염기가 부족한(N-rich) 윈도우는 스케치하지 않고 빈 상태로 기록 */
     size_t sketch_size = 0;
     if (valid_bases >= job->min_bases) {
-      extract_hash_direct(job->r, local_hashes, &sketch_size, job->threshold,
-                          job->seq_ptr + idx, job->window_size);
+      if (ring) {
+        size_t position = (idx + kmer - 1) % job->window_size;
+        for (size_t offset = kmer - 1; offset < job->window_size; offset++) {
+          uint32_t hash = ring[position];
+          if (hash != UINT32_MAX)
+            local_hashes[sketch_size++] = hash;
+          if (++position == job->window_size)
+            position = 0;
+        }
+        if (sketch_size > 1) {
+          qsort(local_hashes, sketch_size, sizeof(*local_hashes), compare_uint32);
+          size_t unique = 1;
+          for (size_t hash_index = 1; hash_index < sketch_size; hash_index++)
+            if (local_hashes[hash_index] != local_hashes[unique - 1])
+              local_hashes[unique++] = local_hashes[hash_index];
+          sketch_size = unique;
+        }
+      } else {
+        extract_hash_direct(job->r, local_hashes, &sketch_size, job->threshold,
+                            job->seq_ptr + idx, job->window_size);
+      }
     }
 
     /* 윈도우 메타데이터(서열 id, 윈도우 인덱스, 스케치 위치/크기) 기록 */
@@ -360,6 +429,8 @@ static void seq_chunk_worker(void *data, long i, int tid) {
       }
     }
   }
+  free(ring);
+  free(local_hashes);
 }
 
 /* 모든 입력 FASTA를 순회하며 전역 윈도우 테이블(gw.coords)과 전역 스케치
@@ -407,8 +478,6 @@ GlobalWindows extract_all_windows(char **files, int num_files,
 
       size_t seq_windows = (len - window_size) / step_size + 1;
       DA_RESERVE(gw.coords, cap_sketches, gw.num_sketches + seq_windows);
-      DA_RESERVE(gw.all_hashes, cap_all_hashes,
-             num_all_hashes + seq_windows * 96);
 
       /* 병렬화를 위해 서열을 chunk로 분할.
        * 스레드 수의 4배로 쪼개 부하 균형을 맞추고 최소 100kb를 보장하며,
@@ -456,7 +525,8 @@ GlobalWindows extract_all_windows(char **files, int num_files,
           DA_RESERVE(gw.coords, cap_sketches,
                gw.num_sketches + job->num_coords);
           size_t base_h_offset = num_all_hashes;
-          memcpy(gw.all_hashes + base_h_offset, job->hashes,
+             if (job->num_hashes)
+               memcpy(gw.all_hashes + base_h_offset, job->hashes,
                  job->num_hashes * sizeof(uint32_t));
           num_all_hashes += job->num_hashes;
 
@@ -477,6 +547,16 @@ GlobalWindows extract_all_windows(char **files, int num_files,
     gzclose(fp);
   }
 
+  if (num_all_hashes) {
+    uint32_t *hashes = realloc(gw.all_hashes, num_all_hashes * sizeof(*hashes));
+    if (hashes)
+      gw.all_hashes = hashes;
+  }
+  if (gw.num_sketches) {
+    WindowCoord *coords = realloc(gw.coords, gw.num_sketches * sizeof(*coords));
+    if (coords)
+      gw.coords = coords;
+  }
   return gw;
 }
 
@@ -538,6 +618,22 @@ static inline size_t required_shared(const DiscoverComputeData *w, uint32_t wa,
 
 /* collinear 탐색용 헬퍼: (wa, wb)가 배열 범위 안이고, 기대하는 서열 쌍
  * (seq_a, seq_b)과 일치하며, 겹치지 않고, 유사도 기준을 통과하는지 검사 */
+static inline uint64_t splitmix64(uint64_t x);
+
+static inline int sketches_share_at_least(const uint32_t *left, size_t left_size,
+                                          const uint32_t *right, size_t right_size,
+                                          size_t required) {
+  size_t left_pos = 0, right_pos = 0, shared = 0;
+  while (left_pos < left_size && right_pos < right_size) {
+    uint32_t left_hash = left[left_pos], right_hash = right[right_pos];
+    if (left_hash == right_hash && ++shared >= required)
+      return 1;
+    left_pos += left_hash <= right_hash;
+    right_pos += right_hash <= left_hash;
+  }
+  return 0;
+}
+
 static inline int matching_window_pair(const DiscoverComputeData *w,
                                        long long wa, long long wb,
                                        uint32_t seq_a, uint32_t seq_b) {
@@ -547,9 +643,23 @@ static inline int matching_window_pair(const DiscoverComputeData *w,
       windows_overlap(w, (uint32_t)wa, (uint32_t)wb))
     return 0;
 
+  uint64_t key = encode_pair((uint32_t)wa, (uint32_t)wb);
+  size_t slot = (size_t)splitmix64(key) & w->match_cache_mask;
+  int cacheable = w->match_cache && w->n_windows < (UINT64_C(1) << 31);
+  if (cacheable) {
+    uint64_t cached = __atomic_load_n(&w->match_cache[slot], __ATOMIC_RELAXED);
+    if ((cached >> 1) == key + 1)
+      return (int)(cached & 1);
+  }
   size_t min_shared = required_shared(w, (uint32_t)wa, (uint32_t)wb);
-  return calculate_window_dist(w->all_hashes, &w->coords[wa],
-                               &w->coords[wb]) >= min_shared;
+  int matched = sketches_share_at_least(
+      w->all_hashes + w->coords[wa].sketch_offset, w->coords[wa].sketch_size,
+      w->all_hashes + w->coords[wb].sketch_offset, w->coords[wb].sketch_size,
+      min_shared);
+  if (cacheable)
+    __atomic_store_n(&w->match_cache[slot], ((key + 1) << 1) | (uint64_t)matched,
+                     __ATOMIC_RELAXED);
+  return matched;
 }
 
 /* 후보 쌍 주변에 '연쇄적인(collinear)' 유사 윈도우가 더 있는지 검사.
@@ -670,6 +780,65 @@ static void scatter_bucket_entries(void *data, long idx, int tid) {
 /* 파티션(해시 구간) 하나를 담당하는 스레드 작업.
  * 버킷을 (hash, window_id)로 정렬하면 같은 해시를 가진 윈도우들이 연속된
  * run을 이루고, run 내부의 윈도우 쌍이 곧 "해시를 공유하는 후보 쌍"이다. */
+static void sort_hash_bucket(HashWindowEntry *entries, size_t count) {
+  if (count < 256) {
+    qsort(entries, count, sizeof(*entries), compare_hash_entry);
+    return;
+  }
+  HashWindowEntry *scratch = malloc(count * sizeof(*scratch));
+  if (!scratch) {
+    fprintf(stderr, "[ERROR] Memory allocation failed\n");
+    exit(1);
+  }
+  uint32_t varying = 0;
+  for (size_t index = 1; index < count; index++)
+    varying |= entries[index].hash ^ entries[0].hash;
+  HashWindowEntry *source = entries, *target = scratch;
+  for (unsigned int shift = 0; shift < 32 && (varying >> shift); shift += 11) {
+    size_t offsets[2048] = {0};
+    for (size_t index = 0; index < count; index++)
+      offsets[(source[index].hash >> shift) & 2047]++;
+    size_t offset = 0;
+    for (size_t digit = 0; digit < 2048; digit++) {
+      size_t size = offsets[digit];
+      offsets[digit] = offset;
+      offset += size;
+    }
+    for (size_t index = 0; index < count; index++) {
+      size_t digit = (source[index].hash >> shift) & 2047;
+      target[offsets[digit]++] = source[index];
+    }
+    HashWindowEntry *swap = source;
+    source = target;
+    target = swap;
+  }
+  if (source != entries)
+    memcpy(entries, source, count * sizeof(*entries));
+  free(scratch);
+}
+
+static int hash_run_within_frequency(const DiscoverComputeData *data,
+                                     const HashWindowEntry *entries,
+                                     size_t count) {
+  size_t groups = 0;
+  size_t span = data->window_size >= data->kmer_size
+                    ? data->window_size - data->kmer_size : 0;
+  for (size_t index = 0; index < count;) {
+    const WindowCoord *first = &data->coords[entries[index].window_id];
+    if (++groups > MAX_KMER_FREQ)
+      return 0;
+    index++;
+    while (index < count) {
+      const WindowCoord *next = &data->coords[entries[index].window_id];
+      if (next->seq_id != first->seq_id ||
+          (size_t)(next->window_idx - first->window_idx) * data->step_size > span)
+        break;
+      index++;
+    }
+  }
+  return 1;
+}
+
 static void discover_compute_worker(void *data, long idx, int tid) {
   DiscoverComputeData *w_data = (DiscoverComputeData *)data;
   long p = (long)w_data->batch_start + idx;
@@ -677,7 +846,7 @@ static void discover_compute_worker(void *data, long idx, int tid) {
   if (b->size == 0)
     return;
 
-  qsort(b->entries, b->size, sizeof(HashWindowEntry), compare_hash_entry);
+  sort_hash_bucket(b->entries, b->size);
 
   /* 같은 해시 값을 가진 run을 하나씩 순회 */
   size_t i = 0;
@@ -689,23 +858,24 @@ static void discover_compute_worker(void *data, long idx, int tid) {
 
     /* run이 너무 크면(초고빈도 k-mer, 저복잡도/반복 서열) 비교 폭발 방지를
      * 위해 건너뛴다. 2 이상이어야 공유 쌍이 존재 */
-    if (run_len >= 2 && run_len <= MAX_KMER_FREQ) {
+    if (run_len >= 2 &&
+      (run_len <= MAX_KMER_FREQ ||
+       hash_run_within_frequency(w_data, b->entries + i, run_len))) {
       /* 각 윈도우당 인접한 MAX_PAIR_COMPARISONS개의 이웃만 비교해
        * run 내 비교 횟수를 선형으로 제한 (버스트 방지) */
       for (size_t a = i; a < j; a++) {
-        size_t b_max =
-            a + 1 + MAX_PAIR_COMPARISONS < j ? a + 1 + MAX_PAIR_COMPARISONS : j;
-        for (size_t b_idx = a + 1; b_idx < b_max; b_idx++) {
+        size_t comparisons = 0;
+        for (size_t b_idx = a + 1;
+             b_idx < j && comparisons < MAX_PAIR_COMPARISONS; b_idx++) {
           uint32_t wa = b->entries[a].window_id,
                    wb = b->entries[b_idx].window_id;
           /* 같은 read/서열의 겹치는 윈도우는 중복 후보이므로 제외한다. */
           if (windows_overlap(w_data, wa, wb))
             continue;
+          comparisons++;
 
-          /* 같은 쌍이 다른 해시 run이나 스레드에서 반복 발견될 수 있으므로
-           * 공유 cache-blocked 블룸필터로 중복 제거 */
           uint64_t pk = encode_pair(wa, wb);
-          if (bloom_test_and_set(w_data->bloom, pk))
+          if (bloom_test_and_set(w_data->bloom, w_data->bloom_mask, pk))
             continue;
 
           size_t min_shared = required_shared(w_data, wa, wb);
@@ -746,6 +916,11 @@ CandidateGraph discover_and_compute(const uint32_t *all_hashes,
     exit(1);
   }
 
+  size_t bloom_words = MIN_BLOOM_WORDS;
+  while (bloom_words < n_windows * 4 && bloom_words < MAX_BLOOM_WORDS)
+    bloom_words *= 2;
+  size_t match_entries = bloom_words < (UINT32_C(1) << 20)
+                             ? bloom_words : (UINT32_C(1) << 20);
   DiscoverComputeData w = {
       .all_hashes = all_hashes,
       .coords = coords,
@@ -757,12 +932,15 @@ CandidateGraph discover_and_compute(const uint32_t *all_hashes,
        * 공유 스케치 수의 기대치는 대략 (스케치 크기) x p_kmer */
       .p_kmer = pow(MIN_IDENTITY, (double)kmer_size),
       .buckets = calloc(NUM_PARTITIONS, sizeof(PartitionBucket)),
-      .bloom = calloc(BLOOM_NUM_WORDS, sizeof(uint64_t)),
+      .bloom = calloc(bloom_words, sizeof(uint64_t)),
+      .bloom_mask = bloom_words - 1,
+      .match_cache = calloc(match_entries, sizeof(uint64_t)),
+      .match_cache_mask = match_entries - 1,
       .t_pairs = calloc(n_threads, sizeof(CandidatePair *)),
       .t_n_pairs = calloc(n_threads, sizeof(size_t)),
       .t_cap_pairs = calloc(n_threads, sizeof(size_t))};
 
-  if (!w.buckets || !w.bloom || !w.t_pairs || !w.t_n_pairs ||
+  if (!w.buckets || !w.bloom || !w.match_cache || !w.t_pairs || !w.t_n_pairs ||
       !w.t_cap_pairs) {
     fprintf(stderr, "[ERROR] Memory allocation failed\n");
     exit(1);
@@ -853,6 +1031,7 @@ CandidateGraph discover_and_compute(const uint32_t *all_hashes,
 
   free(w.buckets);
   free(w.bloom);
+  free(w.match_cache);
   free(w.t_cap_pairs);
   free(win_curr_pos);
   free(block_offsets);
@@ -965,13 +1144,11 @@ void build_duplicate_loci(const CandidateGraph *graph, size_t num_windows,
     }
   }
 
-  /* 2) 마킹된 윈도우를 순서대로 스캔하며, 같은 서열에서 윈도우 인덱스 차이가
-   * MAX_COLLINEAR_LOOKAHEAD 이내면 같은 구간으로 병합.
+  /* 2) 같은 서열의 겹치거나 맞닿는 후보 윈도우만 병합한다.
    * coords가 서열/인덱스 순으로 생성되므로 단순 선형 스캔으로 충분하다 */
   SegtraceDupRegion *regions = NULL;
   size_t n_regions = 0, cap_regions = 0;
   uint32_t previous_seq = UINT32_MAX;
-  uint32_t previous_window = 0;
 
   for (size_t i = 0; i < num_windows; i++) {
     if (coords[i].sketch_size == 0)
@@ -983,7 +1160,7 @@ void build_duplicate_loci(const CandidateGraph *graph, size_t num_windows,
     size_t end = start + window_size;
 
     int merge = n_regions > 0 && seq_id == previous_seq &&
-          window_idx - previous_window <= MAX_COLLINEAR_LOOKAHEAD;
+          start <= regions[n_regions - 1].end;
 
     if (merge) {
       regions[n_regions - 1].end = end;
@@ -998,7 +1175,6 @@ void build_duplicate_loci(const CandidateGraph *graph, size_t num_windows,
     }
     coords[i].sketch_offset = (uint32_t)(n_regions - 1);
     previous_seq = seq_id;
-    previous_window = window_idx;
   }
 
   *out_regions = regions;
@@ -1154,9 +1330,6 @@ size_t filter_regions_by_copy_count(SegtraceDupRegion *regions, size_t n,
 void write_dup_bed(const char *out_prefix, const SegtraceDupRegion *dup_regions,
                    size_t n_merged, const GenomeSeqLen *seq_lens,
                    size_t min_sd_len) {
-  if (n_merged == 0)
-    return;
-
   char path_buf[PATH_MAX];
   snprintf(path_buf, sizeof(path_buf), "%s.seg.bed", out_prefix);
   FILE *out_bed = fopen(path_buf, "w");
@@ -1264,17 +1437,13 @@ static inline uint64_t splitmix64(uint64_t x) {
   return x ^ (x >> 31);
 }
 
-/* 공유 cache-blocked 블룸필터 조회 겸 삽입. 한 키의 세 비트를 같은 64비트
- * word에 배치해 메모리 접근을 한 cache line으로 제한하고, atomic OR로
- * 여러 worker가 락 없이 공유한다. */
-int bloom_test_and_set(uint64_t *bloom, uint64_t key) {
-  uint64_t h = splitmix64(key);
-  uint32_t word_idx = (uint32_t)h & (BLOOM_NUM_WORDS - 1);
-  uint64_t bits = (UINT64_C(1) << ((h >> 22) & 63)) |
-                  (UINT64_C(1) << ((h >> 36) & 63)) |
-                  (UINT64_C(1) << ((h >> 50) & 63));
-  uint64_t old =
-      __atomic_fetch_or(&bloom[word_idx], bits, __ATOMIC_RELAXED);
+int bloom_test_and_set(uint64_t *bloom, size_t mask, uint64_t key) {
+  uint64_t hash = splitmix64(key);
+  size_t slot = (size_t)hash & mask;
+  uint64_t bits = (UINT64_C(1) << ((hash >> 22) & 63)) |
+                  (UINT64_C(1) << ((hash >> 36) & 63)) |
+                  (UINT64_C(1) << ((hash >> 50) & 63));
+  uint64_t old = __atomic_fetch_or(&bloom[slot], bits, __ATOMIC_RELAXED);
   return (old & bits) == bits;
 }
 

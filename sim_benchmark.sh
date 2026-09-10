@@ -3,7 +3,7 @@ set -e
 export PATH="$HOME/.local/bin:$PATH"
 
 if command -v micromamba >/dev/null 2>&1; then
-	RUNNER=(micromamba run -n plantsds-bench uv run)
+	RUNNER=(micromamba run -n segtrace-compare uv run)
 else
 	RUNNER=(uv run)
 fi
