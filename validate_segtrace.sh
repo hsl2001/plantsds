@@ -26,6 +26,7 @@ MEMBERS="$OUTDIR/cluster_members.tsv"
 DB="$OUTDIR/blastdb/combined"
 BLAST="$OUTDIR/blast_hits.tsv"
 CSV="$OUTDIR/cluster_match_ratio.csv"
+MEMBER_RESULTS="$OUTDIR/cluster_member_recovery.tsv"
 PLOT="$OUTDIR/cluster_match_ratio.svg"
 
 mkdir -p "$OUTDIR" "$OUTDIR/blastdb"
@@ -155,17 +156,17 @@ blastn -task dc-megablast -query "$QUERY" -db "$DB" -num_threads "$THREADS" \
 
 # ------------------------------------------------ 5. match ratio + CSV + graph
 echo "[5/5] Scoring cluster recovery and plotting..."
-python3 - "$MEMBERS" "$BLAST" "$CSV" "$PLOT" "$MIN_OVERLAP" "$MIN_IDENT" "$MIN_HIT_BP" <<'PY'
+python3 - "$MEMBERS" "$BLAST" "$CSV" "$MEMBER_RESULTS" "$PLOT" "$MIN_OVERLAP" "$MIN_IDENT" "$MIN_HIT_BP" <<'PY'
 import csv
 import sys
-from collections import defaultdict
+from collections import Counter, defaultdict
 
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
-members_path, blast_path, csv_path, plot_path, min_overlap_s, min_ident_s, min_hit_bp_s = sys.argv[1:8]
+members_path, blast_path, csv_path, member_results_path, plot_path, min_overlap_s, min_ident_s, min_hit_bp_s = sys.argv[1:9]
 min_overlap = float(min_overlap_s)
 min_ident = float(min_ident_s)
 min_hit_bp = int(min_hit_bp_s)
@@ -177,44 +178,121 @@ with open(members_path) as mh:
         cid, chrom, s, e, isq = line.rstrip("\n").split("\t")
         members[int(cid)].append((chrom, int(s), int(e), int(isq)))
 
-hits = defaultdict(list)  # (cid, chrom) -> [(start, end)] on subject
+hits = defaultdict(list)  # (cid, chrom) -> [(start, end, pident, hsp_length)] on subject
 with open(blast_path) as bh:
     for line in bh:
         f = line.rstrip("\n").split("\t")
         if len(f) < 8 or float(f[2]) < min_ident:
             continue
         sstart, send = int(f[6]), int(f[7])
-        hits[(int(f[0][1:]), f[1])].append((min(sstart, send) - 1, max(sstart, send)))
+        hits[(int(f[0][1:]), f[1])].append((
+            min(sstart, send) - 1,
+            max(sstart, send),
+            float(f[2]),
+            int(f[3]),
+        ))
 
 
-def covered(start, end, intervals):
+def classify_member(start, end, intervals):
     # SegTrace regions are window-quantized, so a genuine BLAST core is often much
     # shorter than the member window. Confirm a member when a hit overlaps it by
     # >= min_overlap of the SHORTER of (member, hit) and by >= min_hit_bp bases,
     # rather than demanding the hit cover half of the inflated member window.
     mlen = end - start
     if mlen <= 0:
-        return False
-    for a, b in intervals:
-        overlap = min(end, b) - max(start, a)
+        return "no_blast_hit", None
+
+    overlapping = []
+    for a, b, pident, hsp_length in intervals:
+        overlap = max(0, min(end, b) - max(start, a))
         shorter = min(mlen, b - a)
-        if overlap >= min_hit_bp and shorter > 0 and overlap / shorter >= min_overlap:
-            return True
-    return False
+        fraction = overlap / shorter if shorter > 0 else 0.0
+        if overlap > 0:
+            overlapping.append((overlap, fraction, pident, hsp_length, a, b))
+
+    # The categories are mutually exclusive. A hit that does not overlap the
+    # member is treated as no relevant BLAST hit for that member.
+    if not overlapping:
+        best = max(intervals, key=lambda hit: (hit[2], hit[3]), default=None)
+        return "no_blast_hit", best
+
+    valid = [
+        hit for hit in overlapping
+        if hit[0] >= min_hit_bp and hit[1] >= min_overlap
+    ]
+    if valid:
+        return "matched", max(valid, key=lambda hit: (hit[0], hit[1], hit[2], hit[3]))
+
+    best = max(overlapping, key=lambda hit: (hit[0], hit[1], hit[2], hit[3]))
+    overlap, fraction = best[:2]
+    if overlap < min_hit_bp:
+        return "fail_min_hit_bp", best
+    if fraction < min_overlap:
+        return "fail_min_overlap", best
+    return "matched", best
 
 
 rows = []
+member_rows = []
+unmatched_counts = Counter()
 for cid in sorted(members):
     mem = members[cid]
-    matched = sum(covered(s, e, hits.get((cid, c), [])) for c, s, e, _ in mem)
+    classifications = []
+    for chrom, start, end, is_query in mem:
+        status, best = classify_member(start, end, hits.get((cid, chrom), []))
+        classifications.append(status)
+        if status != "matched":
+            unmatched_counts[status] += 1
+
+        if best is None:
+            best_pident = best_length = best_start = best_end = ""
+            overlap = ""
+            fraction = ""
+        elif len(best) == 4:
+            best_start, best_end, best_pident, best_length = best
+            overlap = 0
+            fraction = 0.0
+        else:
+            overlap, fraction, best_pident, best_length, best_start, best_end = best
+
+        member_rows.append((
+            cid, chrom, start, end, is_query, end - start, status,
+            best_pident, best_length, overlap, fraction, best_start, best_end,
+        ))
+
+    matched = classifications.count("matched")
     qchrom = next((c for c, _, _, q in mem if q), mem[0][0])
-    rows.append((cid, len(mem), matched, matched / len(mem), qchrom))
+    rows.append((
+        cid,
+        len(mem),
+        matched,
+        matched / len(mem),
+        qchrom,
+        classifications.count("fail_min_hit_bp"),
+        classifications.count("fail_min_overlap"),
+        classifications.count("no_blast_hit"),
+    ))
 
 with open(csv_path, "w", newline="") as ch:
     writer = csv.writer(ch)
-    writer.writerow(["cluster_id", "n_members", "n_matched", "match_ratio", "query_chrom"])
-    for cid, n, m, ratio, qchrom in rows:
-        writer.writerow([cid, n, m, f"{ratio:.6f}", qchrom])
+    writer.writerow([
+        "cluster_id", "n_members", "n_matched", "match_ratio", "query_chrom",
+        "n_fail_min_hit_bp", "n_fail_min_overlap", "n_no_blast_hit",
+    ])
+    for cid, n, m, ratio, qchrom, n_short, n_fraction, n_no_hit in rows:
+        writer.writerow([
+            cid, n, m, f"{ratio:.6f}", qchrom,
+            n_short, n_fraction, n_no_hit,
+        ])
+
+with open(member_results_path, "w", newline="") as mr:
+    writer = csv.writer(mr, delimiter="\t")
+    writer.writerow([
+        "cluster_id", "chrom", "start", "end", "is_query", "member_length",
+        "status", "best_pident", "best_hit_length", "overlap_bp",
+        "overlap_fraction", "best_subject_start", "best_subject_end",
+    ])
+    writer.writerows(member_rows)
 
 ratios = np.array([r[3] for r in rows], dtype=float)
 if ratios.size:
@@ -239,9 +317,14 @@ if ratios.size:
     print(f"       clusters={ratios.size}  mean_ratio={ratios.mean():.4f}  "
           f"median={np.median(ratios):.4f}  fully_recovered="
           f"{int((ratios >= 1.0).sum())} ({(ratios >= 1.0).mean() * 100:.1f}%)")
+    print("       unmatched members: "
+          f"fail_min_hit_bp={unmatched_counts['fail_min_hit_bp']}  "
+          f"fail_min_overlap={unmatched_counts['fail_min_overlap']}  "
+          f"no_blast_hit={unmatched_counts['no_blast_hit']}")
 else:
     print("       no clusters to score")
 print(f"       CSV : {csv_path}")
+print(f"       MEMBER RESULTS: {member_results_path}")
 print(f"       PLOT: {plot_path}")
 PY
 
