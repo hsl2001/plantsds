@@ -7,7 +7,7 @@ set -euo pipefail
 WORKDIR="${WORKDIR:-$(pwd)}"
 LOGDIR="${LOGDIR:-$HOME/log}"
 JOB_NAME="${JOB_NAME:-segtrace-validate}"
-THREADS="${THREADS:-128}"
+THREADS="${THREADS:-32}"
 MEM="${MEM:-480gb}"
 WALLTIME="${WALLTIME:-96:00:00}"
 # Optional command(s) to prepare the environment on the node, e.g.

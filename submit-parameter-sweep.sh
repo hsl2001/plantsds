@@ -8,7 +8,7 @@ set -euo pipefail
 WORKDIR="${WORKDIR:-$(pwd)}"
 LOGDIR="${LOGDIR:-$HOME/log}"
 JOB_NAME="${JOB_NAME:-segtrace-sweep}"
-THREADS="${THREADS:-128}"
+THREADS="${THREADS:-16}"
 MEM="${MEM:-480gb}"
 WALLTIME="${WALLTIME:-96:00:00}"
 QUEUE_NODE="${QUEUE_NODE:-node02}"
