@@ -21,7 +21,7 @@ python3 ./select_angiosperm_genus.py \
   --summary ./selected/angiosperm_genus_complete.tsv
 
 qsub -N "$JOB_NAME" \
-  -l nodes=node02:ppn=${THREADS} \
+  -l select=1:ncpus=${THREADS} \
   -l mem=${MEM} \
   -l walltime=${WALLTIME} \
   -v WORKDIR="${WORKDIR}",THREADS="${THREADS}" \

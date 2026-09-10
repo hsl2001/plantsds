@@ -386,7 +386,10 @@ def bp_intersection(left: dict[str, np.ndarray], right: dict[str, np.ndarray]) -
     return total
 
 
-def reciprocal_match_count(query: dict[str, np.ndarray], target: dict[str, np.ndarray], fraction: float = 0.5) -> int:
+def shorter_overlap_match_count(
+    query: dict[str, np.ndarray], target: dict[str, np.ndarray], fraction: float = 0.5
+) -> int:
+    """Count query intervals overlapping a target by fraction of the shorter interval."""
     matches = 0
     for chrom in query.keys() & target.keys():
         target_array = target[chrom]
@@ -401,7 +404,8 @@ def reciprocal_match_count(query: dict[str, np.ndarray], target: dict[str, np.nd
                 t_start, t_end = target_array[idx]
                 t_length = t_end - t_start
                 overlap = min(q_end, t_end) - max(q_start, t_start)
-                if overlap > 0 and overlap / q_length >= fraction and overlap / t_length >= fraction:
+                shorter_length = min(q_length, t_length)
+                if overlap > 0 and shorter_length > 0 and overlap / shorter_length >= fraction:
                     matches += 1
                     break
                 idx -= 1
@@ -423,8 +427,8 @@ def evaluate_with_numpy(pred_bed: Path, truth_bed: Path) -> dict[str, float]:
     bp_precision = intersect_bp / pred_bp if pred_bp else 0.0
     bp_f1 = f1_score(bp_recall, bp_precision)
 
-    true_positive = reciprocal_match_count(truth, pred, fraction=0.5)
-    matched_pred = reciprocal_match_count(pred, truth, fraction=0.5)
+    true_positive = shorter_overlap_match_count(truth, pred, fraction=0.5)
+    matched_pred = shorter_overlap_match_count(pred, truth, fraction=0.5)
     truth_count = len(truth_intervals)
     pred_count = len(pred_intervals)
     frag_recall = true_positive / truth_count if truth_count else 0.0

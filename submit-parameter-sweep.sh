@@ -30,7 +30,7 @@ export WORKDIR THREADS ENV_SETUP
 mkdir -p "$LOGDIR"
 
 qsub -N "$JOB_NAME" \
-  -l nodes=${QUEUE_NODE}:ppn=${THREADS} \
+    -l select=1:ncpus=${THREADS} \
   -l mem=${MEM} \
   -l walltime=${WALLTIME} \
   -v WORKDIR="${WORKDIR}",THREADS="${THREADS}" \

@@ -17,7 +17,7 @@ OUT_DIR="${OUT_DIR:-sim_benchmark}"
 mkdir -p "$LOGDIR"
 
 qsub -N "$JOB_NAME" \
-  -l nodes=node02:ppn=${THREADS} \
+  -l select=1:ncpus=${THREADS} \
   -l mem=${MEM} \
   -l walltime=${WALLTIME} \
   -v WORKDIR="${WORKDIR}",THREADS="${THREADS}",OUT_DIR="${OUT_DIR}",ENV_SETUP="${ENV_SETUP}" \
