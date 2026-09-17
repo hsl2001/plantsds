@@ -134,10 +134,6 @@ class FastaWriter:
         with fasta_path.with_suffix(fasta_path.suffix + ".fai").open("w") as handle:
             for record in self.records:
                 handle.write("\t".join(str(value) for value in record) + "\n")
-            offset += take
-            if self.column == self.width:
-                self.handle.write(b"\n")
-                self.column = 0
 
 
 def random_dna(rng: random.Random, length: int) -> bytes:
