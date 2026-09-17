@@ -13,7 +13,7 @@ MEM="${MEM:-480gb}"
 WALLTIME="${WALLTIME:-96:00:00}"
 QUEUE_NODE="${QUEUE_NODE:-node02}"
 # Optional command(s) to prepare the environment on the node, e.g.
-# ENV_SETUP='micromamba activate segtrace-compare' (needs uv + numpy).
+# ENV_SETUP='micromamba activate benchmark-segtrace' (needs uv + numpy).
 ENV_SETUP="${ENV_SETUP:-}"
 
 # --- Sweep grid (override via env) ---------------------------------------
@@ -44,7 +44,7 @@ export PATH="$HOME/.local/bin:$PATH"
 ${ENV_SETUP:+$ENV_SETUP}
 
 if command -v micromamba >/dev/null 2>&1; then
-	RUNNER=(micromamba run -n segtrace-compare uv run)
+	RUNNER=(micromamba run -n benchmark-segtrace uv run)
 else
 	RUNNER=(uv run)
 fi

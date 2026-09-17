@@ -29,7 +29,7 @@ cd "$WORKDIR"
 ${ENV_SETUP:+$ENV_SETUP}
 
 if command -v micromamba >/dev/null 2>&1; then
-	RUNNER=(micromamba run -n segtrace-compare uv run)
+	RUNNER=(micromamba run -n benchmark-segtrace uv run)
 else
 	RUNNER=(uv run)
 fi
