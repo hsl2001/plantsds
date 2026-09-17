@@ -62,22 +62,30 @@ def executable(name: str) -> str:
 
 def run_logged(command: list[str], log_path: Path, stdout_path: Path | None = None) -> None:
     log_path.parent.mkdir(parents=True, exist_ok=True)
-    with log_path.open("w") as log_handle:
-        if stdout_path is None:
-            subprocess.run(
-                command,
-                check=True,
-                stdout=subprocess.DEVNULL,
-                stderr=log_handle,
-            )
-        else:
-            with stdout_path.open("w") as stdout_handle:
+    try:
+        with log_path.open("w") as log_handle:
+            if stdout_path is None:
                 subprocess.run(
                     command,
                     check=True,
-                    stdout=stdout_handle,
+                    stdout=subprocess.DEVNULL,
                     stderr=log_handle,
                 )
+            else:
+                with stdout_path.open("w") as stdout_handle:
+                    subprocess.run(
+                        command,
+                        check=True,
+                        stdout=stdout_handle,
+                        stderr=log_handle,
+                    )
+    except subprocess.CalledProcessError as error:
+        stderr = log_path.read_text(errors="replace").strip()
+        detail = stderr[-4000:] if stderr else "(no stderr output)"
+        raise RuntimeError(
+            f"command failed with exit status {error.returncode}: "
+            f"{shlex.join(command)}\n{detail}"
+        ) from error
 
 
 def build_simulation_args(out_dir: Path, seed: int, force: bool) -> argparse.Namespace:
@@ -288,6 +296,8 @@ def main() -> int:
             "--quantity", quantity,
             "--length", args.read_length,
             "--identity", args.identity,
+            "--error_model", "random",
+            "--qscore_model", "ideal",
             "--seed", str(args.seed),
             "--glitches", "0,0,0",
             "--junk_reads", "0",
