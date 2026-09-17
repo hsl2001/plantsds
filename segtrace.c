@@ -127,6 +127,13 @@ int main(int argc, char **argv) {
   int num_files = argc - opt.ind;
   char **files = &argv[opt.ind];
 
+  /* 입력이 하나뿐이면 duplication은 그 유전체 안에서 최소 2개 locus로만
+   * 정의되므로, 파일당 최소 복제 수(-c)는 1일 수 없다 (2 이상이어야 함). */
+  if (num_files == 1 && min_copies == 1) {
+    fprintf(stderr, "[ERROR] With a single input, -c must be >= 2 \n");
+    return 1;
+  }
+
   /* 염기 -> 2bit 코드(A=0,C=1,G=2,T=3) 룩업 테이블 구성.
    * -1은 N 등 유효하지 않은 염기. -m 옵션이 없으면 소문자(soft-masked)도
    * 유효 염기로 취급한다. hash_seed=42는 스케치 재현성을 위한 고정 시드. */

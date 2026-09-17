@@ -139,19 +139,6 @@ class FastaWriter:
                 self.handle.write(b"\n")
                 self.column = 0
 
-    def finish_record(self) -> None:
-        if self.column:
-            self.handle.write(b"\n")
-            self.column = 0
-        if self.current_name:
-            self.records.append((self.current_name, self.current_length, self.current_offset, self.width, self.width + 1))
-            self.current_name = ""
-
-    def write_fai(self, fasta_path: Path) -> None:
-        with fasta_path.with_suffix(fasta_path.suffix + ".fai").open("w") as handle:
-            for record in self.records:
-                handle.write("\t".join(str(value) for value in record) + "\n")
-
 
 def random_dna(rng: random.Random, length: int) -> bytes:
     return rng.randbytes(length).translate(BYTE_TO_BASE)
