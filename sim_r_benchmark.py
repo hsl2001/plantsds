@@ -1,7 +1,7 @@
 #!/usr/bin/env -S uv run
 # /// script
 # requires-python = ">=3.10"
-# dependencies = ["numpy>=1.26"]
+# dependencies = ["numpy>=1.26", "edlib>=1.2.7"]
 # ///
 """Validate SegTrace read mode on Badread-simulated long reads.
 
