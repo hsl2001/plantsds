@@ -30,8 +30,16 @@ export PATH="$HOME/.local/bin:$PATH"
 ${ENV_SETUP:+$ENV_SETUP}
 
 if command -v micromamba >/dev/null 2>&1; then
+  ENV_NAME="benchmark-segtrace"
+  if ! micromamba run -n "$ENV_NAME" python -c 'import edlib' >/dev/null 2>&1; then
+    echo "[INFO] Installing edlib in micromamba environment: $ENV_NAME"
+    micromamba install -n "$ENV_NAME" -y -c bioconda -c conda-forge edlib
+  fi
+  micromamba run -n "$ENV_NAME" python -c \
+    'import edlib, sys; print(f"[INFO] Python: {sys.executable}"); print(f"[INFO] edlib: {edlib.__file__}")'
   RUNNER=(micromamba run -n benchmark-segtrace uv run)
 else
+  python3 -c 'import edlib, sys; print(f"[INFO] Python: {sys.executable}"); print(f"[INFO] edlib: {edlib.__file__}")'
   RUNNER=(uv run)
 fi
 
