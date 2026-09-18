@@ -27,9 +27,9 @@ import sim_benchmark as sb
 
 DEFAULT_SIMULATION = {
     "species": 3,
-    "chromosomes": 10,
-    "chrom_length": 100_000_000,
-    "fragments": 1000,
+    "chromosomes": 3,
+    "chrom_length": 1_000_000,
+    "fragments": 100,
     "min_fragment_length": 1_000,
     "max_fragment_length": 50_000,
     "min_copies": 2,
