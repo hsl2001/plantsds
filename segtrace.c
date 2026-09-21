@@ -26,8 +26,6 @@ static void print_usage(void) {
          "window size])\n"
          "  -c: minimum homologous loci per input file (default: 1; at least\n"
          "      2 loci across inputs; self matches and unique regions excluded)\n"
-         "  -r: long-read mode - window each FASTA/FASTQ record and group "
-         "similar collinear windows\n"
          "  -m: filter soft-masked bases (treat lowercase a/c/g/t as invalid)\n"
          "  -o: output file prefix (default: segtrace)\n"
          "  -p: number of threads (default: 8)\n"
@@ -68,12 +66,12 @@ int main(int argc, char **argv) {
   size_t window_size = 1024, step_size = 0, min_bases = 0;
   uint32_t min_copies = 1;
   const char *out_prefix = "segtrace";
-  int n_threads = 8, filter_masked = 0, read_mode = 0;
+  int n_threads = 8, filter_masked = 0;
 
   /* 단일 대시 옵션 파싱 (ketopt: getopt의 경량 대체) */
   ketopt_t opt = KETOPT_INIT;
   int c;
-  while ((c = ketopt(&opt, argc, argv, 1, "k:s:w:t:b:c:o:p:rmh", 0)) >= 0) {
+  while ((c = ketopt(&opt, argc, argv, 1, "k:s:w:t:b:c:o:p:mh", 0)) >= 0) {
     if (c == 'h') {
       print_usage();
       return 0;
@@ -97,8 +95,6 @@ int main(int argc, char **argv) {
         n_threads = 1;
     } else if (c == 'm')
       filter_masked = 1;
-    else if (c == 'r')
-      read_mode = 1;
     else
       return 1;
   }
@@ -110,9 +106,7 @@ int main(int argc, char **argv) {
   }
   /* 자동 파라미터 결정:
    * step_size는 윈도우의 1/3 (인접 윈도우가 3배 중첩),
-   * min_bases는 윈도우의 1/4 (N이 75% 이상인 윈도우는 스케치하지 않음).
-   * read 모드도 같은 기본 윈도잉을 쓰되, 사용자가 -w/-t/-b를 주면
-   * 그대로 따른다 (read 안에서도 윈도잉이 가능해야 하므로) */
+   * min_bases는 윈도우의 1/4 (N이 75% 이상인 윈도우는 스케치하지 않음). */
   if (step_size == 0)
     step_size = window_size / 3;
   if (step_size == 0)
@@ -148,14 +142,12 @@ int main(int argc, char **argv) {
 
   void *thread_pool = n_threads > 1 ? kt_forpool_init(n_threads) : NULL;
 
-  /* [1단계] 모든 입력을 윈도우 단위로 나누고 각 윈도우의 스케치 추출.
-   * read 모드에서도 read를 윈도우로 자르므로(각 read가 하나의 서열)
-   * 메모리 사용량은 윈도우 모드와 동일한 청크 파이프라인에 의해 제한된다 */
+  /* [1단계] 모든 입력을 윈도우 단위로 나누고 각 윈도우의 스케치 추출. */
   GlobalWindows gw =
       extract_all_windows(files, num_files, &r, scale, window_size,
                           step_size, min_bases, n_threads, thread_pool);
 
-  /* [2단계] 두 모드가 동일한 스케치 후보 탐색과 유사도 판정을 공유한다. */
+  /* [2단계] 스케치 후보 탐색과 유사도 판정. */
   fprintf(stderr,
           "[segtrace] Discovering candidates and computing distances...\n");
   CandidateGraph graph =
@@ -165,21 +157,6 @@ int main(int argc, char **argv) {
   if (thread_pool)
     kt_forpool_destroy(thread_pool);
 
-  double *hap_cov = NULL;
-  if (read_mode) {
-    hap_cov = calloc(num_files, sizeof(*hap_cov));
-    if (!hap_cov) {
-      fprintf(stderr, "[ERROR] Memory allocation failed\n");
-      return 1;
-    }
-    for (int f = 0; f < num_files; f++) {
-      hap_cov[f] = estimate_haploid_coverage(
-          gw.all_hashes, gw.coords, gw.num_sketches, gw.seq_lens,
-          (uint32_t)f, window_size, step_size);
-      fprintf(stderr, "[segtrace] %s: haploid coverage ~ %.2fx\n", files[f],
-              hap_cov[f]);
-    }
-  }
   free(gw.all_hashes); /* 이후 단계에서는 원본 해시 배열이 필요 없음 */
   gw.all_hashes = NULL;
 
@@ -197,13 +174,12 @@ int main(int argc, char **argv) {
 
     /* [5단계] 유전체당 복제 수(min_copies) 미만인 클러스터 그룹 제거 */
     size_t n_filtered = filter_regions_by_copy_count(
-      dup_regions, n_dup_regions, min_copies, hap_cov);
+      dup_regions, n_dup_regions, min_copies);
 
   /* [6단계] BED 형식으로 출력 (최소 SD 길이 미만 구간은 제외) */
   write_dup_bed(out_prefix, dup_regions, n_filtered, gw.seq_lens,
                 window_size < MIN_SD_LEN ? window_size : MIN_SD_LEN);
 
-  free(hap_cov);
   free(dup_regions);
   free_global_windows(&gw);
   return 0;
@@ -471,7 +447,7 @@ GlobalWindows extract_all_windows(char **files, int num_files,
 
     while (kseq_read(ks) >= 0) {
       size_t len = ks->seq.l;
-      /* 윈도우 크기보다 짧은 서열(read 포함)은 스케치할 수 없으므로 건너뛴다 */
+      /* 윈도우 크기보다 짧은 서열은 스케치할 수 없으므로 건너뛴다 */
       if (len < window_size)
         continue;
 
@@ -1047,78 +1023,6 @@ CandidateGraph discover_and_compute(const uint32_t *all_hashes,
       .pairs = w.t_pairs, .counts = w.t_n_pairs, .n_threads = n_threads};
 }
 
-/* 파일별로 서로 겹치지 않는 window의 sampled k-mer 빈도를 모아 haploid
- * coverage를 추정한다. singleton은 시퀀싱 오류가 대부분이므로 제외한다. */
-double estimate_haploid_coverage(const uint32_t *all_hashes,
-                                 const WindowCoord *coords, size_t n_windows,
-                                 const GenomeSeqLen *seq_lens,
-                                 uint32_t file_id, size_t window_size,
-                                 size_t step_size) {
-  size_t total_hashes = 0, last_seq = SIZE_MAX, next_start = 0;
-  for (size_t i = 0; i < n_windows; i++) {
-    const WindowCoord *wc = &coords[i];
-    if (seq_lens[wc->seq_id].file_id != file_id)
-      continue;
-    if (wc->seq_id != last_seq) {
-      last_seq = wc->seq_id;
-      next_start = 0;
-    }
-    size_t start = (size_t)wc->window_idx * step_size;
-    if (wc->sketch_size && start >= next_start) {
-      total_hashes += wc->sketch_size;
-      next_start = start + window_size;
-    }
-  }
-  if (total_hashes == 0)
-    return 0.0;
-
-  uint32_t *hashes = malloc(total_hashes * sizeof(*hashes));
-  if (!hashes) {
-    fprintf(stderr, "[ERROR] Memory allocation failed\n");
-    exit(1);
-  }
-  size_t out = 0;
-  last_seq = SIZE_MAX;
-  next_start = 0;
-  for (size_t i = 0; i < n_windows; i++) {
-    const WindowCoord *wc = &coords[i];
-    if (seq_lens[wc->seq_id].file_id != file_id)
-      continue;
-    if (wc->seq_id != last_seq) {
-      last_seq = wc->seq_id;
-      next_start = 0;
-    }
-    size_t start = (size_t)wc->window_idx * step_size;
-    if (wc->sketch_size && start >= next_start) {
-      memcpy(hashes + out, all_hashes + wc->sketch_offset,
-             wc->sketch_size * sizeof(*hashes));
-      out += wc->sketch_size;
-      next_start = start + window_size;
-    }
-  }
-  qsort(hashes, out, sizeof(*hashes), compare_uint32);
-
-  enum { MAX_KMER_COVERAGE = 4096 };
-  size_t histogram[MAX_KMER_COVERAGE] = {0};
-  for (size_t i = 0; i < out;) {
-    size_t j = i + 1;
-    while (j < out && hashes[j] == hashes[i])
-      j++;
-    if (j - i < MAX_KMER_COVERAGE)
-      histogram[j - i]++;
-    i = j;
-  }
-  free(hashes);
-
-  size_t mode = 1, mode_count = 0;
-  for (size_t i = 2; i < MAX_KMER_COVERAGE; i++)
-    if (histogram[i] > mode_count) {
-      mode_count = histogram[i];
-      mode = i;
-    }
-  return (double)mode;
-}
-
 /* 인코딩된 값에서 윈도우 id(하위 28비트) 추출 */
 static inline uint32_t candidate_window(uint32_t encoded) {
   return encoded;
@@ -1282,8 +1186,7 @@ void free_candidate_graph(CandidateGraph *graph) {
  * 탈락한 클러스터로 인해 번호가 듬성듬성해지지 않도록, 살아남은 클러스터만
  * 등장 순서대로 1부터 다시 번호를 매긴다. */
 size_t filter_regions_by_copy_count(SegtraceDupRegion *regions, size_t n,
-                                    uint32_t min_copies,
-                                    const double *hap_cov) {
+                                    uint32_t min_copies) {
   if (n == 0)
     return 0;
   if (min_copies < 1)
@@ -1303,10 +1206,7 @@ size_t filter_regions_by_copy_count(SegtraceDupRegion *regions, size_t n,
       size_t j = i + 1;
       while (j < cj && regions[j].file_id == regions[i].file_id)
         j++;
-      uint32_t copies =
-          hap_cov && hap_cov[regions[i].file_id] > 0.0
-              ? (uint32_t)((j - i) / hap_cov[regions[i].file_id] + 0.5)
-              : (uint32_t)(j - i);
+      uint32_t copies = (uint32_t)(j - i);
         if (copies >= min_copies) {
         for (size_t k = i; k < j; k++) {
           regions[out_count++] = regions[k];
@@ -1332,8 +1232,7 @@ size_t filter_regions_by_copy_count(SegtraceDupRegion *regions, size_t n,
 
 /* 최종 구간을 "<prefix>.seg.bed"에 기록.
  * chrom 컬럼은 "파일명-서열명" 형태, 4번째 컬럼은 클러스터 id.
- * read 모드의 .seg.bed와 파일명을 통일해 후속 파이프라인이 하나의
- * 이름 규칙만 알면 되게 한다. min_sd_len 미만의 짧은 구간은 출력하지 않음 */
+ * min_sd_len 미만의 짧은 구간은 출력하지 않음 */
 void write_dup_bed(const char *out_prefix, const SegtraceDupRegion *dup_regions,
                    size_t n_merged, const GenomeSeqLen *seq_lens,
                    size_t min_sd_len) {
