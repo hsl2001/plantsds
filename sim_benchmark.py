@@ -782,7 +782,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-fragment-length", type=int, default=50_000, help="Maximum source fragment length")
     parser.add_argument("--min-copies", type=int, default=2, help="Minimum copies per source fragment")
     parser.add_argument("--max-copies", type=int, default=10, help="Maximum copies per source fragment")
-    parser.add_argument("--max-snp-rate", type=float, default=0.10, help="Maximum SNP rate per copy")
+    parser.add_argument("--max-snp-rate", type=float, default=0.05, help="Maximum SNP rate per copy")
     parser.add_argument("--max-indel-rate", type=float, default=0.01, help="Maximum INDEL rate per copy")
     parser.add_argument("--filler-chunk", type=int, default=1_000_000, help="Random filler chunk size")
     parser.add_argument("--skip-tools", action="store_true", help="Only generate FASTA and truth BED")

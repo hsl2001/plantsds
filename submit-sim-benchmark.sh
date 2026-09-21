@@ -12,7 +12,7 @@ MEM="${MEM:-480gb}"
 WALLTIME="${WALLTIME:-96:00:00}"
 # Optional command(s) to prepare the environment on the node.
 ENV_SETUP="${ENV_SETUP:-}"
-OUT_DIR="${OUT_DIR:-sim_benchmark}"
+OUT_DIR="${OUT_DIR:-benchmark}"
 
 mkdir -p "$LOGDIR"
 
