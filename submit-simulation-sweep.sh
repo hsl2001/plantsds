@@ -126,6 +126,7 @@ def run_segtrace_with_defaults(segtrace_bin: str, paths: sb.SimulationPaths, wor
     prediction = prefix.with_suffix(".seg.bed")
     command = [
         str(executable), "-o", str(prefix), "-p", str(threads),
+        "-c", os.environ["MIN_COPIES"],
         *[str(path) for path in paths.fasta_paths],
     ]
     try:
