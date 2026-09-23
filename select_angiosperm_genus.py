@@ -3,6 +3,7 @@ import argparse
 import glob
 import gzip
 import json
+import os
 import re
 import sys
 import time
@@ -71,9 +72,12 @@ def filter_organelle_from_fasta(in_path: Path, out_path: Path) -> tuple[int, int
     discarded = 0
     discarded_names = []
 
+    # Write to a temp file and atomically rename so an interrupted run never
+    # leaves a truncated output that a later resume would treat as complete.
+    tmp_path = out_path.with_name(out_path.name + ".partial")
     is_writing = False
     with open_in(in_path, "rt", encoding="utf-8", errors="replace") as fin, \
-         open(out_path, "w", encoding="utf-8") as fout:
+         open(tmp_path, "w", encoding="utf-8") as fout:
         for line in fin:
             if line.startswith(">"):
                 if is_organelle_header(line):
@@ -88,6 +92,7 @@ def filter_organelle_from_fasta(in_path: Path, out_path: Path) -> tuple[int, int
             elif is_writing:
                 fout.write(line)
 
+    os.replace(tmp_path, out_path)
     return kept, discarded, discarded_names
 
 
@@ -309,6 +314,20 @@ def main():
     fasta_paths = []
     total_organelles_discarded = 0
 
+    # Resume support: recover per-accession organelle counts from a prior run so
+    # rewriting the summary keeps totals accurate for already-filtered FASTAs.
+    prior_discarded = {}
+    if summary_path.exists():
+        with open(summary_path) as prev:
+            prev.readline()
+            for line in prev:
+                cols = line.rstrip("\n").split("\t")
+                if len(cols) >= 13 and cols[3]:
+                    try:
+                        prior_discarded[cols[3]] = int(cols[12] or 0)
+                    except ValueError:
+                        pass
+
     with open(summary_path, "w") as summary:
         summary.write(
             "reason\tgenus_tax_id\tgenus\taccession\tsize_bp\tassembly_level\t"
@@ -326,11 +345,15 @@ def main():
                     if stem.endswith(".fna") or stem.endswith(".fasta") or stem.endswith(".fa"):
                         stem = Path(stem).stem
                     clean_fasta = clean_dir / f"{record['accession']}_{stem}.nuclear.fna"
-                    kept, discarded_count, discarded_names = filter_organelle_from_fasta(Path(raw_fasta), clean_fasta)
+                    if clean_fasta.exists():
+                        # Already filtered in a previous run; skip re-processing.
+                        discarded_count = prior_discarded.get(record["accession"], 0)
+                    else:
+                        kept, discarded_count, discarded_names = filter_organelle_from_fasta(Path(raw_fasta), clean_fasta)
+                        if discarded_count > 0:
+                            print(f"[organelle] {record['accession']}: discarded {discarded_count} organelle sequences: {','.join(discarded_names)}", file=sys.stderr)
                     used_fasta = str(clean_fasta)
                     total_organelles_discarded += discarded_count
-                    if discarded_count > 0:
-                        print(f"[organelle] {record['accession']}: discarded {discarded_count} organelle sequences: {','.join(discarded_names)}", file=sys.stderr)
                 else:
                     used_fasta = raw_fasta
                 fasta_paths.append(used_fasta)

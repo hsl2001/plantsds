@@ -12,6 +12,9 @@ mkdir -p "$LOGDIR"
 cd "$WORKDIR"
 mkdir -p selected results selected/clean_fasta
 
+# Fetch any NCBI FASTAs that are missing locally so selection does not abort.
+DATA_DIR="./eukaryotic_data/ncbi_dataset/data" ./download_missing.sh
+
 python3 ./select_angiosperm_genus.py \
   --dataset-dir ./eukaryotic_data/ncbi_dataset/data \
   --report ./eukaryotic_data/ncbi_dataset/data/assembly_data_report.jsonl \
