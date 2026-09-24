@@ -3,7 +3,7 @@ set -euo pipefail
 
 WORKDIR="${WORKDIR:-$(pwd)}"
 LOGDIR="${LOGDIR:-$HOME/log}"
-JOB_NAME="${JOB_NAME:-segtrace-angio-genus}"
+JOB_NAME="${JOB_NAME:-segtrace-angio}"
 THREADS="${THREADS:-128}"
 MEM="${MEM:-480gb}"
 WALLTIME="${WALLTIME:-96:00:00}"
