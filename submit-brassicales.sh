@@ -28,16 +28,17 @@ from pathlib import Path
 
 
 taxa = [
-    ("Brassicaceae", "Arabidopsis_thaliana", "Arabidopsis thaliana", ()),
-    ("Brassicaceae", "Arabidopsis_lyrata", "Arabidopsis lyrata", ()),
-    ("Brassicaceae", "Capsella_rubella", "Capsella rubella", ()),
-    ("Brassicaceae", "Arabis_alpina", "Arabis alpina", ()),
-    ("Brassicaceae", "Brassica_rapa", "Brassica rapa", ()),
-    ("Brassicaceae", "Aethionema_arabicum", "Aethionema arabicum", ()),
-    ("Cleomaceae", "Gynandropsis_gynandra", "Gynandropsis gynandra", ("Cleome gynandra",)),
-    ("Caricaceae", "Carica_papaya", "Carica papaya", ()),
-    ("Moringaceae", "Moringa_oleifera", "Moringa oleifera", ()),
-    ("Bixaceae", "Bixa_orellana", "Bixa orellana", ()),
+    ("Brassicaceae", "Col-0", "Arabidopsis thaliana", (), "GCA_978657495.1"),
+    ("Brassicaceae", "Ler-0", "Arabidopsis thaliana", (), "GCA_946406525.1"),
+    ("Brassicaceae", "Arabidopsis_lyrata", "Arabidopsis lyrata", (), None),
+    ("Brassicaceae", "Capsella_rubella", "Capsella rubella", (), None),
+    ("Brassicaceae", "Arabis_alpina", "Arabis alpina", (), None),
+    ("Brassicaceae", "Brassica_rapa", "Brassica rapa", (), None),
+    ("Brassicaceae", "Aethionema_arabicum", "Aethionema arabicum", (), None),
+    ("Cleomaceae", "Gynandropsis_gynandra", "Gynandropsis gynandra", ("Cleome gynandra",), None),
+    ("Caricaceae", "Carica_papaya", "Carica papaya", (), None),
+    ("Moringaceae", "Moringa_oleifera", "Moringa oleifera", (), None),
+    ("Bixaceae", "Bixa_orellana", "Bixa orellana", (), None),
 ]
 taxon_url = "https://api.ncbi.nlm.nih.gov/datasets/v2/genome/taxon/"
 accession_url = "https://api.ncbi.nlm.nih.gov/datasets/v2/genome/accession/"
@@ -90,6 +91,12 @@ def reports_for(species):
     return list(reports.values())
 
 
+def report_for(accession):
+    with request(accession_url + accession + "/dataset_report") as response:
+        reports = json.load(response).get("reports", [])
+    return next((report for report in reports if report.get("accession") == accession), None)
+
+
 def metric(stats, name):
     try:
         return int(stats.get(name) or 0)
@@ -123,14 +130,16 @@ def quality_key(report):
     )
 
 
-def select_assembly(family, label, species, aliases):
+def select_assembly(family, label, species, aliases, pinned_accession):
     expected = {species_key(species), *(species_key(alias) for alias in aliases)}
+    reports = [report_for(pinned_accession)] if pinned_accession else reports_for(species)
     candidates = [
-        report for report in reports_for(species)
+        report for report in reports
+        if report is not None
         if species_key(report.get("organism", {}).get("organism_name", "")) in expected
     ]
     if not candidates:
-        raise RuntimeError(f"no current NCBI genome assembly found for {species}")
+        raise RuntimeError(f"no NCBI genome assembly found for {species} ({pinned_accession or 'best available'})")
     report = max(candidates, key=quality_key)
     info = report.get("assembly_info", {})
     stats = report.get("assembly_stats", {})
@@ -222,8 +231,8 @@ def clean_fasta(source, destination, accession):
 
 
 records = []
-for family, label, species, aliases in taxa:
-    record = select_assembly(family, label, species, aliases)
+for family, label, species, aliases, pinned_accession in taxa:
+    record = select_assembly(family, label, species, aliases, pinned_accession)
     raw = raw_dir / f"{record['accession']}_genomic.fna"
     clean = clean_dir / f"{record['accession']}_{label}.nuclear.fna"
     if not raw.is_file() or raw.stat().st_size == 0:
@@ -241,7 +250,7 @@ for family, label, species, aliases in taxa:
 
 with (root / "genomes.tsv").open("w") as handle:
     columns = (
-        "family", "species", "accession", "assembly", "level", "refseq_category",
+        "family", "label", "species", "accession", "assembly", "level", "refseq_category",
         "busco_complete", "contig_n50", "scaffold_n50", "size_bp", "raw_fasta", "used_fasta",
     )
     handle.write("\t".join(columns) + "\n")
@@ -264,8 +273,8 @@ set -euo pipefail
 
 cd "$WORKDIR"
 mapfile -t FASTAS < selected/brassicales/genomes.files
-if [[ ${#FASTAS[@]} -ne 10 ]]; then
-    echo "Expected ten Brassicales FASTAs" >&2
+if [[ ${#FASTAS[@]} -ne 11 ]]; then
+    echo "Expected eleven Brassicales FASTAs" >&2
     exit 1
 fi
 
