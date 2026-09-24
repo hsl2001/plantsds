@@ -175,11 +175,7 @@ if [[ ${#FASTAS[@]} -ne 7 ]]; then
   exit 1
 fi
 
-stages=(Ler-0 Arabidopsis_lyrata Capsella_rubella Arabis_alpina Brassica_rapa Aethionema_arabicum)
-for index in "${!stages[@]}"; do
-  count=$((index + 2))
-  output="results/brassicaceae/BRASSICACEAE_0${count}_${stages[index]}"
-  printf '[segtrace] %s: first %d genomes\n' "$output" "$count"
-  ./segtrace -p "$THREADS" -c 1 -o "$output" "${FASTAS[@]:0:count}"
-done
+output="results/brassicaceae/BRASSICACEAE_07_Aethionema_arabicum"
+printf '[segtrace] one run with %d genomes: %s\n' "${#FASTAS[@]}" "$output"
+./segtrace -p "$THREADS" -c 1 -o "$output" "${FASTAS[@]}"
 PBS
