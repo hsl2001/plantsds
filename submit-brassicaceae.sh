@@ -30,6 +30,7 @@ assemblies = [
     ("Col-0", "Arabidopsis thaliana", "GCA_978657495.1", "TAIR12"),
     ("Ler-0", "Arabidopsis thaliana", "GCA_946406525.1", "Ler-0.7213.PacbioHiFiAssembly"),
     ("Arabidopsis_lyrata", "Arabidopsis lyrata", "GCA_975146905.1", "PU6_v3"),
+    ("Capsella_rubella", "Capsella rubella", "GCA_059238525.1", "Crubella_RAM_v1.0"),
     ("Arabis_alpina", "Arabis alpina", "GCA_900128785.1", "MPIPZ.v5"),
     ("Brassica_rapa", "Brassica rapa", "GCA_060414235.1", "ASM6041423v1"),
     ("Aethionema_arabicum", "Aethionema arabicum", "GCA_000411095.1", "VEGI_AA_v_1.0"),
@@ -169,12 +170,12 @@ set -euo pipefail
 
 cd "$WORKDIR"
 mapfile -t FASTAS < selected/brassicaceae/genomes.files
-if [[ ${#FASTAS[@]} -ne 6 ]]; then
-  echo "Expected six Brassicaceae FASTAs" >&2
+if [[ ${#FASTAS[@]} -ne 7 ]]; then
+    echo "Expected seven Brassicaceae FASTAs" >&2
   exit 1
 fi
 
-stages=(Ler-0 Arabidopsis_lyrata Arabis_alpina Brassica_rapa Aethionema_arabicum)
+stages=(Ler-0 Arabidopsis_lyrata Capsella_rubella Arabis_alpina Brassica_rapa Aethionema_arabicum)
 for index in "${!stages[@]}"; do
   count=$((index + 2))
   output="results/brassicaceae/BRASSICACEAE_0${count}_${stages[index]}"
