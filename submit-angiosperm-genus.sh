@@ -24,6 +24,8 @@ import shutil
 import sys
 import tempfile
 import time
+import urllib.error
+import urllib.parse
 import urllib.request
 import zipfile
 import zlib
@@ -54,6 +56,40 @@ def species_key(name):
   words = re.findall(r"[A-Za-z]+", ALIASES.get(name, name))
   return " ".join(words[:2]).casefold()
 
+# Throttle to <=3 req/s and retry on HTTP 429 so bulk NCBI lookups don't get rate-limited.
+_last_request = [0.0]
+def http_json(url):
+  for attempt in range(5):
+    pause = 0.34 - (time.time() - _last_request[0])
+    if pause > 0:
+      time.sleep(pause)
+    _last_request[0] = time.time()
+    try:
+      with urllib.request.urlopen(url, timeout=60) as response:
+        return json.load(response)
+    except urllib.error.HTTPError as error:
+      if error.code == 429 and attempt < 4:
+        time.sleep(2 * (attempt + 1))
+        continue
+      raise
+
+def resolve_records(species):
+  url = "https://api.ncbi.nlm.nih.gov/datasets/v2/genome/taxon/" + urllib.parse.quote(species) + "/dataset_report?filters.assembly_version=current&page_size=50"
+  found = []
+  for report in http_json(url).get("reports", []):
+    info = report.get("assembly_info", {})
+    stats = report.get("assembly_stats", {})
+    accession = report.get("accession", "")
+    if not accession.startswith(("GCA_", "GCF_")):
+      continue
+    found.append({
+      "accession": accession, "name": species, "size": int(stats.get("total_sequence_length") or 0),
+      "level": info.get("assembly_level", ""),
+      "is_ref": int(str(info.get("refseq_category", "")).lower() in ("reference genome", "representative genome")),
+      "busco": 0, "scaffold_n50": int(stats.get("scaffold_n50") or 0), "contig_n50": int(stats.get("contig_n50") or 0),
+    })
+  return found
+
 records_by_name = {}
 with open(report_path) as handle:
   for line in handle:
@@ -77,14 +113,14 @@ with open(report_path) as handle:
 selected = []
 missing_species = []
 for species in SPECIES:
-  candidates = records_by_name.get(species_key(species), [])
+  candidates = records_by_name.get(species_key(species), []) or resolve_records(ALIASES.get(species, species))
   if candidates:
     selected.append(max(candidates, key=key))
   else:
     missing_species.append(species)
 if missing_species:
   missing_species_path.write_text("\n".join(missing_species) + "\n")
-  print(f"[select] {len(missing_species)} AngioWGD species absent from NCBI report; skipped (see {missing_species_path})", file=sys.stderr)
+  print(f"[select] {len(missing_species)} AngioWGD species have no NCBI assembly; skipped (see {missing_species_path})", file=sys.stderr)
 
 def genome_paths():
   return {path.parent.name: path for path in data_dir.glob("*/*_genomic.fna*")}
@@ -122,8 +158,9 @@ if missing_fastas:
   raise SystemExit("missing NCBI genomic FASTAs: " + ", ".join(missing_fastas))
 
 def is_organelle(header):
-  text = header[1:].strip()
-  return ORGANELLE.fullmatch(text.split()[0]) is not None or any(word in text.lower() for word in ORGANELLE_WORDS)
+  parts = header[1:].split()
+  first = parts[0] if parts else ""
+  return ORGANELLE.fullmatch(first) is not None or any(word in header.lower() for word in ORGANELLE_WORDS)
 
 def filter_organelle(source, destination):
   opener = gzip.open if source.suffix == ".gz" else open
