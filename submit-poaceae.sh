@@ -28,8 +28,8 @@ from pathlib import Path
 
 
 taxa = [
-    ("Oryzoideae", "T2T-NIP", "Oryza sativa Japonica Group", (), "GCF_034140825.1", "AGIS1.0"),
-    ("Oryzoideae", "Indica_best", "Oryza sativa Indica Group", (), None, None),
+    ("Oryzoideae", "Nipponbare", "Oryza sativa Japonica Group", (), "GCF_034140825.1", "AGIS1.0"),
+    ("Oryzoideae", "Indica", "Oryza sativa Indica Group", (), None, None),
     ("Oryzoideae", "Oryza_glaberrima", "Oryza glaberrima", (), None, None),
     ("Bambusoideae", "Phyllostachys_edulis", "Phyllostachys edulis", (), None, None),
     ("Pooideae", "Brachypodium_distachyon", "Brachypodium distachyon", (), None, None),
