@@ -4,8 +4,8 @@ set -euo pipefail
 WORKDIR="${WORKDIR:-$(pwd)}"
 LOGDIR="${LOGDIR:-$HOME/log}"
 JOB_NAME="${JOB_NAME:-segtrace-brassicaceae}"
-THREADS="${THREADS:-128}"
-MEM="${MEM:-480gb}"
+THREADS="${THREADS:-64}"
+MEM="${MEM:-120gb}"
 WALLTIME="${WALLTIME:-96:00:00}"
 
 mkdir -p "$LOGDIR"
