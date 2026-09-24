@@ -24,7 +24,6 @@ import shutil
 import sys
 import tempfile
 import time
-import urllib.parse
 import urllib.request
 import zipfile
 import zlib
@@ -56,91 +55,36 @@ def species_key(name):
   return " ".join(words[:2]).casefold()
 
 records_by_name = {}
-records_by_taxid = {}
-with open(report_path) as report:
-  for line in report:
+with open(report_path) as handle:
+  for line in handle:
     data = json.loads(line)
     stats = data.get("assemblyStats", {})
     accession = data.get("accession") or data.get("currentAccession")
     name = data.get("organism", {}).get("organismName", "")
-    tax_id = data.get("organism", {}).get("taxId")
     size = int(stats.get("totalSequenceLength") or stats.get("totalUngappedLength") or 0)
     if not accession or not name or not size:
       continue
     busco = stats.get("busco", {})
     record = {
-      "accession": accession, "name": name, "tax_id": int(tax_id or 0), "size": size,
+      "accession": accession, "name": name, "size": size,
       "level": data.get("assemblyInfo", {}).get("assemblyLevel", ""),
       "is_ref": int(data.get("assemblyInfo", {}).get("assemblyCategory", "").lower() in ("reference genome", "representative genome")),
       "busco": float(busco.get("complete") or busco.get("buscoScore") or 0),
       "scaffold_n50": int(stats.get("scaffoldN50") or 0), "contig_n50": int(stats.get("contigN50") or 0),
     }
     records_by_name.setdefault(species_key(name), []).append(record)
-    if record["tax_id"]:
-      records_by_taxid.setdefault(record["tax_id"], []).append(record)
-
-def taxonomy_id(species):
-  term = urllib.parse.urlencode({"db": "taxonomy", "term": f'"{species}"[Scientific Name]', "retmode": "json"})
-  url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi?" + term
-  for attempt in range(3):
-    try:
-      with urllib.request.urlopen(url, timeout=60) as response:
-        ids = json.load(response).get("esearchresult", {}).get("idlist", [])
-      return int(ids[0]) if ids else None
-    except Exception:
-      if attempt == 2:
-        raise
-      time.sleep(2 * (attempt + 1))
-
-def assembly_record_from_ncbi(species, tax_id):
-  if not tax_id:
-    return None
-  search = urllib.parse.urlencode({
-    "db": "assembly", "term": f"txid{tax_id}[Organism:exp]",
-    "retmax": 100, "retmode": "json",
-  })
-  search_url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi?" + search
-  with urllib.request.urlopen(search_url, timeout=60) as response:
-    ids = json.load(response).get("esearchresult", {}).get("idlist", [])
-  if not ids:
-    return None
-  summary = urllib.parse.urlencode({"db": "assembly", "id": ",".join(ids), "retmode": "json"})
-  summary_url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi?" + summary
-  with urllib.request.urlopen(summary_url, timeout=60) as response:
-    documents = json.load(response).get("result", {})
-  candidates = []
-  for uid in ids:
-    document = documents.get(uid, {})
-    accession = document.get("AssemblyAccession", "")
-    if not accession.startswith(("GCA_", "GCF_")):
-      continue
-    candidates.append({
-      "accession": accession, "name": species, "tax_id": tax_id, "size": 0,
-      "level": document.get("AssemblyStatus", ""),
-      "is_ref": int(document.get("RefSeq_category", "").lower() in ("reference genome", "representative genome")),
-      "busco": 0, "scaffold_n50": 0, "contig_n50": 0,
-    })
-  return max(candidates, key=key) if candidates else None
 
 selected = []
 missing_species = []
 for species in SPECIES:
   candidates = records_by_name.get(species_key(species), [])
-  if not candidates:
-    tax_id = taxonomy_id(ALIASES.get(species, species))
-    candidates = records_by_taxid.get(tax_id, []) if tax_id else []
-    if not candidates:
-      fallback = assembly_record_from_ncbi(species, tax_id)
-      candidates = [fallback] if fallback else []
-  if not candidates:
-    missing_species.append(species)
-  else:
+  if candidates:
     selected.append(max(candidates, key=key))
+  else:
+    missing_species.append(species)
 if missing_species:
   missing_species_path.write_text("\n".join(missing_species) + "\n")
-  print(f"[select] {len(missing_species)} AngioWGD species have no NCBI whole-genome assembly; written to {missing_species_path}", file=sys.stderr)
-if len({record["accession"] for record in selected}) != len(selected):
-  raise SystemExit("multiple AngioWGD species resolved to the same NCBI accession")
+  print(f"[select] {len(missing_species)} AngioWGD species absent from NCBI report; skipped (see {missing_species_path})", file=sys.stderr)
 
 def genome_paths():
   return {path.parent.name: path for path in data_dir.glob("*/*_genomic.fna*")}
