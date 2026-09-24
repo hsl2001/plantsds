@@ -9,6 +9,8 @@ sedef*
 *.bed
 *.png
 *.csv
+*.npz
+*.txt
 venv/
 *.gz
 *.log

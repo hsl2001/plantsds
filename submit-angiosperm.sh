@@ -123,7 +123,12 @@ if missing_species:
   print(f"[select] {len(missing_species)} AngioWGD species have no NCBI assembly; skipped (see {missing_species_path})", file=sys.stderr)
 
 def genome_paths():
-  return {path.parent.name: path for path in data_dir.glob("*/*_genomic.fna*")}
+  paths = list(data_dir.glob("*/*.fna")) + list(data_dir.glob("*/*.fasta"))
+  return {
+    path.parent.name: path
+    for path in paths
+    if path.is_file()
+  }
 
 def download(accession):
   url = f"https://api.ncbi.nlm.nih.gov/datasets/v2/genome/accession/{accession}/download?include_annotation_type=GENOME_FASTA"
