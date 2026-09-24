@@ -107,9 +107,8 @@ def collect_records(bed, reference, workdir):
             if len(fields) != 4:
                 raise ValueError(f"{bed}:{line_number} has {len(fields)} columns; expected 4")
             sequence_name, start, end, cluster_id = fields
-            if sequence_genome_id(sequence_name) in excluded:
-                continue
-            pair_output.write(f"{cluster_id}\t{genome_id(sequence_name)}\n")
+            if genome_id(sequence_name) not in excluded:
+                pair_output.write(f"{cluster_id}\t{genome_id(sequence_name)}\n")
             if is_reference_sequence(sequence_name, reference):
                 reference_output.write(f"{cluster_id}\t{sequence_name}\t{start}\t{end}\n")
     return pairs, reference_segments
@@ -146,7 +145,7 @@ def load_reference_segments(reference_segments, cluster_counts, include_nonchrom
         for line in source:
             cluster_id, sequence_name, start, end = line.rstrip("\n").split("\t")
             if include_nonchromosomal or not NON_CHROMOSOMAL_RE.search(sequence_name):
-                by_sequence[sequence_name].append((int(start), int(end), counts[cluster_id]))
+                by_sequence[sequence_name].append((int(start), int(end), counts.get(cluster_id, 0)))
     return dict(sorted(by_sequence.items(), key=lambda item: chromosome_key(item[0])))
 
 
@@ -162,7 +161,7 @@ def plot_segments(by_sequence, reference, output, dpi):
         layout="constrained",
     )
     maximum_count = max(count for segments in by_sequence.values() for _, _, count in segments)
-    norm = Normalize(vmin=1, vmax=max(2, maximum_count))
+    norm = Normalize(vmin=0, vmax=max(1, maximum_count))
     cmap = plt.get_cmap("viridis")
 
     for axis, (sequence_name, segments) in zip(axes[:, 0], by_sequence.items()):
