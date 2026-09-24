@@ -45,6 +45,7 @@ report_path = data_dir / "assembly_data_report.jsonl"
 clean_dir = selected_dir / "clean_fasta"
 out_path = selected_dir / "angio_wgd_genomes.files"
 summary_path = selected_dir / "angio_wgd_genomes.tsv"
+missing_species_path = selected_dir / "angio_wgd_missing_species.txt"
 clean_dir.mkdir(parents=True, exist_ok=True)
 
 def key(record):
@@ -91,6 +92,36 @@ def taxonomy_id(species):
         raise
       time.sleep(2 * (attempt + 1))
 
+def assembly_record_from_ncbi(species, tax_id):
+  if not tax_id:
+    return None
+  search = urllib.parse.urlencode({
+    "db": "assembly", "term": f"txid{tax_id}[Organism:exp]",
+    "retmax": 100, "retmode": "json",
+  })
+  search_url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi?" + search
+  with urllib.request.urlopen(search_url, timeout=60) as response:
+    ids = json.load(response).get("esearchresult", {}).get("idlist", [])
+  if not ids:
+    return None
+  summary = urllib.parse.urlencode({"db": "assembly", "id": ",".join(ids), "retmode": "json"})
+  summary_url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi?" + summary
+  with urllib.request.urlopen(summary_url, timeout=60) as response:
+    documents = json.load(response).get("result", {})
+  candidates = []
+  for uid in ids:
+    document = documents.get(uid, {})
+    accession = document.get("AssemblyAccession", "")
+    if not accession.startswith(("GCA_", "GCF_")):
+      continue
+    candidates.append({
+      "accession": accession, "name": species, "tax_id": tax_id, "size": 0,
+      "level": document.get("AssemblyStatus", ""),
+      "is_ref": int(document.get("RefSeq_category", "").lower() in ("reference genome", "representative genome")),
+      "busco": 0, "scaffold_n50": 0, "contig_n50": 0,
+    })
+  return max(candidates, key=key) if candidates else None
+
 selected = []
 missing_species = []
 for species in SPECIES:
@@ -98,12 +129,16 @@ for species in SPECIES:
   if not candidates:
     tax_id = taxonomy_id(ALIASES.get(species, species))
     candidates = records_by_taxid.get(tax_id, []) if tax_id else []
+    if not candidates:
+      fallback = assembly_record_from_ncbi(species, tax_id)
+      candidates = [fallback] if fallback else []
   if not candidates:
     missing_species.append(species)
   else:
     selected.append(max(candidates, key=key))
 if missing_species:
-  raise SystemExit("species absent from NCBI report: " + ", ".join(missing_species[:20]))
+  missing_species_path.write_text("\n".join(missing_species) + "\n")
+  print(f"[select] {len(missing_species)} AngioWGD species have no NCBI whole-genome assembly; written to {missing_species_path}", file=sys.stderr)
 if len({record["accession"] for record in selected}) != len(selected):
   raise SystemExit("multiple AngioWGD species resolved to the same NCBI accession")
 
@@ -175,6 +210,7 @@ with open(out_path, "w") as output, open(summary_path, "w") as summary:
     summary.write(f"{record['name']}\t{record['accession']}\t{record['size']}\t{record['level']}\t{raw}\t{clean}\t{discarded}\n")
 print(f"selected_species={len(selected)}")
 print(f"written_fastas={len(selected)}")
+print(f"missing_ncbi_whole_genomes={len(missing_species)}")
 PY
 
 qsub -N "$JOB_NAME" \
