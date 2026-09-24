@@ -24,6 +24,7 @@ import shutil
 import sys
 import tempfile
 import time
+import urllib.parse
 import urllib.request
 import zipfile
 import zlib
@@ -49,30 +50,54 @@ clean_dir.mkdir(parents=True, exist_ok=True)
 def key(record):
   return (LEVEL_SCORE.get(record["level"].lower(), -1), record["is_ref"], record["busco"], record["scaffold_n50"], record["contig_n50"], record["size"])
 
+def species_key(name):
+  words = re.findall(r"[A-Za-z]+", ALIASES.get(name, name))
+  return " ".join(words[:2]).casefold()
+
 records_by_name = {}
+records_by_taxid = {}
 with open(report_path) as report:
   for line in report:
     data = json.loads(line)
     stats = data.get("assemblyStats", {})
     accession = data.get("accession") or data.get("currentAccession")
     name = data.get("organism", {}).get("organismName", "")
+    tax_id = data.get("organism", {}).get("taxId")
     size = int(stats.get("totalSequenceLength") or stats.get("totalUngappedLength") or 0)
     if not accession or not name or not size:
       continue
     busco = stats.get("busco", {})
     record = {
-      "accession": accession, "name": name, "size": size,
+      "accession": accession, "name": name, "tax_id": int(tax_id or 0), "size": size,
       "level": data.get("assemblyInfo", {}).get("assemblyLevel", ""),
       "is_ref": int(data.get("assemblyInfo", {}).get("assemblyCategory", "").lower() in ("reference genome", "representative genome")),
       "busco": float(busco.get("complete") or busco.get("buscoScore") or 0),
       "scaffold_n50": int(stats.get("scaffoldN50") or 0), "contig_n50": int(stats.get("contigN50") or 0),
     }
-    records_by_name.setdefault(ALIASES.get(name, name).casefold(), []).append(record)
+    records_by_name.setdefault(species_key(name), []).append(record)
+    if record["tax_id"]:
+      records_by_taxid.setdefault(record["tax_id"], []).append(record)
+
+def taxonomy_id(species):
+  term = urllib.parse.urlencode({"db": "taxonomy", "term": f'"{species}"[Scientific Name]', "retmode": "json"})
+  url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi?" + term
+  for attempt in range(3):
+    try:
+      with urllib.request.urlopen(url, timeout=60) as response:
+        ids = json.load(response).get("esearchresult", {}).get("idlist", [])
+      return int(ids[0]) if ids else None
+    except Exception:
+      if attempt == 2:
+        raise
+      time.sleep(2 * (attempt + 1))
 
 selected = []
 missing_species = []
 for species in SPECIES:
-  candidates = records_by_name.get(ALIASES.get(species, species).casefold(), [])
+  candidates = records_by_name.get(species_key(species), [])
+  if not candidates:
+    tax_id = taxonomy_id(ALIASES.get(species, species))
+    candidates = records_by_taxid.get(tax_id, []) if tax_id else []
   if not candidates:
     missing_species.append(species)
   else:
