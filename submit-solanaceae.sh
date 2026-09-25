@@ -32,8 +32,6 @@ assemblies = [
     ("Capsicum_annuum_CaT2T", "Capsicum annuum", "GCA_031234615.1", "ASM3123461v1"),
     ("Solanum_melongena_MM738", "Solanum melongena", "GCA_057556415.1", "ASM5755641v1"),
     ("Nicotiana_tabacum_K326", "Nicotiana tabacum", "GCA_000715075.2", "ASM71507v2"),
-    ("Nicotiana_benthamiana_KLAB", "Nicotiana benthamiana", "GCA_034376525.1", "ASM3437652v1"),
-    ("Petunia_axillaris_Peax403", "Petunia axillaris", "GCA_026929995.1", "Peax403"),
 ]
 base_url = "https://api.ncbi.nlm.nih.gov/datasets/v2/genome/accession/"
 root = Path("selected/solanaceae")
@@ -170,12 +168,12 @@ set -euo pipefail
 
 cd "$WORKDIR"
 mapfile -t FASTAS < selected/solanaceae/genomes.files
-if [[ ${#FASTAS[@]} -ne 7 ]]; then
-  echo "Expected seven Solanaceae FASTAs" >&2
+if [[ ${#FASTAS[@]} -ne 5 ]]; then
+    echo "Expected five Solanaceae FASTAs" >&2
   exit 1
 fi
 
-output="results/solanaceae/SOLANACEAE_07_Petunia_axillaris"
+output="results/solanaceae/SOLANACEAE_05_Nicotiana_tabacum"
 printf '[segtrace] one run with %d genomes: %s\n' "${#FASTAS[@]}" "$output"
 ./segtrace -p "$THREADS" -c 1 -o "$output" "${FASTAS[@]}"
 PBS
