@@ -277,13 +277,13 @@ set -euo pipefail
 
 cd "$WORKDIR"
 mapfile -t FASTAS < selected/poaceae/genomes.files
-if [[ ${#FASTAS[@]} -ne 15 ]]; then
-    echo "Expected fifteen Poaceae FASTAs" >&2
+if [[ ${#FASTAS[@]} -ne 5 ]]; then
+    echo "Expected five Poaceae FASTAs" >&2
     exit 1
 fi
 
 printf -v genome_count '%02d' "${#FASTAS[@]}"
-output="results/poaceae/POACEAE_${genome_count}_Arundinoideae_Phragmites_australis"
+output="results/poaceae/POACEAE_${genome_count}_Pooideae_Brachypodium_distachyon"
 printf '[segtrace] one run with %d genomes: %s\n' "${#FASTAS[@]}" "$output"
 ./segtrace -p "$THREADS" -c 1 -o "$output" "${FASTAS[@]}"
 PBS
