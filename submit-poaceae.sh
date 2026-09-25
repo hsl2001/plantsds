@@ -33,16 +33,6 @@ taxa = [
     ("Oryzoideae", "Oryza_glaberrima", "Oryza glaberrima", (), None, None),
     ("Bambusoideae", "Phyllostachys_edulis", "Phyllostachys edulis", (), None, None),
     ("Pooideae", "Brachypodium_distachyon", "Brachypodium distachyon", (), None, None),
-    ("Pooideae", "Hordeum_vulgare", "Hordeum vulgare", (), None, None),
-    ("Pooideae", "Triticum_aestivum", "Triticum aestivum", (), None, None),
-    ("Pooideae", "Avena_sativa", "Avena sativa", (), None, None),
-    ("Chloridoideae", "Eleusine_coracana", "Eleusine coracana", (), None, None),
-    ("Chloridoideae", "Zoysia_japonica", "Zoysia japonica", (), None, None),
-    ("Panicoideae", "Zea_mays", "Zea mays", (), None, None),
-    ("Panicoideae", "Sorghum_bicolor", "Sorghum bicolor", (), None, None),
-    ("Panicoideae", "Setaria_italica", "Setaria italica", (), None, None),
-    ("Panicoideae", "Panicum_virgatum", "Panicum virgatum", (), None, None),
-    ("Arundinoideae", "Phragmites_australis", "Phragmites australis", (), None, None),
 ]
 taxon_url = "https://api.ncbi.nlm.nih.gov/datasets/v2/genome/taxon/"
 accession_url = "https://api.ncbi.nlm.nih.gov/datasets/v2/genome/accession/"
