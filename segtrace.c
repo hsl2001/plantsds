@@ -807,7 +807,7 @@ static int hash_run_within_frequency(const DiscoverComputeData *data,
                     ? data->window_size - data->kmer_size : 0;
   for (size_t index = 0; index < count;) {
     const WindowCoord *first = &data->coords[entries[index].window_id];
-    if (++groups > MAX_KMER_FREQ)
+    if (++groups > MAX_RUN_FREQ)
       return 0;
     index++;
     while (index < count) {
@@ -841,7 +841,7 @@ static void discover_compute_worker(void *data, long idx, int tid) {
     /* run이 너무 크면(초고빈도 k-mer, 저복잡도/반복 서열) 비교 폭발 방지를
      * 위해 건너뛴다. 2 이상이어야 공유 쌍이 존재 */
     if (run_len >= 2 &&
-      (run_len <= MAX_KMER_FREQ ||
+      (run_len <= MAX_RUN_FREQ ||
        hash_run_within_frequency(w_data, b->entries + i, run_len))) {
       for (size_t a = i; a < j; a++) {
         for (size_t b_idx = a + 1;
