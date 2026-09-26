@@ -35,5 +35,5 @@ else
 fi
 
 make clean && make
-"${RUNNER[@]}" sim_benchmark.py --out-dir "$OUT_DIR" --force
+"${RUNNER[@]}" sim_benchmark.py --out-dir "$OUT_DIR" --force --no-minimap2 --no-nucmer --no-blastn
 PBS
