@@ -178,7 +178,7 @@ int main(int argc, char **argv) {
 
   /* [6단계] BED 형식으로 출력 (최소 SD 길이 미만 구간은 제외) */
   write_dup_bed(out_prefix, dup_regions, n_filtered, gw.seq_lens,
-                window_size < MIN_SD_LEN ? window_size : MIN_SD_LEN);
+                window_size < MIN_SEGMENT_LEN ? window_size : MIN_SEGMENT_LEN);
 
   free(dup_regions);
   free_global_windows(&gw);
