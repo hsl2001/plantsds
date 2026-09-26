@@ -844,18 +844,14 @@ static void discover_compute_worker(void *data, long idx, int tid) {
     if (run_len >= 2 &&
       (run_len <= MAX_KMER_FREQ ||
        hash_run_within_frequency(w_data, b->entries + i, run_len))) {
-      /* 각 윈도우당 인접한 MAX_PAIR_COMPARISONS개의 이웃만 비교해
-       * run 내 비교 횟수를 선형으로 제한 (버스트 방지) */
       for (size_t a = i; a < j; a++) {
-        size_t comparisons = 0;
         for (size_t b_idx = a + 1;
-             b_idx < j && comparisons < MAX_PAIR_COMPARISONS; b_idx++) {
+             b_idx < j; b_idx++) {
           uint32_t wa = b->entries[a].window_id,
                    wb = b->entries[b_idx].window_id;
           /* 같은 read/서열의 겹치는 윈도우는 중복 후보이므로 제외한다. */
           if (windows_overlap(w_data, wa, wb))
             continue;
-          comparisons++;
 
           uint64_t pk = encode_pair(wa, wb);
           if (bloom_test_and_set(w_data->bloom, w_data->bloom_mask, pk))

@@ -21,3 +21,5 @@ sim_benchmark/
 *.svg
 segtrace_validation/
 sweep_benchmark/
+conservation_plot/
+gene_birth/*
