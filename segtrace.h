@@ -78,7 +78,10 @@ typedef struct {
   size_t start;
   size_t end;
   uint32_t cluster_id;
-  uint32_t partner_id;
+  union {
+    uint32_t partner_id;
+    uint32_t single_or_not;
+  };
 } SegtraceDupRegion;
 
 typedef struct {

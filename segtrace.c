@@ -1141,9 +1141,11 @@ size_t filter_singleton_clusters(SegtraceDupRegion *regions, size_t n) {
 
     if (cj - ci >= 2) {
       uint32_t out_cluster_id = next_cluster_id++;
+      uint32_t single_or_not = regions[ci].file_id == regions[cj - 1].file_id;
       for (size_t k = ci; k < cj; k++) {
         regions[out_count] = regions[k];
         regions[out_count].cluster_id = out_cluster_id;
+        regions[out_count].single_or_not = single_or_not;
         out_count++;
       }
     }
@@ -1153,7 +1155,8 @@ size_t filter_singleton_clusters(SegtraceDupRegion *regions, size_t n) {
 }
 
 /* 최종 구간을 "<prefix>.seg.bed"에 기록.
- * chrom 컬럼은 "파일명-서열명" 형태, 4번째 컬럼은 클러스터 id.
+ * chrom 컬럼은 "파일명-서열명" 형태, 4번째 컬럼은 클러스터 id,
+ * 5번째 컬럼은 클러스터가 단일 입력 파일에서만 검출됐는지 표시한다.
  * min_sd_len 미만의 짧은 구간은 출력하지 않음 */
 void write_dup_bed(const char *out_prefix, const SegtraceDupRegion *dup_regions,
                    size_t n_merged, const GenomeSeqLen *seq_lens,
@@ -1166,13 +1169,15 @@ void write_dup_bed(const char *out_prefix, const SegtraceDupRegion *dup_regions,
     return;
   }
 
-  fprintf(out_bed, "#chrom\tstart\tend\tcluster_id\n");
   for (size_t k = 0; k < n_merged; k++) {
     if (dup_regions[k].end - dup_regions[k].start >= min_sd_len) {
       uint32_t seq_i = dup_regions[k].seq_id;
-      fprintf(out_bed, "%s-%s\t%zu\t%zu\t%u\n", seq_lens[seq_i].genome,
-            seq_lens[seq_i].seq, dup_regions[k].start, dup_regions[k].end,
-            dup_regions[k].cluster_id);
+      const char *single_or_not =
+          dup_regions[k].single_or_not ? "s" : "ns";
+      fprintf(out_bed, "%s-%s\t%zu\t%zu\t%u\t%s\n",
+              seq_lens[seq_i].genome, seq_lens[seq_i].seq,
+              dup_regions[k].start, dup_regions[k].end,
+              dup_regions[k].cluster_id, single_or_not);
     }
   }
   fclose(out_bed);
