@@ -199,7 +199,7 @@ CandidateGraph discover_and_compute(const uint32_t *all_hashes,
                                     void *thread_pool);
 void free_candidate_graph(CandidateGraph *graph);
 
-// 5. REGION CLUSTERING, COPY FILTERING & OUTPUT
+// 5. REGION CLUSTERING, SINGLETON FILTERING & OUTPUT
 void build_duplicate_loci(const CandidateGraph *graph, size_t num_windows,
                           WindowCoord *coords, const GenomeSeqLen *seq_lens,
                           size_t step_size, size_t window_size,
@@ -208,8 +208,7 @@ void build_duplicate_loci(const CandidateGraph *graph, size_t num_windows,
 void cluster_duplicate_loci(const CandidateGraph *graph,
                             const WindowCoord *coords,
                             SegtraceDupRegion *regions, size_t n_regions);
-size_t filter_regions_by_copy_count(SegtraceDupRegion *regions, size_t n,
-                                    uint32_t min_copies);
+size_t filter_singleton_clusters(SegtraceDupRegion *regions, size_t n);
 void write_dup_bed(const char *out_prefix, const SegtraceDupRegion *dup_regions,
                    size_t n_merged, const GenomeSeqLen *seq_lens,
                    size_t min_sd_len);

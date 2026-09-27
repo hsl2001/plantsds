@@ -24,8 +24,6 @@ static void print_usage(void) {
          "  -t: step size in bp (default: 0 [auto: 33%% of window size])\n"
          "  -b: minimum valid bases per window (default: 0 [auto: 25%% of "
          "window size])\n"
-         "  -c: minimum homologous loci per input file (default: 1; at least\n"
-         "      2 loci across inputs; self matches and unique regions excluded)\n"
          "  -m: filter soft-masked bases (treat lowercase a/c/g/t as invalid)\n"
          "  -o: output file prefix (default: segtrace)\n"
          "  -p: number of threads (default: 8)\n"
@@ -59,19 +57,17 @@ int main(int argc, char **argv) {
    * kmer_size  = ntHash k-mer 길이
    * scale      = 스케치 축소율 (해시값 하위 1/scale만 샘플링)
    * window/step/min_bases = 윈도우 크기, 이동 간격, 최소 유효 염기 수
-   *   (0이면 윈도우 크기에서 자동 유도)
-   * min_copies = 파일(유전체)당 보고할 최소 복제 수 */
+  *   (0이면 윈도우 크기에서 자동 유도) */
   uint32_t kmer_size = 17;
   uint64_t scale = 16;
   size_t window_size = 1024, step_size = 0, min_bases = 0;
-  uint32_t min_copies = 1;
   const char *out_prefix = "segtrace";
   int n_threads = 8, filter_masked = 0;
 
   /* 단일 대시 옵션 파싱 (ketopt: getopt의 경량 대체) */
   ketopt_t opt = KETOPT_INIT;
   int c;
-  while ((c = ketopt(&opt, argc, argv, 1, "k:s:w:t:b:c:o:p:mh", 0)) >= 0) {
+  while ((c = ketopt(&opt, argc, argv, 1, "k:s:w:t:b:o:p:mh", 0)) >= 0) {
     if (c == 'h') {
       print_usage();
       return 0;
@@ -85,8 +81,6 @@ int main(int argc, char **argv) {
       step_size = (size_t)strtoull(opt.arg, NULL, 10);
     else if (c == 'b')
       min_bases = (size_t)strtoull(opt.arg, NULL, 10);
-    else if (c == 'c')
-      min_copies = (uint32_t)atoi(opt.arg);
     else if (c == 'o')
       out_prefix = opt.arg;
     else if (c == 'p') {
@@ -120,13 +114,6 @@ int main(int argc, char **argv) {
 
   int num_files = argc - opt.ind;
   char **files = &argv[opt.ind];
-
-  /* 입력이 하나뿐이면 duplication은 그 유전체 안에서 최소 2개 locus로만
-   * 정의되므로, 파일당 최소 복제 수(-c)는 1일 수 없다 (2 이상이어야 함). */
-  if (num_files == 1 && min_copies == 1) {
-    fprintf(stderr, "[ERROR] With a single input, -c must be >= 2 \n");
-    return 1;
-  }
 
   /* 염기 -> 2bit 코드(A=0,C=1,G=2,T=3) 룩업 테이블 구성.
    * -1은 N 등 유효하지 않은 염기. -m 옵션이 없으면 소문자(soft-masked)도
@@ -172,9 +159,8 @@ int main(int argc, char **argv) {
   free(gw.coords);
   gw.coords = NULL;
 
-    /* [5단계] 유전체당 복제 수(min_copies) 미만인 클러스터 그룹 제거 */
-    size_t n_filtered = filter_regions_by_copy_count(
-      dup_regions, n_dup_regions, min_copies);
+  /* [5단계] locus가 하나뿐인 클러스터 제거 */
+  size_t n_filtered = filter_singleton_clusters(dup_regions, n_dup_regions);
 
   /* [6단계] BED 형식으로 출력 (최소 SD 길이 미만 구간은 제외) */
   write_dup_bed(out_prefix, dup_regions, n_filtered, gw.seq_lens, window_size);
@@ -1173,19 +1159,11 @@ void free_candidate_graph(CandidateGraph *graph) {
   free(graph->counts);
 }
 
-/* 클러스터에 한 개 이상의 파일에서 복제 수가 min_copies 이상인 구간이
- * 있으면, 각 (클러스터, 파일) 그룹 중 파일별 복제 수가 min_copies 이상인
- * 그룹만 남긴다. 한 유전체 안에만 존재하는 클러스터도 출력 대상이다.
- * regions가 cluster/file 순으로 정렬된 상태이므로 각 그룹은 연속 구간이고,
- * in-place로 압축한 뒤 살아남은 개수를 반환한다.
- * 탈락한 클러스터로 인해 번호가 듬성듬성해지지 않도록, 살아남은 클러스터만
- * 등장 순서대로 1부터 다시 번호를 매긴다. */
-size_t filter_regions_by_copy_count(SegtraceDupRegion *regions, size_t n,
-                                    uint32_t min_copies) {
+/* locus가 하나뿐인 클러스터를 제거하고 남은 클러스터 id를 재번호화한다.
+ * regions는 cluster/file 순으로 정렬되어 있어 클러스터별 구간이 연속이다. */
+size_t filter_singleton_clusters(SegtraceDupRegion *regions, size_t n) {
   if (n == 0)
     return 0;
-  if (min_copies < 1)
-    min_copies = 1;
 
   size_t out_count = 0;
   uint32_t next_cluster_id = 1;
@@ -1195,30 +1173,13 @@ size_t filter_regions_by_copy_count(SegtraceDupRegion *regions, size_t n,
     while (cj < n && regions[cj].cluster_id == regions[ci].cluster_id)
       cj++;
 
-    size_t cluster_out_start = out_count;
-    size_t i = ci;
-    while (i < cj) {
-      size_t j = i + 1;
-      while (j < cj && regions[j].file_id == regions[i].file_id)
-        j++;
-      uint32_t copies = (uint32_t)(j - i);
-        if (copies >= min_copies) {
-        for (size_t k = i; k < j; k++) {
-          regions[out_count++] = regions[k];
-        }
-      }
-      i = j;
-    }
-
-    /* duplication은 정의상 최소 2개 locus가 있어야 하므로, 살아남은 locus가
-     * 1개뿐인 클러스터(내부 tandem repeat 등 partner 없는 singleton)는 버린다.
-     * 유전체 간 1:1 상동(파일별 1 locus x 2파일 = 총 2 locus)은 유지된다. */
-    if (out_count - cluster_out_start >= 2) {
+    if (cj - ci >= 2) {
       uint32_t out_cluster_id = next_cluster_id++;
-      for (size_t k = cluster_out_start; k < out_count; k++)
-        regions[k].cluster_id = out_cluster_id;
-    } else {
-      out_count = cluster_out_start;
+      for (size_t k = ci; k < cj; k++) {
+        regions[out_count] = regions[k];
+        regions[out_count].cluster_id = out_cluster_id;
+        out_count++;
+      }
     }
     ci = cj;
   }

@@ -216,7 +216,6 @@ printf '[segtrace] input FASTA count: %d\n' "${#FASTAS[@]}"
 
 ./time -v ./segtrace \
   -p "$THREADS" \
-  -c 1 \
   -o ./results/ANGIOSPERM \
   "${FASTAS[@]}"
 PBS

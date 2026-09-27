@@ -285,5 +285,5 @@ fi
 printf -v genome_count '%02d' "${#FASTAS[@]}"
 output="results/poaceae/POACEAE_${genome_count}_Pooideae_Brachypodium_distachyon"
 printf '[segtrace] one run with %d genomes: %s\n' "${#FASTAS[@]}" "$output"
-./segtrace -p "$THREADS" -c 1 -o "$output" "${FASTAS[@]}"
+./segtrace -p "$THREADS" -o "$output" "${FASTAS[@]}"
 PBS

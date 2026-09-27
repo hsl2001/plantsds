@@ -175,5 +175,5 @@ fi
 
 output="results/solanaceae/SOLANACEAE_05_Nicotiana_tabacum"
 printf '[segtrace] one run with %d genomes: %s\n' "${#FASTAS[@]}" "$output"
-./segtrace -p "$THREADS" -c 1 -o "$output" "${FASTAS[@]}"
+./segtrace -p "$THREADS" -o "$output" "${FASTAS[@]}"
 PBS

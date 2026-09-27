@@ -281,5 +281,5 @@ fi
 printf -v genome_count '%02d' "${#FASTAS[@]}"
 output="results/brassicales/BRASSICALES_${genome_count}_Bixaceae_Bixa_orellana"
 printf '[segtrace] one run with %d genomes: %s\n' "${#FASTAS[@]}" "$output"
-./segtrace -p "$THREADS" -c 1 -o "$output" "${FASTAS[@]}"
+./segtrace -p "$THREADS" -o "$output" "${FASTAS[@]}"
 PBS

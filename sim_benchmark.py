@@ -541,7 +541,7 @@ def run_segtrace(args: argparse.Namespace, paths: SimulationPaths, work_dir: Pat
     prediction = prefix.with_suffix(".seg.bed")
     command = [
         str(segtrace_bin), "-k", str(args.kmer), "-s", str(args.scale), "-w", str(args.window_size),
-        "-t", str(args.step_size), "-c", str(args.min_report_copies), "-p", str(args.threads),
+        "-t", str(args.step_size), "-p", str(args.threads),
         "-o", str(prefix), *[str(path) for path in paths.fasta_paths],
     ]
     try:
@@ -795,7 +795,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--scale", "-s", type=int, default=16, help="SegTrace scale factor")
     parser.add_argument("--window-size", "-w", type=int, default=1024, help="SegTrace window size")
     parser.add_argument("--step-size", "-t", type=int, default=0, help="SegTrace step size")
-    parser.add_argument("--min-report-copies", "-c", type=int, default=1, help="SegTrace -c value")
     parser.add_argument("--minimap2-bin", default="minimap2", help="minimap2 executable")
     parser.add_argument("--nucmer-bin", default="nucmer", help="nucmer executable")
     parser.add_argument("--show-coords-bin", default="show-coords", help="show-coords executable")
