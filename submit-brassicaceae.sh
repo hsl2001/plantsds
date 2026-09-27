@@ -28,7 +28,7 @@ from pathlib import Path
 
 assemblies = [
     ("Col-0", "Arabidopsis thaliana", "GCA_978657495.1", "TAIR12"),
-    ("Ler-0", "Arabidopsis thaliana", "GCA_946406525.1", "Ler-0.7213.PacbioHiFiAssembly"),
+    # ("Ler-0", "Arabidopsis thaliana", "GCA_946406525.1", "Ler-0.7213.PacbioHiFiAssembly"),
     ("Arabidopsis_lyrata", "Arabidopsis lyrata", "GCA_975146905.1", "PU6_v3"),
     ("Capsella_rubella", "Capsella rubella", "GCA_059238525.1", "Crubella_RAM_v1.0"),
     ("Arabis_alpina", "Arabis alpina", "GCA_900128785.1", "MPIPZ.v5"),
