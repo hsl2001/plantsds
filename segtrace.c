@@ -22,7 +22,6 @@ static void print_usage(void) {
          "  -s: scale factor (default: 16)\n"
          "  -w: window size in bp, k..65535 (default: 1024)\n"
          "  -t: step size in bp (default: 0 [auto: 33%% of window size])\n"
-         "  -m: filter soft-masked bases (treat lowercase a/c/g/t as invalid)\n"
          "  -o: output file prefix (default: segtrace)\n"
          "  -p: number of threads (default: 8)\n"
          "  -h, --help: show this help message\n\n");
@@ -54,17 +53,17 @@ int main(int argc, char **argv) {
   /* 파라미터 기본값:
    * kmer_size  = ntHash k-mer 길이
    * scale      = 스케치 축소율 (해시값 하위 1/scale만 샘플링)
-  * window/step = 윈도우 크기와 이동 간격 (0이면 자동 유도) */
+    * window/step = 윈도우 크기와 이동 간격 (0이면 자동 유도) */
   uint32_t kmer_size = 17;
   uint64_t scale = 16;
   size_t window_size = 1024, step_size = 0;
   const char *out_prefix = "segtrace";
-  int n_threads = 8, filter_masked = 0;
+    int n_threads = 8;
 
   /* 단일 대시 옵션 파싱 (ketopt: getopt의 경량 대체) */
   ketopt_t opt = KETOPT_INIT;
   int c;
-  while ((c = ketopt(&opt, argc, argv, 1, "k:s:w:t:o:p:mh", 0)) >= 0) {
+  while ((c = ketopt(&opt, argc, argv, 1, "k:s:w:t:o:p:h", 0)) >= 0) {
     if (c == 'h') {
       print_usage();
       return 0;
@@ -82,9 +81,7 @@ int main(int argc, char **argv) {
       n_threads = atoi(opt.arg);
       if (n_threads < 1)
         n_threads = 1;
-    } else if (c == 'm')
-      filter_masked = 1;
-    else
+    } else
       return 1;
   }
   if (kmer_size == 0 || kmer_size > 64 || scale == 0 ||
@@ -107,15 +104,14 @@ int main(int argc, char **argv) {
   char **files = &argv[opt.ind];
 
   /* 염기 -> 2bit 코드(A=0,C=1,G=2,T=3) 룩업 테이블 구성.
-   * -1은 N 등 유효하지 않은 염기. -m 옵션이 없으면 소문자(soft-masked)도
-   * 유효 염기로 취급한다. hash_seed=42는 스케치 재현성을 위한 고정 시드. */
+   * -1은 N 등 유효하지 않은 염기. 소문자 염기도 동일하게 매핑한다.
+   * hash_seed=42는 스케치 재현성을 위한 고정 시드. */
   Segtrace r = {.hash_window = kmer_size, .hash_seed = 42};
   memset(r.base_lookup, -1, sizeof(r.base_lookup));
   for (int8_t code = 0; code < 4; code++) {
     uint8_t base = (uint8_t)"ACGT"[code];
     r.base_lookup[base] = code;
-    if (!filter_masked)
-      r.base_lookup[base + ('a' - 'A')] = code;
+    r.base_lookup[base + ('a' - 'A')] = code;
   }
 
   void *thread_pool = n_threads > 1 ? kt_forpool_init(n_threads) : NULL;
