@@ -22,8 +22,6 @@ static void print_usage(void) {
          "  -s: scale factor (default: 16)\n"
          "  -w: window size in bp, k..65535 (default: 1024)\n"
          "  -t: step size in bp (default: 0 [auto: 33%% of window size])\n"
-         "  -b: minimum valid bases per window (default: 0 [auto: 25%% of "
-         "window size])\n"
          "  -m: filter soft-masked bases (treat lowercase a/c/g/t as invalid)\n"
          "  -o: output file prefix (default: segtrace)\n"
          "  -p: number of threads (default: 8)\n"
@@ -56,18 +54,17 @@ int main(int argc, char **argv) {
   /* 파라미터 기본값:
    * kmer_size  = ntHash k-mer 길이
    * scale      = 스케치 축소율 (해시값 하위 1/scale만 샘플링)
-   * window/step/min_bases = 윈도우 크기, 이동 간격, 최소 유효 염기 수
-  *   (0이면 윈도우 크기에서 자동 유도) */
+  * window/step = 윈도우 크기와 이동 간격 (0이면 자동 유도) */
   uint32_t kmer_size = 17;
   uint64_t scale = 16;
-  size_t window_size = 1024, step_size = 0, min_bases = 0;
+  size_t window_size = 1024, step_size = 0;
   const char *out_prefix = "segtrace";
   int n_threads = 8, filter_masked = 0;
 
   /* 단일 대시 옵션 파싱 (ketopt: getopt의 경량 대체) */
   ketopt_t opt = KETOPT_INIT;
   int c;
-  while ((c = ketopt(&opt, argc, argv, 1, "k:s:w:t:b:o:p:mh", 0)) >= 0) {
+  while ((c = ketopt(&opt, argc, argv, 1, "k:s:w:t:o:p:mh", 0)) >= 0) {
     if (c == 'h') {
       print_usage();
       return 0;
@@ -79,8 +76,6 @@ int main(int argc, char **argv) {
       window_size = (size_t)strtoull(opt.arg, NULL, 10);
     else if (c == 't')
       step_size = (size_t)strtoull(opt.arg, NULL, 10);
-    else if (c == 'b')
-      min_bases = (size_t)strtoull(opt.arg, NULL, 10);
     else if (c == 'o')
       out_prefix = opt.arg;
     else if (c == 'p') {
@@ -98,15 +93,11 @@ int main(int argc, char **argv) {
     fprintf(stderr, "[ERROR] Invalid kmer, scale, or window size.\n");
     return 1;
   }
-  /* 자동 파라미터 결정:
-   * step_size는 윈도우의 1/3 (인접 윈도우가 3배 중첩),
-   * min_bases는 윈도우의 1/4 (N이 75% 이상인 윈도우는 스케치하지 않음). */
+  /* 자동 step_size는 윈도우의 1/3 (인접 윈도우가 3배 중첩). */
   if (step_size == 0)
     step_size = window_size / 3;
   if (step_size == 0)
     step_size = 1;
-  if (min_bases == 0)
-    min_bases = window_size / 4;
   if (opt.ind == argc) {
     fprintf(stderr, "[ERROR] Input FASTA files are required.\n");
     return 1;
@@ -132,7 +123,7 @@ int main(int argc, char **argv) {
   /* [1단계] 모든 입력을 윈도우 단위로 나누고 각 윈도우의 스케치 추출. */
   GlobalWindows gw =
       extract_all_windows(files, num_files, &r, scale, window_size,
-                          step_size, min_bases, n_threads, thread_pool);
+                step_size, n_threads, thread_pool);
 
   /* [2단계] 스케치 후보 탐색과 유사도 판정. */
   fprintf(stderr,
@@ -302,12 +293,6 @@ static void seq_chunk_worker(void *data, long i, int tid) {
   uint32_t kmer = job->r->hash_window;
 
   size_t idx = job->chunk_start_idx;
-  size_t valid_bases = 0;
-  /* 첫 윈도우의 유효 염기 수만 직접 계산; 이후에는 아래에서 슬라이딩 갱신 */
-  for (size_t j = 0; j < job->window_size; j++) {
-    if (job->r->base_lookup[job->seq_ptr[idx + j]] >= 0)
-      valid_bases++;
-  }
 
   for (; idx + job->window_size <= job->chunk_end_idx;
        idx += job->step_size, current_window_idx++) {
@@ -345,30 +330,27 @@ static void seq_chunk_worker(void *data, long i, int tid) {
       }
     }
 
-    /* 유효 염기가 부족한(N-rich) 윈도우는 스케치하지 않고 빈 상태로 기록 */
     size_t sketch_size = 0;
-    if (valid_bases >= job->min_bases) {
-      if (ring) {
-        size_t position = (idx + kmer - 1) % job->window_size;
-        for (size_t offset = kmer - 1; offset < job->window_size; offset++) {
-          uint32_t hash = ring[position];
-          if (hash != UINT32_MAX)
-            local_hashes[sketch_size++] = hash;
-          if (++position == job->window_size)
-            position = 0;
-        }
-        if (sketch_size > 1) {
-          qsort(local_hashes, sketch_size, sizeof(*local_hashes), compare_uint32);
-          size_t unique = 1;
-          for (size_t hash_index = 1; hash_index < sketch_size; hash_index++)
-            if (local_hashes[hash_index] != local_hashes[unique - 1])
-              local_hashes[unique++] = local_hashes[hash_index];
-          sketch_size = unique;
-        }
-      } else {
-        extract_hash_direct(job->r, local_hashes, &sketch_size, job->threshold,
-                            job->seq_ptr + idx, job->window_size);
+    if (ring) {
+      size_t position = (idx + kmer - 1) % job->window_size;
+      for (size_t offset = kmer - 1; offset < job->window_size; offset++) {
+        uint32_t hash = ring[position];
+        if (hash != UINT32_MAX)
+          local_hashes[sketch_size++] = hash;
+        if (++position == job->window_size)
+          position = 0;
       }
+      if (sketch_size > 1) {
+        qsort(local_hashes, sketch_size, sizeof(*local_hashes), compare_uint32);
+        size_t unique = 1;
+        for (size_t hash_index = 1; hash_index < sketch_size; hash_index++)
+          if (local_hashes[hash_index] != local_hashes[unique - 1])
+            local_hashes[unique++] = local_hashes[hash_index];
+        sketch_size = unique;
+      }
+    } else {
+      extract_hash_direct(job->r, local_hashes, &sketch_size, job->threshold,
+                          job->seq_ptr + idx, job->window_size);
     }
 
     /* 윈도우 메타데이터(서열 id, 윈도우 인덱스, 스케치 위치/크기) 기록 */
@@ -385,17 +367,6 @@ static void seq_chunk_worker(void *data, long i, int tid) {
     }
     wc->sketch_offset = (uint64_t)h_idx;
 
-    /* 다음 윈도우를 위해 유효 염기 수를 슬라이딩 갱신:
-     * 앞에서 빠지는 step_size개를 빼고 뒤에서 들어오는 step_size개를 더함 */
-    if (idx + job->step_size + job->window_size <= job->chunk_end_idx) {
-      for (size_t k = 0; k < job->step_size; k++) {
-        if (job->r->base_lookup[job->seq_ptr[idx + k]] >= 0)
-          valid_bases--;
-        if (job->r->base_lookup[job->seq_ptr[idx + job->window_size + k]] >=
-            0)
-          valid_bases++;
-      }
-    }
   }
   free(ring);
   free(local_hashes);
@@ -407,7 +378,7 @@ static void seq_chunk_worker(void *data, long i, int tid) {
 GlobalWindows extract_all_windows(char **files, int num_files,
                                   const Segtrace *r, uint64_t scale,
                                   size_t window_size, size_t step_size,
-                                  size_t min_bases, int n_threads,
+                                  int n_threads,
                                   void *thread_pool) {
   fprintf(stderr, "[segtrace] Extracting windows across genomes...\n");
   GlobalWindows gw = {0};
@@ -471,7 +442,6 @@ GlobalWindows extract_all_windows(char **files, int num_files,
                                          .threshold = threshold,
                                          .window_size = window_size,
                                          .step_size = step_size,
-                                         .min_bases = min_bases,
                                          .seq_id = seq_id,
                                          .seq_ptr = seq_ptr,
                                          .chunk_start_idx = c_start,

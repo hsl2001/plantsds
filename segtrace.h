@@ -129,7 +129,6 @@ typedef struct {
   uint32_t threshold;
   size_t window_size;
   size_t step_size;
-  size_t min_bases;
   uint32_t seq_id;
   const uint8_t *seq_ptr;
   size_t chunk_start_idx;
@@ -188,8 +187,7 @@ void free_unionfind(UnionFind *uf);
 GlobalWindows extract_all_windows(char **files, int num_files,
                                   const Segtrace *r, uint64_t scale,
                                   size_t window_size, size_t step_size,
-                                  size_t min_bases, int n_threads,
-                                  void *thread_pool);
+                                  int n_threads, void *thread_pool);
 // 4. DISCOVERY & DISTANCE COMPUTATION
 CandidateGraph discover_and_compute(const uint32_t *all_hashes,
                                     const WindowCoord *coords,
