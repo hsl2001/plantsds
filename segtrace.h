@@ -211,8 +211,7 @@ void cluster_duplicate_loci(const CandidateGraph *graph,
                             SegtraceDupRegion *regions, size_t n_regions);
 size_t filter_singleton_clusters(SegtraceDupRegion *regions, size_t n);
 void write_dup_bed(const char *out_prefix, const SegtraceDupRegion *dup_regions,
-                   size_t n_merged, const GenomeSeqLen *seq_lens,
-                   size_t min_sd_len);
+                   size_t n_merged, const GenomeSeqLen *seq_lens);
 
 #ifdef __cplusplus
 }

@@ -149,8 +149,8 @@ int main(int argc, char **argv) {
   /* [5단계] locus가 하나뿐인 클러스터 제거 */
   size_t n_filtered = filter_singleton_clusters(dup_regions, n_dup_regions);
 
-  /* [6단계] BED 형식으로 출력 (최소 SD 길이 미만 구간은 제외) */
-  write_dup_bed(out_prefix, dup_regions, n_filtered, gw.seq_lens, window_size);
+  /* [6단계] BED 형식으로 출력 */
+  write_dup_bed(out_prefix, dup_regions, n_filtered, gw.seq_lens);
 
   free(dup_regions);
   free_global_windows(&gw);
@@ -1156,11 +1156,9 @@ size_t filter_singleton_clusters(SegtraceDupRegion *regions, size_t n) {
 
 /* 최종 구간을 "<prefix>.seg.bed"에 기록.
  * chrom 컬럼은 "파일명-서열명" 형태, 4번째 컬럼은 클러스터 id,
- * 5번째 컬럼은 클러스터가 단일 입력 파일에서만 검출됐는지 표시한다.
- * min_sd_len 미만의 짧은 구간은 출력하지 않음 */
+ * 5번째 컬럼은 클러스터가 단일 입력 파일에서만 검출됐는지 표시한다. */
 void write_dup_bed(const char *out_prefix, const SegtraceDupRegion *dup_regions,
-                   size_t n_merged, const GenomeSeqLen *seq_lens,
-                   size_t min_sd_len) {
+                   size_t n_merged, const GenomeSeqLen *seq_lens) {
   char path_buf[PATH_MAX];
   snprintf(path_buf, sizeof(path_buf), "%s.seg.bed", out_prefix);
   FILE *out_bed = fopen(path_buf, "w");
@@ -1170,15 +1168,13 @@ void write_dup_bed(const char *out_prefix, const SegtraceDupRegion *dup_regions,
   }
 
   for (size_t k = 0; k < n_merged; k++) {
-    if (dup_regions[k].end - dup_regions[k].start >= min_sd_len) {
-      uint32_t seq_i = dup_regions[k].seq_id;
-      const char *single_or_not =
-          dup_regions[k].single_or_not ? "s" : "ns";
-      fprintf(out_bed, "%s-%s\t%zu\t%zu\t%u\t%s\n",
-              seq_lens[seq_i].genome, seq_lens[seq_i].seq,
-              dup_regions[k].start, dup_regions[k].end,
-              dup_regions[k].cluster_id, single_or_not);
-    }
+    uint32_t seq_i = dup_regions[k].seq_id;
+    const char *single_or_not =
+        dup_regions[k].single_or_not ? "s" : "ns";
+    fprintf(out_bed, "%s-%s\t%zu\t%zu\t%u\t%s\n",
+            seq_lens[seq_i].genome, seq_lens[seq_i].seq,
+            dup_regions[k].start, dup_regions[k].end,
+            dup_regions[k].cluster_id, single_or_not);
   }
   fclose(out_bed);
 }
