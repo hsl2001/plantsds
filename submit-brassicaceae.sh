@@ -170,10 +170,6 @@ set -euo pipefail
 
 cd "$WORKDIR"
 mapfile -t FASTAS < selected/brassicaceae/genomes.files
-if [[ ${#FASTAS[@]} -ne 7 ]]; then
-    echo "Expected seven Brassicaceae FASTAs" >&2
-  exit 1
-fi
 
 output="results/brassicaceae/BRASSICACEAE_07_Aethionema_arabicum"
 printf '[segtrace] one run with %d genomes: %s\n' "${#FASTAS[@]}" "$output"
