@@ -7,8 +7,8 @@ set -euo pipefail
 WORKDIR="${WORKDIR:-$(pwd)}"
 LOGDIR="${LOGDIR:-$HOME/log}"
 JOB_NAME="${JOB_NAME:-segtrace-validate}"
-THREADS="${THREADS:-32}"
-MEM="${MEM:-480gb}"
+THREADS="${THREADS:-64}"
+MEM="${MEM:-120gb}"
 WALLTIME="${WALLTIME:-96:00:00}"
 # Optional command(s) to prepare the environment on the node, e.g.
 # ENV_SETUP='micromamba activate py' (needs blastn, makeblastdb, python+numpy+matplotlib).

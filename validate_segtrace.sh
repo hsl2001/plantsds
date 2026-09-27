@@ -1,10 +1,5 @@
 #!/usr/bin/env bash
 # SegTrace cluster validation with BLAST.
-#
-# For every SegTrace cluster it takes the longest member as the representative,
-# BLASTs it against the whole genome set, and measures how many of the cluster
-# members are recovered by a BLAST hit (per-cluster match ratio). The ratios are
-# written to a CSV and plotted.
 set -euo pipefail
 
 if [ -z "${FASTAS+x}" ]; then
@@ -12,12 +7,12 @@ if [ -z "${FASTAS+x}" ]; then
 fi
 OUTDIR="${OUTDIR:-segtrace_validation}"
 PREFIX="${PREFIX:-$OUTDIR/segtrace}"
-THREADS="${THREADS:-8}"
+THREADS="${THREADS:-64}"
 MIN_OVERLAP="${MIN_OVERLAP:-0.5}"   # member covered fraction to count as a match
 MIN_IDENT="${MIN_IDENT:-90}"        # BLAST identity floor; 
-MIN_HIT_BP="${MIN_HIT_BP:-100}"     # minimum BLAST-hit bp overlapping a member to confirm it
+MIN_MEMBER_LEN=1024                  # minimum SegTrace member length in the recovery population
 SEGTRACE_EXTRA="${SEGTRACE_EXTRA:-}"
-N_CLUSTERS="${N_CLUSTERS:-100}"    # analyze only the N clusters with the shortest longest-member
+N_CLUSTERS="${N_CLUSTERS:-1000}"    # analyze only the N clusters with the shortest longest-member
 
 BED="$PREFIX.seg.bed"
 COMBINED="$OUTDIR/combined.fa"
@@ -27,7 +22,7 @@ DB="$OUTDIR/blastdb/combined"
 BLAST="$OUTDIR/blast_hits.tsv"
 CSV="$OUTDIR/cluster_match_ratio.csv"
 MEMBER_RESULTS="$OUTDIR/cluster_member_recovery.tsv"
-PLOT="$OUTDIR/cluster_match_ratio.svg"
+PLOT="$OUTDIR/cluster_match_ratio.png"
 
 mkdir -p "$OUTDIR" "$OUTDIR/blastdb"
 
@@ -40,13 +35,14 @@ echo "       clusters: $(awk 'NR>1{print $4}' "$BED" | sort -u | wc -l | tr -d '
 
 # ---------------------------------- 2. combined FASTA (genome-seq ids) + queries
 echo "[2/5] Building combined FASTA and per-cluster representative queries..."
-python3 - "$COMBINED" "$QUERY" "$MEMBERS" "$BED" "$N_CLUSTERS" "${FASTAS[@]}" <<'PY'
+python3 - "$COMBINED" "$QUERY" "$MEMBERS" "$BED" "$N_CLUSTERS" "$MIN_MEMBER_LEN" "${FASTAS[@]}" <<'PY'
 import os
 import sys
 
-combined_path, query_path, members_path, bed_path, top_n_s = sys.argv[1:6]
-fastas = sys.argv[6:]
+combined_path, query_path, members_path, bed_path, top_n_s, min_member_len_s = sys.argv[1:7]
+fastas = sys.argv[7:]
 top_n = int(top_n_s)
+min_member_len = int(min_member_len_s)
 W = 60  # FASTA line width; fixed so we can seek into records by base offset
 
 
@@ -107,15 +103,28 @@ def extract(fh, offset, length, a, b):
 
 
 clusters = {}
+total_members = 0
+excluded_members = 0
 with open(bed_path) as bh:
     for line in bh:
         if not line.strip() or line.startswith("#"):
             continue
         f = line.split("\t")
-        clusters.setdefault(int(f[3]), []).append((f[0], int(f[1]), int(f[2])))
+        total_members += 1
+        member = (f[0], int(f[1]), int(f[2]))
+        if member[2] - member[1] < min_member_len:
+            excluded_members += 1
+            continue
+        clusters.setdefault(int(f[3]), []).append(member)
 
-# Longest member per cluster, then keep the N clusters whose longest member is
-# the shortest (smallest maximum-member length).
+# Keep only clusters with at least two eligible members; a single-member
+# cluster would be trivially recovered by its self-hit. Then keep the N
+# clusters whose longest eligible member is the shortest.
+eligible_cluster_count = len(clusters)
+single_eligible_clusters = sum(len(members) < 2 for members in clusters.values())
+length_eligible_members = sum(len(members) for members in clusters.values())
+clusters = {cid: members for cid, members in clusters.items() if len(members) >= 2}
+
 rep = {}  # cid -> (index of longest member, its length)
 for cid, members in clusters.items():
     qi = max(range(len(members)), key=lambda i: members[i][2] - members[i][1])
@@ -139,24 +148,32 @@ with open(combined_path, "rb") as cf, open(query_path, "wb") as qf, \
         for i, (c, s, e) in enumerate(members):
             mf.write(f"{cid}\t{c}\t{s}\t{e}\t{1 if i == qi else 0}\n")
 
-print(f"       clusters total: {len(clusters)}, analyzing shortest {len(selected)}")
+selected_members = sum(len(clusters[cid]) for cid in selected)
+print(f"       members >= {min_member_len} bp: {length_eligible_members}/{total_members} (excluded {excluded_members} shorter members)")
+print(f"       clusters with >=2 eligible members: {len(clusters)}/{eligible_cluster_count} (excluded {single_eligible_clusters} single-member clusters)")
+print(f"       recovery population: {selected_members} members across {len(selected)} selected clusters")
 PY
 
 # --------------------------------------------------------- 3. BLAST DB + search
-echo "[3/5] Building BLAST database..."
-makeblastdb -dbtype nucl -in "$COMBINED" -out "$DB" >/dev/null
+if [ -s "$QUERY" ]; then
+    echo "[3/5] Building BLAST database..."
+    makeblastdb -dbtype nucl -in "$COMBINED" -out "$DB" >/dev/null
 
-echo "[4/5] BLASTing cluster representatives against the genomes..."
-# dc-megablast (discontiguous seeds) finds diverged homology that plain megablast
-# (word size 28) misses entirely for <~90% identity duplications.
-blastn -task dc-megablast -query "$QUERY" -db "$DB" -num_threads "$THREADS" \
-  -perc_identity "$MIN_IDENT" -evalue 1e-5 -max_target_seqs 100000 \
-  -outfmt '6 qseqid sseqid pident length qstart qend sstart send evalue bitscore' \
-  -out "$BLAST"
+    echo "[4/5] BLASTing eligible cluster representatives against the genomes..."
+    # dc-megablast (discontiguous seeds) finds diverged homology that plain megablast
+    # (word size 28) misses entirely for <~90% identity duplications.
+    blastn -task dc-megablast -query "$QUERY" -db "$DB" -num_threads "$THREADS" \
+        -perc_identity "$MIN_IDENT" -evalue 1e-5 -max_target_seqs 100000 \
+        -outfmt '6 qseqid sseqid pident length qstart qend sstart send evalue bitscore' \
+        -out "$BLAST"
+else
+    echo "[3/5] No eligible cluster members; skipping BLAST."
+    : > "$BLAST"
+fi
 
 # ------------------------------------------------ 5. match ratio + CSV + graph
 echo "[5/5] Scoring cluster recovery and plotting..."
-python3 - "$MEMBERS" "$BLAST" "$CSV" "$MEMBER_RESULTS" "$PLOT" "$MIN_OVERLAP" "$MIN_IDENT" "$MIN_HIT_BP" <<'PY'
+python3 - "$MEMBERS" "$BLAST" "$CSV" "$MEMBER_RESULTS" "$PLOT" "$MIN_OVERLAP" "$MIN_IDENT" <<'PY'
 import csv
 import sys
 from collections import Counter, defaultdict
@@ -166,10 +183,9 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
-members_path, blast_path, csv_path, member_results_path, plot_path, min_overlap_s, min_ident_s, min_hit_bp_s = sys.argv[1:9]
+members_path, blast_path, csv_path, member_results_path, plot_path, min_overlap_s, min_ident_s = sys.argv[1:8]
 min_overlap = float(min_overlap_s)
 min_ident = float(min_ident_s)
-min_hit_bp = int(min_hit_bp_s)
 
 members = defaultdict(list)  # cid -> [(chrom, start, end, is_query)]
 with open(members_path) as mh:
@@ -194,105 +210,61 @@ with open(blast_path) as bh:
 
 
 def classify_member(start, end, intervals):
-    # SegTrace regions are window-quantized, so a genuine BLAST core is often much
-    # shorter than the member window. Confirm a member when a hit overlaps it by
-    # >= min_overlap of the SHORTER of (member, hit) and by >= min_hit_bp bases,
-    # rather than demanding the hit cover half of the inflated member window.
     mlen = end - start
     if mlen <= 0:
         return "no_blast_hit", None
 
-    overlapping = []
-    for a, b, pident, hsp_length in intervals:
-        overlap = max(0, min(end, b) - max(start, a))
-        shorter = min(mlen, b - a)
-        fraction = overlap / shorter if shorter > 0 else 0.0
-        if overlap > 0:
-            overlapping.append((overlap, fraction, pident, hsp_length, a, b))
-
-    # The categories are mutually exclusive. A hit that does not overlap the
-    # member is treated as no relevant BLAST hit for that member.
-    if not overlapping:
-        best = max(intervals, key=lambda hit: (hit[2], hit[3]), default=None)
-        return "no_blast_hit", best
-
-    valid = [
-        hit for hit in overlapping
-        if hit[0] >= min_hit_bp and hit[1] >= min_overlap
+    overlapping = [
+        (overlap, overlap / min(mlen, b - a), pident, length, a, b)
+        for a, b, pident, length in intervals
+        if (overlap := max(0, min(end, b) - max(start, a))) > 0
     ]
-    if valid:
-        return "matched", max(valid, key=lambda hit: (hit[0], hit[1], hit[2], hit[3]))
+    if not overlapping:
+        return "no_blast_hit", max(intervals, key=lambda h: (h[2], h[3]), default=None)
 
-    best = max(overlapping, key=lambda hit: (hit[0], hit[1], hit[2], hit[3]))
-    overlap, fraction = best[:2]
-    if overlap < min_hit_bp:
-        return "fail_min_hit_bp", best
-    if fraction < min_overlap:
-        return "fail_min_overlap", best
-    return "matched", best
+    key = lambda h: (h[0], h[1], h[2], h[3])
+    valid = [h for h in overlapping if h[1] >= min_overlap]
+    if valid:
+        return "matched", max(valid, key=key)
+    best = max(overlapping, key=key)
+    return "fail_min_overlap", best
 
 
 rows = []
-member_rows = []
-unmatched_counts = Counter()
-for cid in sorted(members):
-    mem = members[cid]
-    classifications = []
-    for chrom, start, end, is_query in mem:
-        status, best = classify_member(start, end, hits.get((cid, chrom), []))
-        classifications.append(status)
-        if status != "matched":
-            unmatched_counts[status] += 1
+unmatched = Counter()
+with open(member_results_path, "w", newline="") as mr:
+    writer = csv.writer(mr, delimiter="\t")
+    writer.writerow(["cluster_id", "chrom", "start", "end", "is_query", "member_length", "status",
+                     "best_pident", "best_hit_length", "overlap_bp", "overlap_fraction",
+                     "best_subject_start", "best_subject_end"])
+    for cid, mem in sorted(members.items()):
+        counts = Counter()
+        for chrom, start, end, is_query in mem:
+            status, best = classify_member(start, end, hits.get((cid, chrom), []))
+            counts[status] += 1
+            if status != "matched":
+                unmatched[status] += 1
+            if best is None:
+                details = ("", "", "", "", "", "")
+            elif len(best) == 4:
+                a, b, pident, length = best
+                details = (pident, length, 0, 0.0, a, b)
+            else:
+                overlap, fraction, pident, length, a, b = best
+                details = (pident, length, overlap, fraction, a, b)
+            writer.writerow((cid, chrom, start, end, is_query, end - start, status, *details))
 
-        if best is None:
-            best_pident = best_length = best_start = best_end = ""
-            overlap = ""
-            fraction = ""
-        elif len(best) == 4:
-            best_start, best_end, best_pident, best_length = best
-            overlap = 0
-            fraction = 0.0
-        else:
-            overlap, fraction, best_pident, best_length, best_start, best_end = best
-
-        member_rows.append((
-            cid, chrom, start, end, is_query, end - start, status,
-            best_pident, best_length, overlap, fraction, best_start, best_end,
-        ))
-
-    matched = classifications.count("matched")
-    qchrom = next((c for c, _, _, q in mem if q), mem[0][0])
-    rows.append((
-        cid,
-        len(mem),
-        matched,
-        matched / len(mem),
-        qchrom,
-        classifications.count("fail_min_hit_bp"),
-        classifications.count("fail_min_overlap"),
-        classifications.count("no_blast_hit"),
-    ))
+        matched = counts["matched"]
+        rows.append((cid, len(mem), matched, matched / len(mem),
+                     next(c for c, _, _, q in mem if q),
+                     counts["fail_min_overlap"], counts["no_blast_hit"]))
 
 with open(csv_path, "w", newline="") as ch:
     writer = csv.writer(ch)
-    writer.writerow([
-        "cluster_id", "n_members", "n_matched", "match_ratio", "query_chrom",
-        "n_fail_min_hit_bp", "n_fail_min_overlap", "n_no_blast_hit",
-    ])
-    for cid, n, m, ratio, qchrom, n_short, n_fraction, n_no_hit in rows:
-        writer.writerow([
-            cid, n, m, f"{ratio:.6f}", qchrom,
-            n_short, n_fraction, n_no_hit,
-        ])
-
-with open(member_results_path, "w", newline="") as mr:
-    writer = csv.writer(mr, delimiter="\t")
-    writer.writerow([
-        "cluster_id", "chrom", "start", "end", "is_query", "member_length",
-        "status", "best_pident", "best_hit_length", "overlap_bp",
-        "overlap_fraction", "best_subject_start", "best_subject_end",
-    ])
-    writer.writerows(member_rows)
+    writer.writerow(["cluster_id", "n_members", "n_matched", "match_ratio", "query_chrom",
+                     "n_fail_min_overlap", "n_no_blast_hit"])
+    writer.writerows((cid, n, m, f"{ratio:.6f}", chrom, fraction, no_hit)
+                     for cid, n, m, ratio, chrom, fraction, no_hit in rows)
 
 ratios = np.array([r[3] for r in rows], dtype=float)
 if ratios.size:
@@ -317,10 +289,8 @@ if ratios.size:
     print(f"       clusters={ratios.size}  mean_ratio={ratios.mean():.4f}  "
           f"median={np.median(ratios):.4f}  fully_recovered="
           f"{int((ratios >= 1.0).sum())} ({(ratios >= 1.0).mean() * 100:.1f}%)")
-    print("       unmatched members: "
-          f"fail_min_hit_bp={unmatched_counts['fail_min_hit_bp']}  "
-          f"fail_min_overlap={unmatched_counts['fail_min_overlap']}  "
-          f"no_blast_hit={unmatched_counts['no_blast_hit']}")
+    print("       unmatched members: " + "  ".join(
+        f"{k}={unmatched[k]}" for k in ("fail_min_overlap", "no_blast_hit")))
 else:
     print("       no clusters to score")
 print(f"       CSV : {csv_path}")
