@@ -46,7 +46,7 @@ extern "C" {
 #define CMP(a, b) (((a) > (b)) - ((a) < (b)))
 #define ABS_DIFF(a, b) ((a) > (b) ? (a) - (b) : (b) - (a))
 
-#define NUM_PARTITIONS 2048
+#define NUM_PARTITIONS 1024
 #define BATCH_PARTITIONS 128
 #define MAX_RUN_FREQ 3
 #define MAX_COLLINEAR_LOOKAHEAD 3

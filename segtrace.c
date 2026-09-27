@@ -631,7 +631,7 @@ static inline int matching_window_pair(const DiscoverComputeData *w,
 }
 
 /* 후보 쌍 주변에 '연쇄적인(collinear)' 유사 윈도우가 더 있는지 검사.
- * 진짜 segmental duplication은 여러 윈도우에 걸쳐 대각선 상에 연속으로
+ * 진짜 segment 여러 윈도우에 걸쳐 대각선 상에 연속으로
  * 나타나므로, 고립된 단일 윈도우 매치(우연한 반복 서열 등)를 걸러내는 역할.
  * dir_a/dir_b 조합으로 정방향/역방향, 양쪽 진행 방향의 대각선 4가지를 검사 */
 static inline int check_collinear_neighbor(const DiscoverComputeData *w,
