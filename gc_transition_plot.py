@@ -42,9 +42,17 @@ def load_fastas(selected_dir):
             path = Path.cwd() / path
         if not path.is_file():
             raise FileNotFoundError(f"FASTA not found: {path}")
+        path = path.resolve()
         label = fasta_label(path)
         if label in fastas:
-            raise ValueError(f"Duplicate FASTA label {label!r}: {path}")
+            previous = fastas[label]
+            if path.samefile(previous):
+                print(f"[input] Ignoring repeated FASTA path: {path}", file=sys.stderr)
+                continue
+            raise ValueError(
+                f"Ambiguous FASTA label {label!r}: {previous} and {path}. "
+                "BED chrom names cannot distinguish these inputs."
+            )
         fastas[label] = path
     if not fastas:
         raise ValueError(f"No FASTA paths in {list_path}")
@@ -190,7 +198,7 @@ def index_bed(bed_path, fastas, database_path):
     connection.execute("PRAGMA cache_size=-65536")
     connection.execute(
         "CREATE TABLE loci (genome TEXT, seq TEXT, start INTEGER, end INTEGER, "
-        "cluster TEXT, status TEXT)"
+        "cluster TEXT, status TEXT, UNIQUE(genome, seq, start, end, cluster, status))"
     )
 
     count = 0
@@ -214,17 +222,22 @@ def index_bed(bed_path, fastas, database_path):
             batch.append((genome, seq, start, end, fields[3], status))
             count += 1
             if len(batch) >= 100_000:
-                connection.executemany("INSERT INTO loci VALUES (?, ?, ?, ?, ?, ?)", batch)
+                connection.executemany(
+                    "INSERT OR IGNORE INTO loci VALUES (?, ?, ?, ?, ?, ?)", batch
+                )
                 batch.clear()
     if batch:
-        connection.executemany("INSERT INTO loci VALUES (?, ?, ?, ?, ?, ?)", batch)
+        connection.executemany(
+            "INSERT OR IGNORE INTO loci VALUES (?, ?, ?, ?, ?, ?)", batch
+        )
     connection.commit()
     if count == 0:
         connection.close()
         raise ValueError(f"No BED intervals found in {bed_path}")
     connection.execute("CREATE INDEX loci_order ON loci(genome, seq, start, end, cluster)")
     connection.commit()
-    return connection, count
+    unique_count = connection.execute("SELECT COUNT(*) FROM loci").fetchone()[0]
+    return connection, count, unique_count
 
 
 def process_genome(
@@ -431,7 +444,9 @@ def run(arguments):
     scratch = os.environ.get("TMPDIR") or None
     with tempfile.TemporaryDirectory(prefix="gc_transition_", dir=scratch) as temporary_dir:
         database_path = Path(temporary_dir) / "intervals.sqlite"
-        connection, bed_count = index_bed(bed_path, fastas, database_path)
+        connection, bed_count, unique_locus_count = index_bed(
+            bed_path, fastas, database_path
+        )
         genomes = [row[0] for row in connection.execute("SELECT DISTINCT genome FROM loci ORDER BY genome")]
         missing = [genome for genome in genomes if genome not in fastas]
         if missing:
@@ -494,7 +509,8 @@ def run(arguments):
         len(genomes),
     )
     print(
-        f"BED intervals={bed_count:,}; processed={stats['intervals']:,}; "
+        f"BED records={bed_count:,}; unique loci={unique_locus_count:,}; "
+        f"processed={stats['intervals']:,}; "
         f"points={stats['points']:,}; invalid_GC={stats['invalid_gc']:,}; "
         f"overlap_skipped={stats['overlap_skipped']:,}; "
         f"gap_skipped={stats['gap_skipped']:,}; "
