@@ -99,7 +99,7 @@ def find_arabidopsis_labels(selected_dir, fastas):
             if row.get("species", "").strip().casefold() == "arabidopsis thaliana"
         ]
     if not rows:
-        raise ValueError(f"No Arabidopsis thaliana rows in {summary_path}")
+        return ()
     labels = []
     for row in rows:
         label = fasta_label(Path(row["used_fasta"]))
@@ -390,18 +390,17 @@ def make_plots(
 
     x = np.frombuffer(x_values, dtype=np.float32)
     y = np.frombuffer(y_values, dtype=np.float32)
-    max_cpg_oe = max(float(np.max(y)), 1.0)
     outputs = []
-    for include_trajectory, suffix in (
-        (False, "_background"),
-        (True, "_with_arabidopsis"),
-    ):
+    plot_modes = [(False, "_background")]
+    if trajectory_genomes:
+        plot_modes.append((True, "_with_arabidopsis"))
+    for include_trajectory, suffix in plot_modes:
         figure, axis = plt.subplots(figsize=(8, 7), layout="constrained")
         bins = axis.hexbin(
             x,
             y,
             gridsize=140,
-            extent=(0, 75, 0, max_cpg_oe),
+            extent=(0, 75, 0, 3),
             mincnt=1,
             bins="log",
             cmap="viridis",
@@ -447,7 +446,7 @@ def make_plots(
         axis.axhline(0, color="#555555", linewidth=0.8, alpha=0.7)
         axis.set(
             xlim=(0, 75),
-            ylim=(0, max_cpg_oe),
+            ylim=(0, 3),
             xlabel="Cluster GC (%)",
             ylabel="CpG O/E (observed / expected)",
             title=(
@@ -456,6 +455,7 @@ def make_plots(
                 else "Selected genome cluster composition"
             ),
         )
+        axis.set_yticks((0, 1, 2, 3))
         axis.grid(color="#d9e2e1", linewidth=0.5, alpha=0.5)
         colorbar = figure.colorbar(bins, ax=axis)
         colorbar.set_label("Cluster count (log scale)")
@@ -541,7 +541,7 @@ def run(arguments):
         f"clusters={stats['clusters_total']:,}; plotted={stats['clusters_plotted']:,}; "
         f"without_defined_CpG_OE={stats['clusters_without_defined_cpg_oe']:,}; "
         f"segments_without_valid_bases={stats['segments_without_valid_bases']:,}; "
-        f"Arabidopsis={','.join(trajectory_genomes)}; "
+        f"Arabidopsis={','.join(trajectory_genomes) or 'none'}; "
         f"clusters_with_Arabidopsis="
         f"{clusters_with_arabidopsis:,}",
         file=sys.stderr,
