@@ -9,7 +9,6 @@ OUTDIR="${OUTDIR:-./plots/gc_transition}"
 BED_NAME="${SEG_BED##*/}"
 BED_NAME="${BED_NAME%.seg.bed}"
 OUT_PREFIX="${OUT_PREFIX:-$OUTDIR/${BED_NAME}_gc_transition}"
-MAX_GAP_BP="${MAX_GAP_BP:-0}"
 LOGDIR="${LOGDIR:-$HOME/log}"
 JOB_NAME="${JOB_NAME:-gc-transition}"
 NCPUS="${NCPUS:-1}"
@@ -26,8 +25,9 @@ if [[ ! -d "$SELECTED_DIR" ]]; then
   printf '[ERROR] selected directory not found: %s\n' "$SELECTED_DIR" >&2
   exit 1
 fi
-if [[ ! -f "$SELECTED_DIR/angio_wgd_genomes.files" ]]; then
-  printf '[ERROR] FASTA list not found: %s/angio_wgd_genomes.files\n' "$SELECTED_DIR" >&2
+if [[ ! -f "$SELECTED_DIR/angio_wgd_genomes.files" && ! -f "$SELECTED_DIR/genomes.files" ]]; then
+  printf '[ERROR] FASTA list not found in %s (expected angio_wgd_genomes.files or genomes.files)\n' \
+    "$SELECTED_DIR" >&2
   exit 1
 fi
 if [[ ! -f "$SEG_BED" ]]; then
@@ -50,17 +50,15 @@ printf '[gc-transition] selected=%s bed=%s output=%s\n' \
 qsub -N "$JOB_NAME" \
   -l "select=1:ncpus=${NCPUS}:mem=${MEM}" \
   -l "walltime=${WALLTIME}" \
-  -v "WORKDIR=${WORKDIR},SELECTED_DIR=${SELECTED_DIR},SEG_BED=${SEG_BED},OUT_PREFIX=${OUT_PREFIX},MAX_GAP_BP=${MAX_GAP_BP}" \
+  -v "WORKDIR=${WORKDIR},SELECTED_DIR=${SELECTED_DIR},SEG_BED=${SEG_BED},OUT_PREFIX=${OUT_PREFIX}" \
   -j oe \
   -o "$LOGDIR/${JOB_NAME}.log" <<'PBS'
 #!/usr/bin/env bash
 set -euo pipefail
 
 cd "$WORKDIR"
-printf '[gc-transition] max neighbor gap: %s bp (0 means unlimited)\n' "$MAX_GAP_BP"
 uv run "$WORKDIR/gc_transition_plot.py" \
   --selected-dir "$SELECTED_DIR" \
   --bed "$SEG_BED" \
-  --output-prefix "$OUT_PREFIX" \
-  --max-gap-bp "$MAX_GAP_BP"
+  --output-prefix "$OUT_PREFIX"
 PBS

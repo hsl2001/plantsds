@@ -6,12 +6,15 @@
 import argparse
 from array import array
 import csv
-from itertools import groupby
+from collections import defaultdict
 import os
 from pathlib import Path
+import re
 import sqlite3
 import sys
 import tempfile
+
+VALID_BASE_RUN = re.compile(rb"[ACGT]+")
 
 
 def fasta_label(path):
@@ -28,9 +31,22 @@ def fasta_label(path):
 
 
 def load_fastas(selected_dir):
-    list_path = selected_dir / "angio_wgd_genomes.files"
-    if not list_path.is_file():
-        raise FileNotFoundError(f"FASTA list not found: {list_path}")
+    list_path = next(
+        (
+            path
+            for path in (
+                selected_dir / "angio_wgd_genomes.files",
+                selected_dir / "genomes.files",
+            )
+            if path.is_file()
+        ),
+        None,
+    )
+    if list_path is None:
+        raise FileNotFoundError(
+            f"FASTA list not found in {selected_dir}: expected "
+            "angio_wgd_genomes.files or genomes.files"
+        )
 
     fastas = {}
     for line in list_path.read_text(encoding="utf-8").splitlines():
@@ -59,24 +75,40 @@ def load_fastas(selected_dir):
     return fastas
 
 
-def find_arabidopsis_label(selected_dir, fastas):
-    summary_path = selected_dir / "angio_wgd_genomes.tsv"
-    if not summary_path.is_file():
-        raise FileNotFoundError(f"Species manifest not found: {summary_path}")
+def find_arabidopsis_labels(selected_dir, fastas):
+    summary_path = next(
+        (
+            path
+            for path in (
+                selected_dir / "angio_wgd_genomes.tsv",
+                selected_dir / "genomes.tsv",
+            )
+            if path.is_file()
+        ),
+        None,
+    )
+    if summary_path is None:
+        raise FileNotFoundError(
+            f"Species manifest not found in {selected_dir}: expected "
+            "angio_wgd_genomes.tsv or genomes.tsv"
+        )
     with summary_path.open(encoding="utf-8", newline="") as handle:
         rows = [
             row
             for row in csv.DictReader(handle, delimiter="\t")
             if row.get("species", "").strip().casefold() == "arabidopsis thaliana"
         ]
-    if len(rows) != 1:
-        raise ValueError(
-            f"Expected one Arabidopsis thaliana row in {summary_path}, found {len(rows)}"
-        )
-    label = fasta_label(Path(rows[0]["used_fasta"]))
-    if label not in fastas:
-        raise ValueError(f"Arabidopsis FASTA from {summary_path} is absent from the FASTA list: {label}")
-    return label
+    if not rows:
+        raise ValueError(f"No Arabidopsis thaliana rows in {summary_path}")
+    labels = []
+    for row in rows:
+        label = fasta_label(Path(row["used_fasta"]))
+        if label not in fastas:
+            raise ValueError(
+                f"Arabidopsis FASTA from {summary_path} is absent from the FASTA list: {label}"
+            )
+        labels.append(label)
+    return tuple(dict.fromkeys(labels))
 
 
 def split_chrom(chrom, labels):
@@ -164,7 +196,7 @@ def load_fai(fasta_path):
     return index
 
 
-def interval_gc(fasta, record_index, start, end, record_name, fasta_path):
+def interval_composition(fasta, record_index, start, end, record_name, fasta_path):
     length, offset, line_bases, line_width = record_index
     if start < 0 or end <= start or end > length:
         raise ValueError(
@@ -177,16 +209,22 @@ def interval_gc(fasta, record_index, start, end, record_name, fasta_path):
     byte_start = offset + first_line * line_width + start % line_bases
     byte_end = offset + last_line * line_width + last_base % line_bases + 1
     fasta.seek(byte_start)
-    sequence = fasta.read(byte_end - byte_start).translate(None, b"\r\n")
+    sequence = fasta.read(byte_end - byte_start).translate(None, b"\r\n").upper()
     if len(sequence) != end - start:
         raise ValueError(f"FASTA index does not match sequence data: {fasta_path}:{record_name}")
 
-    gc = sequence.count(b"G") + sequence.count(b"g") + sequence.count(b"C") + sequence.count(b"c")
-    valid = sum(
-        sequence.count(base) + sequence.count(bytes((base + 32,)))
-        for base in b"ACGT"
+    c_count = sequence.count(b"C")
+    g_count = sequence.count(b"G")
+    valid_bases = sum(sequence.count(base) for base in b"ACGT")
+    if not valid_bases:
+        return 0, 0, 0, 0.0
+
+    valid_pairs = sum(
+        len(run) - 1 for run in VALID_BASE_RUN.findall(sequence) if len(run) > 1
     )
-    return (100.0 * gc / valid, valid) if valid else (None, 0)
+    cpg_observed = sequence.count(b"CG")
+    cpg_expected = valid_pairs * c_count * g_count / (valid_bases * valid_bases)
+    return c_count + g_count, valid_bases, cpg_observed, cpg_expected
 
 
 def index_bed(bed_path, fastas, database_path):
@@ -240,98 +278,109 @@ def index_bed(bed_path, fastas, database_path):
     return connection, count, unique_count
 
 
-def process_genome(
-    connection,
-    genome,
-    fasta_path,
-    max_gap_bp,
-    output,
-    x_values,
-    y_values,
-    trajectory_genome,
-    trajectory_paths,
-    trajectory_x_values,
-    trajectory_y_values,
-    stats,
-):
-    fai = load_fai(fasta_path)
-    query = connection.execute(
-        "SELECT seq, start, end, cluster, status FROM loci "
-        "WHERE genome = ? ORDER BY seq, start, end, cluster",
-        (genome,),
+def collect_cluster_features(connection, genomes, fastas, trajectory_genomes, output, stats):
+    connection.execute(
+        "CREATE TABLE cluster_composition ("
+        "cluster TEXT PRIMARY KEY, gc_bases INTEGER, valid_bases INTEGER, "
+        "cpg_observed INTEGER, cpg_expected REAL, segment_count INTEGER, "
+        "genome_count INTEGER)"
     )
-    with fasta_path.open("rb") as fasta:
-        for seq, grouped in groupby(query, key=lambda row: row[0]):
-            intervals = list(grouped)
-            if seq not in fai:
-                raise ValueError(f"Sequence {genome}-{seq} is absent from {fasta_path}")
-            gc_intervals = []
-            path_x = []
-            path_y = []
 
-            def finish_path():
-                if path_x:
-                    trajectory_paths.append((path_x.copy(), path_y.copy()))
-                    path_x.clear()
-                    path_y.clear()
-
-            for _, start, end, cluster, status in intervals:
-                gc, valid_bases = interval_gc(fasta, fai[seq], start, end, seq, fasta_path)
-                gc_intervals.append((start, end, cluster, status, gc, valid_bases))
-                stats["intervals"] += 1
-                stats["invalid_gc"] += gc is None
-
-            for index in range(1, len(gc_intervals) - 1):
-                previous = gc_intervals[index - 1]
-                current = gc_intervals[index]
-                following = gc_intervals[index + 1]
-                if previous[4] is None or current[4] is None or following[4] is None:
-                    if genome == trajectory_genome:
-                        finish_path()
-                    continue
-                if previous[1] > current[0] or current[1] > following[0]:
-                    stats["overlap_skipped"] += 1
-                    if genome == trajectory_genome:
-                        finish_path()
-                    continue
-                previous_gap = current[0] - previous[1]
-                following_gap = following[0] - current[1]
-                if max_gap_bp and max(previous_gap, following_gap) > max_gap_bp:
-                    stats["gap_skipped"] += 1
-                    if genome == trajectory_genome:
-                        finish_path()
-                    continue
-
-                delta_previous = current[4] - previous[4]
-                delta_next = following[4] - current[4]
-                output.write(
-                    f"{genome}\t{seq}\t{current[2]}\t{current[0]}\t{current[1]}\t"
-                    f"{current[4]:.6f}\t{previous[4]:.6f}\t{following[4]:.6f}\t"
-                    f"{delta_previous:.6f}\t{delta_next:.6f}\t{previous_gap}\t"
-                    f"{following_gap}\t{current[3]}\n"
+    for genome_index, genome in enumerate(genomes, start=1):
+        fasta_path = fastas[genome]
+        fai = load_fai(fasta_path)
+        totals = defaultdict(lambda: [0, 0, 0, 0.0, 0])
+        query = connection.execute(
+            "SELECT seq, start, end, cluster FROM loci "
+            "WHERE genome = ? ORDER BY seq, start, end, cluster",
+            (genome,),
+        )
+        print(
+            f"[composition] {genome_index}/{len(genomes)} {genome}",
+            file=sys.stderr,
+            flush=True,
+        )
+        with fasta_path.open("rb") as fasta:
+            for seq, start, end, cluster in query:
+                if seq not in fai:
+                    raise ValueError(f"Sequence {genome}-{seq} is absent from {fasta_path}")
+                gc_bases, valid_bases, cpg_observed, cpg_expected = interval_composition(
+                    fasta, fai[seq], start, end, seq, fasta_path
                 )
-                x_values.append(delta_previous)
-                y_values.append(delta_next)
-                stats["points"] += 1
-                if genome == trajectory_genome:
-                    path_x.append(delta_previous)
-                    path_y.append(delta_next)
-                    trajectory_x_values.append(delta_previous)
-                    trajectory_y_values.append(delta_next)
-                    stats["trajectory_points"] += 1
-            if genome == trajectory_genome:
-                finish_path()
+                stats["segments_processed"] += 1
+                if not valid_bases:
+                    stats["segments_without_valid_bases"] += 1
+                cluster_total = totals[cluster]
+                cluster_total[0] += gc_bases
+                cluster_total[1] += valid_bases
+                cluster_total[2] += cpg_observed
+                cluster_total[3] += cpg_expected
+                cluster_total[4] += 1
+
+        connection.executemany(
+            "INSERT INTO cluster_composition VALUES (?, ?, ?, ?, ?, ?, 1) "
+            "ON CONFLICT(cluster) DO UPDATE SET "
+            "gc_bases = cluster_composition.gc_bases + excluded.gc_bases, "
+            "valid_bases = cluster_composition.valid_bases + excluded.valid_bases, "
+            "cpg_observed = cluster_composition.cpg_observed + excluded.cpg_observed, "
+            "cpg_expected = cluster_composition.cpg_expected + excluded.cpg_expected, "
+            "segment_count = cluster_composition.segment_count + excluded.segment_count, "
+            "genome_count = cluster_composition.genome_count + 1",
+            ((cluster, *values) for cluster, values in totals.items()),
+        )
+        connection.commit()
+
+    arabidopsis_clusters = {
+        genome: {
+            row[0]
+            for row in connection.execute(
+                "SELECT DISTINCT cluster FROM loci WHERE genome = ?", (genome,)
+            )
+        }
+        for genome in trajectory_genomes
+    }
+    x_values = array("f")
+    y_values = array("f")
+    cluster_ids = []
+    query = connection.execute(
+        "SELECT cluster, gc_bases, valid_bases, cpg_observed, cpg_expected, "
+        "segment_count, genome_count FROM cluster_composition "
+        "ORDER BY CAST(cluster AS INTEGER)"
+    )
+    for cluster, gc_bases, valid_bases, cpg_observed, cpg_expected, segment_count, genome_count in query:
+        stats["clusters_total"] += 1
+        gc_percent = 100.0 * gc_bases / valid_bases if valid_bases else None
+        cpg_oe = cpg_observed / cpg_expected if cpg_expected > 0 else None
+        accessions = [
+            genome for genome in trajectory_genomes
+            if cluster in arabidopsis_clusters[genome]
+        ]
+        output.write(
+            f"{cluster}\t{genome_count}\t{segment_count}\t{valid_bases}\t"
+            f"{gc_bases}\t{cpg_observed}\t{cpg_expected:.9f}\t"
+            f"{'' if gc_percent is None else f'{gc_percent:.6f}'}\t"
+            f"{'' if cpg_oe is None else f'{cpg_oe:.9f}'}\t"
+            f"{';'.join(accessions)}\n"
+        )
+        if gc_percent is None or cpg_oe is None:
+            stats["clusters_without_defined_cpg_oe"] += 1
+            continue
+        x_values.append(gc_percent)
+        y_values.append(cpg_oe)
+        cluster_ids.append(cluster)
+        stats["clusters_plotted"] += 1
+
+    return x_values, y_values, cluster_ids, arabidopsis_clusters
 
 
 def make_plots(
     output_prefix,
     x_values,
     y_values,
-    trajectory_paths,
-    trajectory_x_values,
-    trajectory_y_values,
-    max_gap_bp,
+    cluster_ids,
+    arabidopsis_clusters,
     genome_count,
+    trajectory_genomes,
 ):
     import matplotlib
 
@@ -341,14 +390,7 @@ def make_plots(
 
     x = np.frombuffer(x_values, dtype=np.float32)
     y = np.frombuffer(y_values, dtype=np.float32)
-    trajectory_x = np.frombuffer(trajectory_x_values, dtype=np.float32)
-    trajectory_y = np.frombuffer(trajectory_y_values, dtype=np.float32)
-    gap_note = "unlimited" if not max_gap_bp else f"<= {max_gap_bp:,} bp"
-    line_paths = [
-        np.column_stack((path_x, path_y))
-        for path_x, path_y in trajectory_paths
-        if len(path_x) >= 2
-    ]
+    max_cpg_oe = max(float(np.max(y)), 1.0)
     outputs = []
     for include_trajectory, suffix in (
         (False, "_background"),
@@ -359,65 +401,67 @@ def make_plots(
             x,
             y,
             gridsize=140,
-            extent=(-100, 100, -100, 100),
+            extent=(0, 75, 0, max_cpg_oe),
             mincnt=1,
             bins="log",
             cmap="viridis",
             linewidths=0,
         )
         if include_trajectory:
-            from matplotlib.collections import LineCollection
             from matplotlib.lines import Line2D
 
-            if line_paths:
-                axis.add_collection(
-                    LineCollection(
-                        line_paths,
-                        colors="#ffe082",
-                        linewidths=0.75,
-                        alpha=0.95,
-                        zorder=4,
+            trajectory_colors = ("#d81b8a", "#f28e2b")
+            markers = ("o", "^", "s", "D")
+            handles = []
+            for index, genome in enumerate(trajectory_genomes):
+                color = trajectory_colors[index % len(trajectory_colors)]
+                indices = [
+                    point_index
+                    for point_index, cluster in enumerate(cluster_ids)
+                    if cluster in arabidopsis_clusters[genome]
+                ]
+                if indices:
+                    axis.scatter(
+                        x[indices],
+                        y[indices],
+                        s=13,
+                        marker=markers[index % len(markers)],
+                        color=color,
+                        edgecolors="white",
+                        linewidths=0.3,
+                        alpha=0.9,
+                        zorder=5,
+                    )
+                label = genome.rsplit("_", 1)[-1].removesuffix(".nuclear")
+                handles.append(
+                    Line2D(
+                        [0], [0], color=color, marker=markers[index % len(markers)],
+                        markersize=5, linewidth=0, label=label
                     )
                 )
-            axis.scatter(
-                trajectory_x,
-                trajectory_y,
-                s=5,
-                color="#fff3b0",
-                edgecolors="#263238",
-                linewidths=0.15,
-                zorder=5,
-            )
             axis.legend(
-                handles=[
-                    Line2D(
-                        [0], [0], color="#ffe082", marker="o", markersize=4,
-                        linewidth=1, label="Arabidopsis thaliana trajectory"
-                    )
-                ],
+                handles=handles,
                 loc="upper right",
                 framealpha=0.9,
             )
         axis.axhline(0, color="#555555", linewidth=0.8, alpha=0.7)
-        axis.axvline(0, color="#555555", linewidth=0.8, alpha=0.7)
         axis.set(
-            xlim=(-100, 100),
-            ylim=(-100, 100),
-            xlabel="GC change from previous segment (percentage points)",
-            ylabel="GC change to next segment (percentage points)",
+            xlim=(0, 75),
+            ylim=(0, max_cpg_oe),
+            xlabel="Cluster GC (%)",
+            ylabel="CpG O/E (observed / expected)",
             title=(
-                "Angiosperm background + Arabidopsis thaliana trajectory"
+                "Cluster composition + Arabidopsis thaliana membership"
                 if include_trajectory
-                else "Angiosperm background"
+                else "Selected genome cluster composition"
             ),
         )
-        axis.set_aspect("equal", adjustable="box")
         axis.grid(color="#d9e2e1", linewidth=0.5, alpha=0.5)
         colorbar = figure.colorbar(bins, ax=axis)
-        colorbar.set_label("Interval occurrences (log count)")
+        colorbar.set_label("Cluster count (log scale)")
         figure.suptitle(
-            f"{genome_count} genomes; {len(x):,} background centers; "
-            f"neighbor gaps {gap_note}"
+            f"{genome_count} genomes; {len(x):,} clusters; "
+            "cluster statistics pooled across all member segments"
         )
         output_path = Path(str(output_prefix) + suffix + ".png")
         output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -435,11 +479,8 @@ def run(arguments):
         raise FileNotFoundError(f"BED file not found: {bed_path}")
     if not selected_dir.is_dir():
         raise FileNotFoundError(f"Selected directory not found: {selected_dir}")
-    if arguments.max_gap_bp < 0:
-        raise ValueError("max-gap-bp must be zero or positive")
-
     fastas = load_fastas(selected_dir)
-    trajectory_genome = find_arabidopsis_label(selected_dir, fastas)
+    trajectory_genomes = find_arabidopsis_labels(selected_dir, fastas)
     output_prefix.parent.mkdir(parents=True, exist_ok=True)
     scratch = os.environ.get("TMPDIR") or None
     with tempfile.TemporaryDirectory(prefix="gc_transition_", dir=scratch) as temporary_dir:
@@ -450,72 +491,59 @@ def run(arguments):
         genomes = [row[0] for row in connection.execute("SELECT DISTINCT genome FROM loci ORDER BY genome")]
         missing = [genome for genome in genomes if genome not in fastas]
         if missing:
-            raise ValueError(f"BED genomes missing from {selected_dir}/angio_wgd_genomes.files: {missing[:5]}")
-        if trajectory_genome not in genomes:
-            raise ValueError(f"Arabidopsis thaliana has no intervals in {bed_path}: {trajectory_genome}")
+            raise ValueError(f"BED genomes missing from FASTA list: {missing[:5]}")
+        missing_trajectory = [genome for genome in trajectory_genomes if genome not in genomes]
+        if missing_trajectory:
+            raise ValueError(
+                f"Arabidopsis thaliana has no intervals in {bed_path}: {missing_trajectory}"
+            )
 
         output_path = Path(str(output_prefix) + ".tsv")
         temporary_output = output_path.with_name(output_path.name + ".partial")
-        x_values = array("f")
-        y_values = array("f")
-        trajectory_paths = []
-        trajectory_x_values = array("f")
-        trajectory_y_values = array("f")
         stats = {
-            "intervals": 0,
-            "invalid_gc": 0,
-            "overlap_skipped": 0,
-            "gap_skipped": 0,
-            "points": 0,
-            "trajectory_points": 0,
+            "segments_processed": 0,
+            "segments_without_valid_bases": 0,
+            "clusters_total": 0,
+            "clusters_plotted": 0,
+            "clusters_without_defined_cpg_oe": 0,
         }
         with temporary_output.open("w", encoding="utf-8") as output:
             output.write(
-                "genome\tseq\tcluster_id\tstart\tend\tgc_current\tgc_previous\tgc_next\t"
-                "delta_previous\tdelta_next\tgap_previous_bp\tgap_next_bp\tstatus\n"
+                "cluster_id\tgenome_count\tsegment_count\tvalid_bases\tgc_bases\t"
+                "cpg_observed\tcpg_expected\tgc_percent\tcpg_oe\t"
+                "arabidopsis_accessions\n"
             )
-            for index, genome in enumerate(genomes, start=1):
-                print(f"[gc] {index}/{len(genomes)} {genome}", file=sys.stderr, flush=True)
-                process_genome(
-                    connection,
-                    genome,
-                    fastas[genome],
-                    arguments.max_gap_bp,
-                    output,
-                    x_values,
-                    y_values,
-                    trajectory_genome,
-                    trajectory_paths,
-                    trajectory_x_values,
-                    trajectory_y_values,
-                    stats,
-                )
+            x_values, y_values, cluster_ids, arabidopsis_clusters = collect_cluster_features(
+                connection, genomes, fastas, trajectory_genomes, output, stats
+            )
         connection.close()
-        if stats["points"] == 0 or stats["trajectory_points"] == 0:
+        if stats["clusters_plotted"] == 0:
             temporary_output.unlink(missing_ok=True)
-            raise ValueError(
-                "No valid Angiosperm background or Arabidopsis GC transitions found"
-            )
+            raise ValueError("No clusters have both valid GC and defined CpG O/E")
         os.replace(temporary_output, output_path)
 
     plot_paths = make_plots(
         output_prefix,
         x_values,
         y_values,
-        trajectory_paths,
-        trajectory_x_values,
-        trajectory_y_values,
-        arguments.max_gap_bp,
+        cluster_ids,
+        arabidopsis_clusters,
         len(genomes),
+        trajectory_genomes,
+    )
+    clusters_with_arabidopsis = sum(
+        any(cluster in arabidopsis_clusters[genome] for genome in trajectory_genomes)
+        for cluster in cluster_ids
     )
     print(
         f"BED records={bed_count:,}; unique loci={unique_locus_count:,}; "
-        f"processed={stats['intervals']:,}; "
-        f"points={stats['points']:,}; invalid_GC={stats['invalid_gc']:,}; "
-        f"overlap_skipped={stats['overlap_skipped']:,}; "
-        f"gap_skipped={stats['gap_skipped']:,}; "
-        f"Arabidopsis={trajectory_genome}; "
-        f"trajectory_points={stats['trajectory_points']:,}",
+        f"segments={stats['segments_processed']:,}; "
+        f"clusters={stats['clusters_total']:,}; plotted={stats['clusters_plotted']:,}; "
+        f"without_defined_CpG_OE={stats['clusters_without_defined_cpg_oe']:,}; "
+        f"segments_without_valid_bases={stats['segments_without_valid_bases']:,}; "
+        f"Arabidopsis={','.join(trajectory_genomes)}; "
+        f"clusters_with_Arabidopsis="
+        f"{clusters_with_arabidopsis:,}",
         file=sys.stderr,
     )
     print(f"Wrote {output_path}, " + ", ".join(map(str, plot_paths)), file=sys.stderr)
@@ -523,17 +551,11 @@ def run(arguments):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Build a GC transition table and density plot from SegTrace BED intervals."
+        description="Plot pooled cluster GC percentage against CpG observed/expected."
     )
     parser.add_argument("--selected-dir", type=Path, required=True)
     parser.add_argument("--bed", type=Path, required=True)
     parser.add_argument("--output-prefix", type=Path, required=True)
-    parser.add_argument(
-        "--max-gap-bp",
-        type=int,
-        default=0,
-        help="maximum gap on either side (0 means unlimited; default: 0)",
-    )
     arguments = parser.parse_args()
     try:
         run(arguments)

@@ -24,3 +24,5 @@ sweep_benchmark/
 conservation_plot/
 gene_birth/*
 *gff
+*fna
+*.files
