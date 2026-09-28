@@ -39,7 +39,7 @@ base_url = "https://api.ncbi.nlm.nih.gov/datasets/v2/genome/accession/"
 root = Path("selected/brassicaceae")
 raw_dir = root / "ncbi"
 clean_dir = root / "clean_fasta"
-organelle = re.compile(r"^(?:chr)?(?:c|m|mt|mit|mito|mitochondria|mitochondrion|pt|cp|pltd|plastid)$", re.I)
+organelle = re.compile(r"^(?:chr)?(?:c|m|mt|mit|mito|mitochondria|mitochondrion|pt|cp|pltd|plastid|chloroplast)$", re.I)
 organelle_words = ("chloroplast", "mitochondrion", "mitochondrial", "plastid", "plastome", "chondriome")
 
 
