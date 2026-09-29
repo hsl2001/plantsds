@@ -4,6 +4,7 @@
 # ///
 
 import argparse
+import csv
 import re
 import sys
 from collections import defaultdict
@@ -80,6 +81,99 @@ def make_events(reference_segments, cluster_genomes):
 
     return events_by_chrom, chrom_lengths
 
+def top_conserved_segments(reference_segments, cluster_genomes, limit=5):
+    return sorted(
+        reference_segments,
+        key=lambda segment: (
+            -len(cluster_genomes[segment[3]]),
+            -(segment[2] - segment[1]),
+            natural_key(segment[0]),
+            segment[1],
+            segment[2],
+            segment[3],
+        ),
+    )[:limit]
+
+def write_overlapping_features(gff_path, segments, cluster_genomes, output_path):
+    ranked_segments = [
+        (rank, segment, len(cluster_genomes[segment[3]]))
+        for rank, segment in enumerate(segments, start=1)
+    ]
+    feature_count = 0
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with gff_path.open(encoding="utf-8") as gff_file, output_path.open(
+        "w", encoding="utf-8", newline=""
+    ) as output_file:
+        writer = csv.writer(output_file, delimiter="\t", lineterminator="\n")
+        writer.writerow(
+            [
+                "segment_rank",
+                "segment_seqid",
+                "segment_start",
+                "segment_end",
+                "conservation_genomes",
+                "cluster_id",
+                "feature_seqid",
+                "feature_source",
+                "feature_type",
+                "feature_start",
+                "feature_end",
+                "feature_score",
+                "feature_strand",
+                "feature_phase",
+                "feature_attributes",
+                "overlap_bp",
+            ]
+        )
+
+        for line_number, line in enumerate(gff_file, start=1):
+            if line.startswith("##FASTA"):
+                break
+            if not line.strip() or line.startswith("#"):
+                continue
+            fields = line.rstrip("\n").split("\t")
+            if len(fields) < 9:
+                raise ValueError(
+                    f"{gff_path}:{line_number}: expected 9 GFF3 columns"
+                )
+            try:
+                feature_start = int(fields[3]) - 1
+                feature_end = int(fields[4])
+            except ValueError as error:
+                raise ValueError(
+                    f"{gff_path}:{line_number}: GFF start/end must be integers"
+                ) from error
+            if feature_start < 0 or feature_end <= feature_start:
+                raise ValueError(f"{gff_path}:{line_number}: invalid GFF interval")
+
+            for rank, segment, conservation in ranked_segments:
+                segment_seqid, segment_start, segment_end, cluster_id = segment
+                if segment_seqid != fields[0]:
+                    continue
+                overlap_start = max(segment_start, feature_start)
+                overlap_end = min(segment_end, feature_end)
+                if overlap_start >= overlap_end:
+                    continue
+                writer.writerow(
+                    [
+                        rank,
+                        segment_seqid,
+                        segment_start + 1,
+                        segment_end,
+                        conservation,
+                        cluster_id,
+                        *fields[:3],
+                        feature_start + 1,
+                        feature_end,
+                        *fields[5:9],
+                        overlap_end - overlap_start,
+                    ]
+                )
+                feature_count += 1
+
+    return feature_count
+
 def plot_conservation(reference, bed_path, output_path):
     reference_segments, cluster_genomes = load_reference_segments(
         bed_path, reference
@@ -87,12 +181,16 @@ def plot_conservation(reference, bed_path, output_path):
     events_by_chrom, chrom_lengths = make_events(
         reference_segments, cluster_genomes
     )
+    max_reference_conservation = max(
+        (len(cluster_genomes[cluster_id]) for _, _, _, cluster_id in reference_segments),
+        default=0,
+    )
 
     chromosomes = sorted(events_by_chrom, key=natural_key)
     figure, axes = plt.subplots(
-        len(chromosomes),
         1,
-        figsize=(14, max(3, 2.6 * len(chromosomes))),
+        len(chromosomes),
+        figsize=(max(14, 3.2 * len(chromosomes)), 4.5),
         sharey=True,
         squeeze=False,
         layout="constrained",
@@ -114,6 +212,9 @@ def plot_conservation(reference, bed_path, output_path):
         bar_widths = [
             right - left for left, right in zip(coordinates, coordinates[1:])
         ]
+        chrom_length = chrom_lengths[chrom]
+        axis.set_xlim(0, chrom_length / 1_000_000)
+        figure.canvas.draw()
         axis.bar(
             coordinates[:-1],
             counts[:-1],
@@ -121,14 +222,29 @@ def plot_conservation(reference, bed_path, output_path):
             align="edge",
             color="#187c72",
             linewidth=0,
+            rasterized=True,
         )
-        chrom_length = chrom_lengths[chrom]
-        axis.set_xlim(0, chrom_length / 1_000_000)
+        narrow_centers = []
+        narrow_heights = []
+        for left, width, count in zip(coordinates, bar_widths, counts):
+            left_px = axis.transData.transform((left, 0))[0]
+            right_px = axis.transData.transform((left + width, 0))[0]
+            if abs(right_px - left_px) < 1:
+                narrow_centers.append(left + width / 2)
+                narrow_heights.append(count)
+        if narrow_centers:
+            axis.vlines(
+                narrow_centers,
+                0,
+                narrow_heights,
+                color="#187c72",
+                linewidth=0.8,
+                rasterized=True,
+            )
         axis.set_title(chrom, loc="left", fontsize=10)
         axis.set_xlabel("Coordinate (Mb)")
         axis.yaxis.set_major_locator(MaxNLocator(integer=True))
         axis.set_ylim(bottom=0)
-        axis.grid(axis="y", color="#d9e2e1", linewidth=0.7)
         axis.spines[["top", "right"]].set_visible(False)
 
     figure.supylabel("Genomes with a detected segment")
@@ -141,9 +257,10 @@ def plot_conservation(reference, bed_path, output_path):
         f"Wrote {output_path} from {bed_path} "
         f"({len(reference_segments)} reference segments, "
         f"{len(chrom_lengths)} chromosomes, "
-        f"{max(map(len, cluster_genomes.values()))} genomes max)",
+        f"{max_reference_conservation} genomes max on reference)",
         file=sys.stderr,
     )
+    return reference_segments, cluster_genomes
 
 def main():
     parser = argparse.ArgumentParser(
@@ -153,14 +270,32 @@ def main():
     parser.add_argument(
         "-b", "--bed", type=Path, required=True, help="input SegTrace BED"
     )
+    parser.add_argument(
+        "-g", "--gff", type=Path, help="GFF3 annotation for overlapping features"
+    )
     parser.add_argument("-o", "--output", type=Path, help="output plot path")
     arguments = parser.parse_args()
 
     try:
         output_path = arguments.output or Path(
-            "conservation_plot", f"{arguments.reference}_segment_count.png"
+            "conservation_plot", f"{arguments.reference}_segment_count.svg"
         )
-        plot_conservation(arguments.reference, arguments.bed, output_path)
+        reference_segments, cluster_genomes = plot_conservation(
+            arguments.reference, arguments.bed, output_path
+        )
+        if arguments.gff:
+            segments = top_conserved_segments(reference_segments, cluster_genomes)
+            feature_output = output_path.with_name(
+                f"{output_path.stem}_top5_features.tsv"
+            )
+            feature_count = write_overlapping_features(
+                arguments.gff, segments, cluster_genomes, feature_output
+            )
+            print(
+                f"Wrote {feature_output} from top {len(segments)} conserved segments "
+                f"({feature_count} overlapping features)",
+                file=sys.stderr,
+            )
     except (FileNotFoundError, ValueError) as error:
         parser.error(str(error))
 

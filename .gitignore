@@ -23,6 +23,7 @@ segtrace_validation/
 sweep_benchmark/
 conservation_plot/
 gene_birth/*
-*gff
+*gff*
 *fna
 *.files
+*last*
